@@ -398,15 +398,28 @@ pub enum MachineRegisterGeometryState {
     Malformed,
 }
 
-/// `CallReads` built and raw call sites stated by contexts made, in a `work-meter` build (D436).
-pub fn call_reads_built() -> Option<(u64, u64)> {
+/// The process's call-read work, in a `work-meter` build (D436, D432).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallReadsMeter {
+    /// `CallReads` built for the column.
+    pub built: u64,
+    /// Raw call sites stated by contexts made, and one unsited row each.
+    pub rows: u64,
+    /// Rows built for a reloaded format.
+    pub reloaded: u64,
+    /// What `reloaded` may reach: each walk round's reloads and each settle's formats.
+    pub reload_bound: u64,
+}
+
+/// The process's [`CallReadsMeter`]; `None` outside a `work-meter` build.
+pub fn call_reads_built() -> Option<CallReadsMeter> {
     #[cfg(feature = "work-meter")]
     return Some(meter::counts());
     #[cfg(not(feature = "work-meter"))]
     None
 }
 
-mod meter {
+pub(crate) mod meter {
     #[cfg(feature = "work-meter")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -414,23 +427,50 @@ mod meter {
     static BUILT: AtomicU64 = AtomicU64::new(0);
     #[cfg(feature = "work-meter")]
     static SITES: AtomicU64 = AtomicU64::new(0);
-
     #[cfg(feature = "work-meter")]
-    pub(super) fn counts() -> (u64, u64) {
-        (BUILT.load(Ordering::Relaxed), SITES.load(Ordering::Relaxed))
+    static RELOADED: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "work-meter")]
+    static RELOAD_BOUND: AtomicU64 = AtomicU64::new(0);
+
+    /// Each meter read after the one it bounds, so a concurrent build never reads past its bound.
+    #[cfg(feature = "work-meter")]
+    pub(super) fn counts() -> super::CallReadsMeter {
+        let count = |meter: &AtomicU64| meter.load(Ordering::SeqCst);
+        let (built, reloaded) = (count(&BUILT), count(&RELOADED));
+        let (rows, reload_bound) = (count(&SITES), count(&RELOAD_BOUND));
+        super::CallReadsMeter {
+            built,
+            rows,
+            reloaded,
+            reload_bound,
+        }
+    }
+
+    /// `reloads` more rows a walk round or a settle may build for reloaded formats, counted first.
+    #[inline]
+    pub(crate) fn reloads_allowed(_reloads: usize) {
+        #[cfg(feature = "work-meter")]
+        RELOAD_BOUND.fetch_add(_reloads as u64, Ordering::SeqCst);
+    }
+
+    /// A row stated for a reloaded format: one per reload a walk round decides, one per settle.
+    #[inline]
+    pub(super) fn reloaded() {
+        #[cfg(feature = "work-meter")]
+        RELOADED.fetch_add(1, Ordering::SeqCst);
     }
 
     #[inline]
     pub(super) fn built() {
         #[cfg(feature = "work-meter")]
-        BUILT.fetch_add(1, Ordering::Relaxed);
+        BUILT.fetch_add(1, Ordering::SeqCst);
     }
 
     /// A context's rows: each raw call site and the unsited one.
     #[inline]
     pub(super) fn made(_sites: usize) {
         #[cfg(feature = "work-meter")]
-        SITES.fetch_add(_sites as u64 + 1, Ordering::Relaxed);
+        SITES.fetch_add(_sites as u64 + 1, Ordering::SeqCst);
     }
 }
 
@@ -508,6 +548,8 @@ pub struct SourceMachineContext {
     /// What the read-only format each printf call's own block passes consumes, by the call's
     /// instruction (D409).
     format_tails: BTreeMap<u64, r2abi::format::PrintfConsumedArguments>,
+    /// The literal addresses the program never writes, ascending: a format there is read-only.
+    immutable_literals: Box<[u64]>,
     /// The image's data objects whose type is a laid-out struct, with that graph (D348).
     data_structs: Option<std::sync::Arc<DataStructs>>,
     /// What each raw call site reads, stated once the facts it reads are bound (D436).
@@ -529,6 +571,8 @@ struct CallReadsColumn {
     /// The calls' model's row in `every`.
     calls: Option<usize>,
     bound: bool,
+    /// The rows of the sites whose reloaded format the frame walk bound are restated (D432).
+    settled: bool,
 }
 
 /// Data objects the image graph types as a struct of known size, by address.
@@ -901,6 +945,7 @@ impl SourceMachineContext {
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
             format_tails: BTreeMap::new(),
+            immutable_literals: Box::default(),
             data_structs: None,
             call_reads: CallReadsColumn::default(),
         }
@@ -1438,7 +1483,37 @@ impl SourceMachineContext {
             every: every.into(),
             calls,
             bound: true,
+            settled: false,
         };
+    }
+
+    /// Whether the rows of reloaded formats are restated: no frame walk reads them after (D432).
+    pub(crate) const fn reloads_settled(&self) -> bool {
+        self.call_reads.settled
+    }
+
+    /// Bind each site's format the frame walk proved its reloaded place holds, and restate those
+    /// rows (D432). O(R x (log C + reads)) for R reloads.
+    pub(crate) fn settle_reloaded_formats(&mut self, formats: &BTreeMap<u64, u64>) {
+        debug_assert!(
+            self.call_reads.bound && !self.call_reads.settled,
+            "reloads settled before the bind or twice"
+        );
+        self.call_reads.settled = true;
+        meter::reloads_allowed(formats.len());
+        for (instruction, literal) in formats {
+            let Some(tail) = self.literal_tail(*literal) else {
+                continue;
+            };
+            let column = &self.call_reads.sites;
+            let at = column.binary_search_by_key(instruction, |row| row.0);
+            meter::reloaded();
+            let reads = self.stated_call_reads_with(Some(*instruction), Some(&tail));
+            self.format_tails.insert(*instruction, tail);
+            if let Ok(at) = at {
+                self.call_reads.sites[at].1.0 = reads;
+            }
+        }
     }
 
     /// The column's row of the call at `instruction`; the unsited row for no raw site. O(log C).
@@ -1480,6 +1555,28 @@ impl SourceMachineContext {
     /// interface, else every location; none where the machine names no convention.
     fn stated_call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
         meter::built();
+        let tail = instruction.and_then(|at| self.format_tails.get(&at));
+        self.stated_call_reads_with(instruction, tail)
+    }
+
+    /// What the call at `instruction` reads were its printf format the literal at `literal` (D432):
+    /// the row `settle_reloaded_formats` states. O(reads).
+    pub(crate) fn reloaded_call_reads(
+        &self,
+        instruction: u64,
+        literal: u64,
+    ) -> Option<crate::call_reads::CallReads> {
+        meter::reloaded();
+        let tail = self.literal_tail(literal)?;
+        self.stated_call_reads_with(Some(instruction), Some(&tail))
+    }
+
+    /// [`Self::stated_call_reads`] under the printf format `tail` consumes.
+    fn stated_call_reads_with(
+        &self,
+        instruction: Option<u64>,
+        tail: Option<&r2abi::format::PrintfConsumedArguments>,
+    ) -> Option<crate::call_reads::CallReads> {
         let identity = instruction.and_then(|instruction| self.raw_call_site_at(instruction));
         let target = identity
             .map(SourceCallSiteIdentity::target)
@@ -1501,7 +1598,7 @@ impl SourceMachineContext {
         // A printf reads its fixed parameters, the operands its own format counts and the count
         // register, in registers and on the stack (D409, D433).
         let counted = (interface.zip(model))
-            .zip(instruction.and_then(|at| self.format_tails.get(&at)))
+            .zip(tail)
             .and_then(|((interface, model), tail)| counted_reads(interface, model, tail));
         if let Some(reads) = counted {
             return Some(reads.writing(writes).importing(import));
@@ -1627,20 +1724,32 @@ impl SourceMachineContext {
         &self,
         instruction: u64,
         origins: &BlockOrigins,
-        immutable: &[u64],
     ) -> Option<r2abi::format::PrintfConsumedArguments> {
         let register = self.format_register(instruction)?;
         let varnode = r2il::Varnode::register(register.offset, register.size);
-        let at = origins.of(&varnode)?.constant()?;
-        immutable.binary_search(&at).ok()?;
+        self.literal_tail(origins.of(&varnode)?.constant()?)
+    }
+
+    /// What the format at `at` consumes, where the program never writes it. O(log L + format).
+    fn literal_tail(&self, at: u64) -> Option<r2abi::format::PrintfConsumedArguments> {
+        self.immutable_literals.binary_search(&at).ok()?;
         let text = self.source_string_literal(at)?;
         r2abi::format::printf_consumed_arguments(text).ok()
+    }
+
+    /// The register a cited printf at `instruction` takes its format in, where its own block folds
+    /// no literal there: the frame walk's reload candidate (D432). O(log sites).
+    pub(crate) fn reloaded_format_register(&self, instruction: u64) -> Option<CanonicalStorageId> {
+        (!self.format_tails.contains_key(&instruction))
+            .then(|| self.format_register(instruction))
+            .flatten()
     }
 
     /// Fold each cited printf's format in its own block and keep what a read-only one consumes (D409),
     /// stepping a block only up to its last site: O(C log C + those operations) (D437).
     pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
         self.feeding_call_reads();
+        self.immutable_literals = immutable.into();
         let mut sites = (self.raw_call_sites.iter())
             .filter(|(instruction, _)| self.format_register(**instruction).is_some())
             .map(|(instruction, site)| (site.block, site.op, *instruction))
@@ -1659,7 +1768,7 @@ impl SourceMachineContext {
                 // A site is the one call its instruction lifts to (`collect_raw_call_site_identities`).
                 let call = block.ops.get(at).is_some_and(R2ILOp::is_call)
                     && block.instruction_of(at) == Some(instruction);
-                let consumed = || self.folded_format_tail(instruction, &origins, immutable);
+                let consumed = || self.folded_format_tail(instruction, &origins);
                 tails.extend(
                     call.then(consumed)
                         .flatten()

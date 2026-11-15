@@ -636,6 +636,12 @@ impl Prior {
     }
 }
 
+/// The literal each reloaded printf format holds, as the build's frame walk decided it (D432).
+fn reloaded_formats(function: &SSAFunction) -> &BTreeMap<u64, u64> {
+    static NONE: BTreeMap<u64, u64> = BTreeMap::new();
+    (function.frame_points()).map_or(&NONE, crate::semantic::FramePoints::reloaded_formats)
+}
+
 /// The direct targets of the calls nothing states whose writes kept a loaded place (D376).
 /// `O(calls x log sites)`.
 fn rewriting_callees(function: &SSAFunction, context: &SourceMachineContext) -> BTreeSet<u64> {
@@ -3038,6 +3044,8 @@ impl TrustedSsaArtifact {
                 // (boundary constants, lane projections, demand) and derives
                 // its facts afresh from the rewritten function.
                 let preliminary = built.insert(preliminary);
+                // The rows of the formats its walk bound, before anything reads them (D432).
+                provisional_machine_context.settle_reloaded_formats(reloaded_formats(preliminary));
                 let preliminary_prep = match held {
                     Some(held) => held,
                     None => match preliminary.provisional_prep_facts(control) {
@@ -3223,6 +3231,7 @@ impl TrustedSsaArtifact {
         if function.entry != source.image().entry_address() {
             return Err(malformed_ssa_input());
         }
+        machine_context.settle_reloaded_formats(reloaded_formats(&function));
         // A build an exhausted pass marked is not offered again.
         let reuse = reuse.filter(|_| function.exhausted().is_none());
         control.poll()?;

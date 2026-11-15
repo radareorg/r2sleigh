@@ -214,3 +214,55 @@ transfer that kills nothing, and is deleted with its tests. The tests
 `reaching_rewrites_is_the_kill_aware_union_over_every_path` (200 random graphs
 against a path search) and `reaching_rewrites_grows_linearly_in_the_blocks`
 (a chain and a cycle) replace them.
+
+### D432 as built: a reloaded format is its stored literal (2026-11-15)
+
+Fact F (round-6 ruling, section 2): a cited printf site whose format register
+is a load of frame place `q` takes literal `L` when every store to `q` stores
+the constant `L` at `q`'s one width, a store reaches the load on every path
+from entry, `q` is eligible apart from `rewritten`, and no covering call write
+reaches the load.
+
+- Candidates (`reloads`, per round, body facts only): a non-tail call whose
+  site the machine context names as a cited printf its own block folds no
+  literal for (`reloaded_format_register`); the `CallUse` of that register
+  before the call; the load defining it (`Definitions::load`) in the call's
+  block; every store to its place a constant (`Definitions::constant`) and one
+  constant. `O(C x u + A log C)`.
+- Gate (`conditional`): the place is a candidate no overlap, save,
+  declaration, handed address or escape keeps (`kept`, shared with
+  `eligible`), the entry is not re-entered, and the context states the call's
+  counted row for `L` (`reloaded_call_reads`: `L` immutable, its text a
+  literal, `counted_reads` places it). `handed` keeps the pre-verdict read
+  area, a superset.
+- Keys: `P` loaded keys, then one unset key per gated place. The root enters
+  with every unset key set; a write covering `q` sets it; an exact store of
+  `q` clears it. Unset bit clear at the load is "a store reached on every path
+  and no covering write after it".
+- Conditional gen: the call writes `bounded | (unset at its load ? extra : 0)`,
+  `extra` its every-location spans less `bounded`. Monotone: more set bits
+  give more written bits. A block holding such a call is evaluated event by
+  event; every other block keeps its `(gen, kill)` pair.
+- Solve: the same `fixpoint::sparse` from 0, so the least fixpoint. Height
+  `P + Q`; a pass costs `O((B + E)(P + Q) / 64 + R (P + Q) / 64)` for `R`
+  conditional calls. Soundness of the least fixpoint is the ruling's
+  induction: the first bounded site that writes past its counted area read
+  its unset bit clear, so every earlier call kept `q` and the register held
+  `L`.
+- Verdicts: `FramePoints::formats` (instruction to `L`). `FrameWalk::restate`
+  refuses a restatement whose verdicts move. The builder settles them into the
+  context (`settle_reloaded_formats`) after the preliminary build and after
+  the final one: the site's `format_tails` entry and its column row restated
+  through the same `stated_call_reads`. Nothing between the walk and the
+  settle reads a row (`fold_loads`, the three decisions and `prepare` read
+  none); a walk after the settle is a debug assertion.
+- Meter: a reloaded row (one per gated reload per decided round, one per
+  settle) counts as `reloaded` in `call_reads_built`, apart from the column's
+  one build per site that D436's gate holds. `reload_bound` counts each
+  decided round's reloads and each settle's formats before their rows;
+  `a_reloaded_format_builds_one_row_per_reload_a_round_decides` asserts
+  `reloaded <= reload_bound` (16 of 16 on its fixture; a row restated at every
+  site, every round, reads 52 of 16).
+- Test: `reaching_rewrites_with_reloads_is_their_least_path_solution`, 300
+  random graphs with a seed and reloads, against the path search iterated from
+  no unset reload to its fixpoint.

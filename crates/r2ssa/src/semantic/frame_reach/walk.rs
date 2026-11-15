@@ -111,6 +111,9 @@ pub struct FramePoints {
     pub(crate) own_calls: BTreeSet<u64>,
     /// The places slot promotion took out of memory, by entry offset (D389).
     pub(crate) promoted: BTreeSet<i64>,
+    /// Each cited printf whose format register a reload of a clean place gives, by instruction:
+    /// the literal every store there writes (D432).
+    pub(crate) formats: BTreeMap<u64, u64>,
 }
 
 /// One call's or tail transfer's area base.
@@ -334,6 +337,11 @@ impl FramePoints {
         &self.rewritten
     }
 
+    /// The literal each reloaded printf format holds, by the call's instruction (D432).
+    pub const fn reloaded_formats(&self) -> &BTreeMap<u64, u64> {
+        &self.formats
+    }
+
     /// What a restatement keeps the canary's decision on: whether a point is unplaced, and every
     /// offset an escaped or opaque address points at (`names`).
     fn named(&self) -> (bool, BTreeSet<i64>) {
@@ -474,8 +482,16 @@ pub(crate) struct Evidence<'a> {
 }
 
 impl<'a> Evidence<'a> {
-    pub(crate) const fn of(context: &'a SourceMachineContext) -> Self {
+    pub(crate) fn of(context: &'a SourceMachineContext) -> Self {
+        debug_assert!(!context.reloads_settled(), "a walk reads settled rows");
         Self { context }
+    }
+
+    /// What the call at `instruction` writes were its format the literal at `literal` (D432).
+    fn reloaded_writes(&self, instruction: u64, literal: u64) -> Option<Vec<(i64, i64)>> {
+        self.context
+            .reloaded_call_reads(instruction, literal)?
+            .writes
     }
 
     fn upward(&self, (target, position): (u64, usize)) -> bool {
@@ -526,7 +542,25 @@ struct RoundTable {
     accesses: Accesses,
     carriers: BTreeSet<i64>,
     places: PlaceFacts,
+    /// The cited printf sites whose format a load of one place gives (D432).
+    reloads: Vec<Reload>,
 }
+
+/// A cited printf whose format register a load of `place` in the call's own block gives, every
+/// store to `place` writing `literal` at its one width (D432).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reload {
+    /// The call's index in `WalkSite::calls`.
+    call: usize,
+    /// The load's index in the call's block.
+    load: usize,
+    place: i64,
+    width: u32,
+    literal: u64,
+}
+
+/// A reload the gate passed, with the area its call writes were its format the stored literal.
+type Gated = (Reload, Vec<(i64, i64)>);
 
 /// What every round of one walk shares, none of it a callee's.
 #[derive(Debug)]
@@ -544,6 +578,8 @@ struct WalkSite {
     successors: Csr<Node, Node>,
     predecessors: Csr<Node, Node>,
     order: Vec<Node>,
+    /// The entry block's node: where no store has yet reached a place.
+    root: Option<Node>,
 }
 
 impl WalkSite {
@@ -566,8 +602,10 @@ impl WalkSite {
         let order = (func.block_addrs().iter())
             .filter_map(|block| node_of(&blocks, *block))
             .collect();
+        let root = node_of(&blocks, func.root());
         Self {
             entry: func.entry,
+            root,
             reentered: func.cfg().has_entry_edge(),
             spent: spent(machine),
             blocks,
@@ -620,9 +658,20 @@ pub(crate) struct FrameWalk {
     decided: Decided,
     /// The canary's projection of the decided points (`FramePoints::named`).
     named: (bool, BTreeSet<i64>),
+    /// The reloaded formats decided, which the context settles (D432).
+    formats: BTreeMap<u64, u64>,
 }
 
 impl FrameWalk {
+    /// The walk that decided `points`: what a restatement compares against.
+    fn of(points: &FramePoints, decided: Decided) -> Self {
+        Self {
+            decided,
+            named: points.named(),
+            formats: points.formats.clone(),
+        }
+    }
+
     /// The last round's exact accesses, by place, for promotion's rewrite.
     pub(crate) fn accesses(&self) -> Option<&Accesses> {
         match &self.decided {
@@ -665,7 +714,7 @@ impl FrameWalk {
             (evidence, &mut steps),
         );
         control.frame_decided(steps);
-        (points.named() == self.named).then_some(points)
+        (points.named() == self.named && points.formats == self.formats).then_some(points)
     }
 }
 
@@ -749,8 +798,107 @@ fn decide_points(
             false => pair.1.1.as_deref(),
         })
         .collect::<Vec<_>>();
-    points.rewritten = rewritten(site, (&table.bases, &writes), &table.accesses);
+    let reloads = conditional(table, site, &points, evidence);
+    let (rewritten, formats) = rewritten(site, (&table.bases, &writes), &table.accesses, &reloads);
+    (points.rewritten, points.formats) = (rewritten, formats);
     points
+}
+
+/// The reloads whose place nothing but a call's write keeps in memory, each with the area its call
+/// writes were its format the stored literal (D432). `O(R x reads)`.
+fn conditional(
+    table: &RoundTable,
+    site: &WalkSite,
+    points: &FramePoints,
+    evidence: &Evidence<'_>,
+) -> Vec<Gated> {
+    let clean = |reload: &Reload| {
+        let kept = kept(points, &table.places, reload.place);
+        let entered = site.root.is_some() && !site.reentered;
+        entered && kept.is_some_and(|(width, kept)| width == reload.width && !kept)
+    };
+    crate::machine_context::meter::reloads_allowed(table.reloads.len());
+    (table.reloads.iter().filter(|reload| clean(reload)))
+        .filter_map(|reload| {
+            let instruction = site.calls[reload.call].instruction?;
+            Some((
+                *reload,
+                evidence.reloaded_writes(instruction, reload.literal)?,
+            ))
+        })
+        .collect()
+}
+
+/// A candidate place's width, and whether anything but a call's write keeps it in memory: an
+/// overlap, a save, a declaration, a handed address or an escape; none for no candidate.
+fn kept(points: &FramePoints, places: &PlaceFacts, offset: i64) -> Option<(u32, bool)> {
+    let bits = places.candidates.get(&offset)?;
+    let handed = points.handed().contains(&offset);
+    let reached = points.reaches(offset, &places.saves);
+    let kept = bits.overlaps || bits.save || bits.declared || handed || reached;
+    Some((bits.width, kept))
+}
+
+/// Each cited printf whose format register its own block loads from one place, every store to
+/// which writes one constant at the place's one width (D432). `O(C x u + A log C)`.
+fn reloads(
+    (func, defs): (&SSAFunction, &Definitions),
+    machine: &SourceMachineContext,
+    site: &WalkSite,
+    accesses: &Accesses,
+) -> Vec<Reload> {
+    let format_load = |call: &CallArguments| {
+        let register = machine.reloaded_format_register(call.instruction?)?;
+        let ops = func.get_block(call.at.0)?.ops();
+        let uses = (ops.get(..call.at.1)?.iter().rev()).map_while(|op| match op {
+            SSAOp::CallUse { src, storage } => Some((*src, *storage)),
+            _ => None,
+        });
+        let (src, _) = uses.into_iter().find(|(_, storage)| *storage == register)?;
+        let (load, _, width) = defs.load(func, src)?;
+        (width == register.size).then_some(load)
+    };
+    let mut wanted = (site.calls.iter().enumerate())
+        .filter(|(_, call)| !call.tail)
+        .filter_map(|(index, call)| Some((format_load(call)?, index)))
+        .collect::<Vec<_>>();
+    wanted.sort_unstable();
+    let stored = |access: &Access| match func.get_block(access.block)?.ops().get(access.index)? {
+        SSAOp::Store { val, .. } => defs.constant(func, *val),
+        _ => None,
+    };
+    let mut found = Vec::new();
+    for (place, list) in accesses.iter().filter(|_| !wanted.is_empty()) {
+        let width = list.first().map_or(0, |access| access.width);
+        let literals = (list.iter().filter(|access| access.store))
+            .map(stored)
+            .collect::<Option<BTreeSet<_>>>();
+        let one = list.iter().all(|access| access.width == width);
+        let Some(&literal) = literals
+            .filter(|set| set.len() == 1 && one)
+            .as_ref()
+            .and_then(BTreeSet::first)
+        else {
+            continue;
+        };
+        for access in list.iter().filter(|access| !access.store) {
+            let from = wanted.partition_point(|(op, _)| *op < access.op);
+            for (_, call) in wanted[from..].iter().take_while(|(op, _)| *op == access.op) {
+                let (block, at) = site.calls[*call].at;
+                found.extend(
+                    (access.block == block && access.index < at).then_some(Reload {
+                        call: *call,
+                        load: access.index,
+                        place: *place,
+                        width,
+                        literal: literal.cast_unsigned(),
+                    }),
+                );
+            }
+        }
+    }
+    found.sort_unstable_by_key(|reload| reload.call);
+    found
 }
 
 /// The last round's points settled: the no-carrier round's absorbed, a reentered frame whole, and
@@ -795,7 +943,7 @@ fn eligible(points: &FramePoints, places: &PlaceFacts, site: &WalkSite) -> BTree
             save,
             declared,
         } = *bits;
-        if overlaps || save || declared || handed || reached || rewritten {
+        if kept(points, places, *offset).is_none_or(|(_, kept)| kept) || rewritten {
             r2il::refusal_evidence!(
                 "promote-stack-slot",
                 "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {save}, declared {declared}, handed {handed}, rewritten {rewritten}, reached {reached}",
@@ -822,18 +970,17 @@ fn walk_at_entry<C: SsaWorkControl + ?Sized>(
     let unplaced = points.unplaced();
     let points = settle(points, &promoted, None, &site, (evidence, &mut steps));
     control.frame_decided(steps);
-    let walk = FrameWalk {
-        named: points.named(),
-        decided: Decided::Rounds(Box::new(HeldRounds {
-            site,
-            rounds: vec![HeldRound {
-                table,
-                promoted: promoted.clone(),
-                unplaced,
-            }],
-            no_carrier: None,
-        })),
+    let rounds = vec![HeldRound {
+        table,
+        promoted: promoted.clone(),
+        unplaced,
+    }];
+    let held = HeldRounds {
+        site,
+        rounds,
+        no_carrier: None,
     };
+    let walk = FrameWalk::of(&points, Decided::Rounds(Box::new(held)));
     (walk, points, promoted)
 }
 
@@ -847,10 +994,7 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
     control: &C,
 ) -> (FrameWalk, FramePoints, BTreeMap<i64, u32>) {
     let whole = || {
-        let walk = FrameWalk {
-            decided: Decided::Whole,
-            named: FramePoints::whole_frame().named(),
-        };
+        let walk = FrameWalk::of(&FramePoints::whole_frame(), Decided::Whole);
         (walk, FramePoints::whole_frame(), BTreeMap::new())
     };
     let Some(stack_pointer) = machine.stack_pointer_carrier() else {
@@ -879,6 +1023,7 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
         let walker = Walker::new(body, entry_sp, (&sinks, &site), carried.as_ref());
         let mut table = walker.run(&mut walk_steps);
         table.places = places(&table.accesses);
+        table.reloads = reloads((func, defs), machine, &site, &table.accesses);
         let (points, promoted) = decide(&table, &site, &evidence, &mut steps);
         let unplaced = points.unplaced();
         let no_carrier = (unplaced && carried.as_ref().is_none_or(|carried| !carried.is_empty()))
@@ -917,14 +1062,12 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
             true => BTreeMap::new(),
             false => promoted,
         };
-        let walk = FrameWalk {
-            named: points.named(),
-            decided: Decided::Rounds(Box::new(HeldRounds {
-                site,
-                rounds,
-                no_carrier,
-            })),
+        let held = HeldRounds {
+            site,
+            rounds,
+            no_carrier,
         };
+        let walk = FrameWalk::of(&points, Decided::Rounds(Box::new(held)));
         return (walk, points, promotable);
     }
 }
@@ -944,6 +1087,7 @@ impl RoundTable {
             accesses: Accesses::new(),
             carriers: BTreeSet::new(),
             places: PlaceFacts::default(),
+            reloads: Vec::new(),
         }
     }
 }
@@ -1091,47 +1235,81 @@ fn by_call(calls: &[CallArguments], values: &IdMap<VarId, Value>) -> Vec<CallBas
 /// A call's written area as spans from its pointer; `None` where nothing bounds it.
 type Area<'a> = Option<&'a [(i64, i64)]>;
 
-/// Places a call's write reaches with no exact store of theirs between (D369, D427); invariant,
-/// bound and equivalence in doc/adr-one-ir.md, "Reaching frame writes".
+/// The loaded keys, then one unset key per reloaded place (D432), and what a span covers of them.
+struct Keys {
+    /// One per loaded `(place, width)`, sorted: a load's bit is its key's.
+    loaded: Vec<(i64, u32)>,
+    /// One per reloaded `(place, width)`, sorted, numbered after `loaded`.
+    unset: Vec<(i64, u32)>,
+    /// Each unset key with its place's loaded key.
+    paired: Vec<(usize, usize)>,
+    widest: i64,
+}
+
+impl Keys {
+    fn of(accesses: &Accesses, reloads: &[Gated]) -> Self {
+        let mut loaded = (accesses.iter())
+            .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
+            .filter(|(_, access)| !access.store)
+            .map(|(place, access)| (place, access.width))
+            .collect::<Vec<_>>();
+        loaded.sort_unstable();
+        loaded.dedup();
+        let mut unset = (reloads.iter())
+            .map(|(reload, _)| (reload.place, reload.width))
+            .collect::<Vec<_>>();
+        unset.sort_unstable();
+        unset.dedup();
+        let paired = (unset.iter().enumerate())
+            .filter_map(|(at, key)| Some((loaded.binary_search(key).ok()?, loaded.len() + at)))
+            .collect();
+        let widest = (loaded.iter().map(|(_, width)| i64::from(*width)).max()).unwrap_or(0);
+        Self {
+            loaded,
+            unset,
+            paired,
+            widest,
+        }
+    }
+
+    fn bits(&self) -> usize {
+        self.loaded.len() + self.unset.len()
+    }
+
+    fn loaded(&self, place: i64, width: u32) -> Option<usize> {
+        self.loaded.binary_search(&(place, width)).ok()
+    }
+
+    fn unset(&self, place: i64, width: u32) -> Option<usize> {
+        let at = self.unset.binary_search(&(place, width)).ok()?;
+        Some(self.loaded.len() + at)
+    }
+
+    /// The keys `spans` cover: a loaded key's unset key with it.
+    fn covered(&self, spans: &[(i64, i64)]) -> Vec<u64> {
+        let mut words = covered(&self.loaded, self.widest, spans, self.bits());
+        for (loaded, unset) in &self.paired {
+            if bit(&words, *loaded) {
+                words[unset / 64] |= 1 << (unset % 64);
+            }
+        }
+        words
+    }
+}
+
+/// Places a call's write reaches with no exact store of theirs between (D369, D427), and each
+/// reload's literal where its place holds it (D432); doc/adr-one-ir.md, "Reaching frame writes".
 fn rewritten(
     site: &WalkSite,
     (bases, writes): (&[Option<i64>], &[Area<'_>]),
     accesses: &Accesses,
-) -> BTreeSet<i64> {
-    let every = || accesses.keys().copied().collect();
-    // One key per loaded place and width, sorted: a load's bit is its key's.
-    let mut keys = (accesses.iter())
-        .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
-        .filter(|(_, access)| !access.store)
-        .map(|(place, access)| (place, access.width))
-        .collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys.dedup();
-    let key = |place: i64, width: u32| keys.binary_search(&(place, width)).ok();
-    let widest = keys
-        .iter()
-        .map(|(_, width)| i64::from(*width))
-        .max()
-        .unwrap_or(0);
+    reloads: &[Gated],
+) -> (BTreeSet<i64>, BTreeMap<u64, u64>) {
+    let every = || (accesses.keys().copied().collect(), BTreeMap::new());
+    let keys = Keys::of(accesses, reloads);
     let mut events = IdVec::from_fn(site.blocks.len(), |_: Node| Vec::<(usize, Event)>::new());
-    let calls = (site.calls.iter()).zip(bases).zip(writes);
-    for ((call, base), area) in calls.filter(|((call, _), _)| !call.tail) {
-        let spans = match (base, area) {
-            (None, _) => vec![(i64::MIN, i64::MAX)],
-            // The call's own push and its callee's frame lie below its pointer.
-            (Some(base), Some(area)) => merged(
-                (area.iter())
-                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
-                    .chain([(i64::MIN, *base)]),
-            ),
-            // Unbounded, it is still this frame's: it ends at the entry pointer.
-            (Some(base), None) => merged([(i64::MIN, *base), (*base, 0)].into_iter()),
-        };
-        // Default deny: a call outside the numbered blocks may rewrite every loaded place.
-        let Some(node) = site.node(call.at.0) else {
-            return every();
-        };
-        events[node].push((call.at.1, Event::Write(covered(&keys, widest, &spans))));
+    if !call_events(site, (bases, writes), (&keys, reloads), &mut events) {
+        return every();
     }
     let mut loads = Vec::new();
     let mut rewritten = BTreeSet::new();
@@ -1141,7 +1319,7 @@ fn rewritten(
         list.iter().map(move |access| (*place, one, access))
     });
     for (place, one, access) in each {
-        let Some(at) = key(place, access.width) else {
+        let Some(at) = keys.loaded(place, access.width) else {
             continue;
         };
         let Some(node) = site.node(access.block) else {
@@ -1159,14 +1337,86 @@ fn rewritten(
                 Event::Load(at, loads.len() - 1)
             }
         };
+        if let (Event::Kill(_), Some(unset)) = (&event, keys.unset(place, access.width)) {
+            events[node].push((access.index, Event::Kill(unset)));
+        }
         events[node].push((access.index, event));
     }
+    let mut seed = vec![0u64; keys.bits().div_ceil(64)];
+    fill(&mut seed, keys.loaded.len(), keys.bits());
     let solve = (site.order.as_slice(), &site.successors, &site.predecessors);
-    let Some(reached) = reaching_rewrites(solve, &mut events, keys.len()) else {
+    let entry = (keys.bits(), (site.root, seed.as_slice()));
+    let Some(solved) = reaching_rewrites(solve, &mut events, entry, reloads.len()) else {
         return every();
     };
-    rewritten.extend((loads.iter().zip(reached)).filter_map(|(place, hit)| hit.then_some(*place)));
-    rewritten
+    let reached = (loads.iter()).zip(solved.reached);
+    rewritten.extend(reached.filter_map(|(place, hit)| hit.then_some(*place)));
+    let held = (reloads.iter()).zip(solved.held).filter(|(_, held)| *held);
+    let formats = held.filter_map(|((reload, _), _)| {
+        let instruction = site.calls[reload.call].instruction?;
+        Some((instruction, reload.literal))
+    });
+    (rewritten, formats.collect())
+}
+
+/// Each non-tail call's write, a reload's as its format load and its conditional write (D432);
+/// false where a call lies outside the numbered blocks, which may rewrite every loaded place.
+fn call_events(
+    site: &WalkSite,
+    (bases, writes): (&[Option<i64>], &[Area<'_>]),
+    (keys, reloads): (&Keys, &[Gated]),
+    events: &mut IdVec<Node, Vec<(usize, Event)>>,
+) -> bool {
+    let calls = (site.calls.iter()).zip(bases).zip(writes).enumerate();
+    for (index, ((call, base), area)) in calls.filter(|(_, ((call, _), _))| !call.tail) {
+        let spans = |area: Area<'_>| match (base, area) {
+            (None, _) => vec![(i64::MIN, i64::MAX)],
+            // The call's own push and its callee's frame lie below its pointer.
+            (Some(base), Some(area)) => merged(
+                (area.iter())
+                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
+                    .chain([(i64::MIN, *base)]),
+            ),
+            // Unbounded, it is still this frame's: it ends at the entry pointer.
+            (Some(base), None) => merged([(i64::MIN, *base), (*base, 0)].into_iter()),
+        };
+        let Some(node) = site.node(call.at.0) else {
+            return false;
+        };
+        let slot = (reloads
+            .binary_search_by_key(&index, |(reload, _)| reload.call)
+            .ok())
+        .filter(|_| base.is_some());
+        let unset = slot.and_then(|slot| {
+            let (reload, bounded) = &reloads[slot];
+            Some((
+                slot,
+                reload.load,
+                bounded,
+                keys.unset(reload.place, reload.width)?,
+            ))
+        });
+        let event = match unset {
+            Some((slot, load, bounded, unset)) => {
+                let (bounded, whole) = (
+                    keys.covered(&spans(Some(bounded))),
+                    keys.covered(&spans(*area)),
+                );
+                let extra = (whole.iter().zip(&bounded))
+                    .map(|(whole, bounded)| whole & !bounded)
+                    .collect();
+                events[node].push((load, Event::Format(slot, unset)));
+                Event::Reloaded {
+                    slot,
+                    bounded,
+                    extra,
+                }
+            }
+            None => Event::Write(keys.covered(&spans(*area))),
+        };
+        events[node].push((call.at.1, event));
+    }
+    true
 }
 
 /// One event of a block, by its index there.
@@ -1178,12 +1428,20 @@ enum Event {
     Kill(usize),
     /// A load of the key, numbered.
     Load(usize, usize),
+    /// Reload `slot`'s format load: its unset key, read for the call after it (D432).
+    Format(usize, usize),
+    /// Reload `slot`'s call: it writes `bounded`, and `extra` too where its load read the place unset.
+    Reloaded {
+        slot: usize,
+        bounded: Vec<u64>,
+        extra: Vec<u64>,
+    },
 }
 
-/// The keys `spans` overlap, as words: each span's keys found by binary search and filled by
-/// word. `O(S (log P + P / 64 + W))` for `W` keys starting below a span's low end.
-fn covered(keys: &[(i64, u32)], widest: i64, spans: &[(i64, i64)]) -> Vec<u64> {
-    let mut words = vec![0u64; keys.len().div_ceil(64)];
+/// The keys `spans` overlap, as words over `bits` keys: each span's keys found by binary search and
+/// filled by word. `O(S (log P + P / 64 + W))` for `W` keys starting below a span's low end.
+fn covered(keys: &[(i64, u32)], widest: i64, spans: &[(i64, i64)], bits: usize) -> Vec<u64> {
+    let mut words = vec![0u64; bits.div_ceil(64)];
     for (low, high) in spans {
         let from = keys.partition_point(|(place, _)| *place <= low.saturating_sub(widest));
         let inside = keys.partition_point(|(place, _)| place < low);
@@ -1221,33 +1479,48 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// Whether a write reaches each numbered load with no kill between: `out = (in & !kill) | gen` on
-/// `fixpoint::sparse` in reverse postorder; `None` where the driver refuses (doc/adr-one-ir.md).
+/// What [`reaching_rewrites`] solves: whether a write reaches each numbered load, and whether each
+/// reload's place held its literal at its load.
+#[derive(Debug, PartialEq, Eq)]
+struct Solved {
+    reached: Vec<bool>,
+    held: Vec<bool>,
+}
+
+/// The least solution of each block's events on `fixpoint::sparse` in reverse postorder, the root
+/// entered with `seed`; `None` where the driver refuses (doc/adr-one-ir.md, "D432 as built").
 fn reaching_rewrites(
     (order, successors, predecessors): (&[Node], &Csr<Node, Node>, &Csr<Node, Node>),
     events: &mut IdVec<Node, Vec<(usize, Event)>>,
-    keys: usize,
-) -> Option<Vec<bool>> {
+    (keys, (root, seed)): (usize, (Option<Node>, &[u64])),
+    slots: usize,
+) -> Option<Solved> {
     let words = keys.div_ceil(64);
     let mut loads = 0;
-    let gen_kill = IdVec::from_fn(events.len(), |node: Node| {
+    let transfer = IdVec::from_fn(events.len(), |node: Node| {
         let list = &mut events[node];
-        list.sort_unstable_by_key(|(index, _)| *index);
+        list.sort_by_key(|(index, _)| *index);
         let numbered = list.iter().filter_map(|(_, event)| match event {
             Event::Load(_, number) => Some(number + 1),
             _ => None,
         });
         loads = numbered.fold(loads, usize::max);
-        block_transfer(list, words)
+        let conditional = (list.iter()).any(|(_, event)| matches!(event, Event::Reloaded { .. }));
+        (!conditional).then(|| block_transfer(list, words))
     });
     let entering = |node: Node, cells: &IdMap<Node, Vec<u64>>| {
         let mut state = vec![0u64; words];
+        if root == Some(node) {
+            or_into(&mut state, seed);
+        }
         for out in (predecessors.get(node).iter()).filter_map(|pred| cells.get(*pred)) {
             or_into(&mut state, out);
         }
         state
     };
     let start = vec![0u64; words];
+    // Each reload's load verdict, written at its format load and taken at its call.
+    let mut unset = vec![None; slots];
     let cells = crate::fixpoint::sparse(
         "rewritten",
         keys,
@@ -1257,27 +1530,66 @@ fn reaching_rewrites(
         |node, cells| {
             #[cfg(test)]
             REWRITE_EVALUATIONS.with(|count| count.set(count.get() + 1));
-            let (generated, killed) = &gen_kill[node];
             let mut state = entering(node, cells);
-            for ((word, generated), killed) in state.iter_mut().zip(generated).zip(killed) {
-                *word = (*word & !killed) | generated;
+            match &transfer[node] {
+                Some((generated, killed)) => {
+                    for ((word, generated), killed) in state.iter_mut().zip(generated).zip(killed) {
+                        *word = (*word & !killed) | generated;
+                    }
+                }
+                None => step(&mut state, &events[node], &mut unset, None),
             }
             state
         },
     )
     .ok()?;
-    let mut reached = vec![false; loads];
+    let mut solved = Solved {
+        reached: vec![false; loads],
+        held: vec![false; slots],
+    };
     for (node, list) in events.iter() {
         let mut state = entering(node, &cells);
-        for (_, event) in list {
-            match event {
-                Event::Write(set) => or_into(&mut state, set),
-                Event::Kill(key) => state[key / 64] &= !(1 << (key % 64)),
-                Event::Load(key, number) => reached[*number] = bit(&state, *key),
+        step(&mut state, list, &mut unset, Some(&mut solved));
+    }
+    Some(solved)
+}
+
+/// Run a block's events over `state` in index order, recording loads and reloads into `solved`.
+/// `unset` is by slot; a call whose load went unread is unset. Monotone. `O(events x words)`.
+fn step(
+    state: &mut [u64],
+    list: &[(usize, Event)],
+    unset: &mut [Option<bool>],
+    mut solved: Option<&mut Solved>,
+) {
+    for (_, event) in list {
+        match event {
+            Event::Write(set) => or_into(state, set),
+            Event::Kill(key) => state[key / 64] &= !(1 << (key % 64)),
+            Event::Load(key, number) => {
+                if let Some(solved) = solved.as_deref_mut() {
+                    solved.reached[*number] = bit(state, *key);
+                }
+            }
+            Event::Format(slot, key) => {
+                let held = !bit(state, *key);
+                unset[*slot] = Some(!held);
+                if let Some(solved) = solved.as_deref_mut() {
+                    solved.held[*slot] = held;
+                }
+            }
+            Event::Reloaded {
+                slot,
+                bounded,
+                extra,
+            } => {
+                or_into(state, bounded);
+                if unset[*slot].take().unwrap_or(true) {
+                    or_into(state, extra);
+                }
             }
         }
     }
-    Some(reached)
 }
 
 /// One block's `(gen, kill)` from its events in index order: the last write or kill of a key
@@ -1294,7 +1606,7 @@ fn block_transfer(list: &[(usize, Event)], words: usize) -> (Vec<u64>, Vec<u64>)
                 generated[key / 64] &= !(1 << (key % 64));
                 killed[key / 64] |= 1 << (key % 64);
             }
-            Event::Load(..) => {}
+            Event::Load(..) | Event::Format(..) | Event::Reloaded { .. } => {}
         }
     }
     (generated, killed)
@@ -1924,6 +2236,7 @@ impl<'a> Walker<'a> {
             accesses: self.accesses,
             carriers: self.carriers,
             places: PlaceFacts::default(),
+            reloads: Vec::new(),
         }
     }
 }
@@ -2025,6 +2338,9 @@ mod tests {
         )
     }
 
+    /// An event's block, its position there and its key.
+    type At = (Node, usize, usize);
+
     fn one_key(key: usize, keys: usize) -> Vec<u64> {
         let mut words = vec![0; keys.div_ceil(64)];
         words[key / 64] |= 1 << (key % 64);
@@ -2036,7 +2352,7 @@ mod tests {
     fn reached_by_paths(
         successors: &Csr<Node, Node>,
         events: &IdVec<Node, Vec<(usize, Event)>>,
-        (block, at, key): (Node, usize, usize),
+        (block, at, key): At,
     ) -> bool {
         let kills = |event: &Event| matches!(event, Event::Kill(killed) if *killed == key);
         let writes = |event: &Event| matches!(event, Event::Write(set) if set[key / 64] >> (key % 64) & 1 == 1);
@@ -2118,10 +2434,132 @@ mod tests {
             let expected = (loads.iter())
                 .map(|load| reached_by_paths(&successors, &events, *load))
                 .collect::<Vec<_>>();
+            let none = vec![0u64; keys.div_ceil(64)];
             let solved = reaching_rewrites(
                 (order.as_slice(), &successors, &predecessors),
                 &mut events,
-                keys,
+                (keys, (None, &none)),
+                0,
+            );
+            let solved = solved.map(|solved| solved.reached);
+            assert_eq!(solved, Some(expected), "{edges:?} {events:?}");
+        }
+    }
+
+    /// One random event at the end of `node`: a write, a kill, a load, or a reload's format load
+    /// and its call. Loads and format loads are recorded as `(node, at, key)`.
+    fn push_random(
+        next: &mut impl FnMut(u64) -> u64,
+        (list, keys): (&mut Vec<(usize, Event)>, usize),
+        (node, loads, formats): (Node, &mut Vec<At>, &mut Vec<At>),
+    ) {
+        let key = next(keys as u64) as usize;
+        let at = list.len();
+        match next(4) {
+            0 => list.push((at, Event::Write(random_set(next, key, keys)))),
+            1 => list.push((at, Event::Kill(key))),
+            2 => {
+                loads.push((node, at, key));
+                list.push((at, Event::Load(key, loads.len() - 1)));
+            }
+            _ => {
+                let slot = formats.len();
+                formats.push((node, at, key));
+                list.push((at, Event::Format(slot, key)));
+                let (bounded, extra) = (random_set(next, key, keys), random_set(next, key, keys));
+                let reloaded = Event::Reloaded {
+                    slot,
+                    bounded,
+                    extra,
+                };
+                list.push((at + 1, reloaded));
+            }
+        }
+    }
+
+    /// `events` with each reload's call a plain write: `extra` included where `unset` says.
+    fn as_writes(
+        events: &IdVec<Node, Vec<(usize, Event)>>,
+        unset: &[bool],
+    ) -> IdVec<Node, Vec<(usize, Event)>> {
+        let write = |event: &Event| match event {
+            Event::Reloaded {
+                slot,
+                bounded,
+                extra,
+            } => {
+                let mut set = bounded.clone();
+                (unset[*slot]).then(|| or_into(&mut set, extra));
+                Event::Write(set)
+            }
+            other => other.clone(),
+        };
+        IdVec::from_fn(events.len(), |node: Node| {
+            (events[node].iter())
+                .map(|(at, event)| (*at, write(event)))
+                .collect()
+        })
+    }
+
+    /// The least solution by the definition: the path search, each reload unset where its format
+    /// load is reached, iterated from none unset to its fixpoint.
+    fn least_by_paths(
+        successors: &Csr<Node, Node>,
+        events: &IdVec<Node, Vec<(usize, Event)>>,
+        (loads, formats): (&[At], &[At]),
+    ) -> Solved {
+        let mut unset = vec![false; formats.len()];
+        loop {
+            let plain = as_writes(events, &unset);
+            let reached = |at: &At| reached_by_paths(successors, &plain, *at);
+            let next = formats.iter().map(reached).collect::<Vec<_>>();
+            if next == unset {
+                let held = unset.iter().map(|unset| !unset).collect();
+                return Solved {
+                    reached: loads.iter().map(reached).collect(),
+                    held,
+                };
+            }
+            unset = next;
+        }
+    }
+
+    /// The least solution with reloads and an entry seed (D432), against [`least_by_paths`].
+    #[test]
+    fn reaching_rewrites_with_reloads_is_their_least_path_solution() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..300 {
+            let n = 1 + next(10) as usize;
+            let keys = 1 + next(70) as usize;
+            let edges = (0..next(20))
+                .map(|_| (next(n as u64) as usize, next(n as u64) as usize))
+                .collect::<Vec<_>>();
+            let (order, successors, predecessors) = graph(n, &edges);
+            let first = next(keys as u64) as usize;
+            let entry = random_set(&mut next, first, keys);
+            // For the path search the root's seed is a write before its first event.
+            let root = Node::from_index(0);
+            let mut events = IdVec::from_fn(n, |_: Node| Vec::<(usize, Event)>::new());
+            events[root].push((0, Event::Write(entry.clone())));
+            let (mut loads, mut formats) = (Vec::new(), Vec::new());
+            for _ in 0..next(16) {
+                let node = Node::from_index(next(n as u64) as usize);
+                let at = (node, &mut loads, &mut formats);
+                push_random(&mut next, (&mut events[node], keys), at);
+            }
+            let expected = least_by_paths(&successors, &events, (&loads, &formats));
+            events[root].remove(0);
+            let solved = reaching_rewrites(
+                (order.as_slice(), &successors, &predecessors),
+                &mut events,
+                (keys, (Some(root), &entry)),
+                formats.len(),
             );
             assert_eq!(solved, Some(expected), "{edges:?} {events:?}");
         }
@@ -2145,7 +2583,8 @@ mod tests {
         let solved = reaching_rewrites(
             (order.as_slice(), &successors, &predecessors),
             &mut events,
-            4,
+            (4, (None, &[0])),
+            0,
         );
         assert!(solved.is_some());
         REWRITE_EVALUATIONS.with(std::cell::Cell::get)

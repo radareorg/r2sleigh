@@ -58,7 +58,7 @@ pub(crate) mod machine;
 pub mod site_boundary;
 pub use arch::Arch;
 pub(crate) mod machine_context;
-pub use machine_context::call_reads_built;
+pub use machine_context::{CallReadsMeter, call_reads_built};
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
