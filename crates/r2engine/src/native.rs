@@ -902,7 +902,7 @@ pub(crate) fn convention_seal_of(
     let asked = construction.unstated_rewriting_callees();
     let stated = state_asked(
         (&native, target, ptr_bits),
-        (body.entry, asked, BTreeSet::new()),
+        (body.entry, asked),
         &mut imports,
     );
     let construction = match stated {
@@ -917,41 +917,33 @@ pub(crate) fn convention_seal_of(
         .map_err(NativeRefusal::of_preparation)
 }
 
-/// States each callee nothing states whose call's writes kept a loaded place in memory, its reads
-/// from its alone read (D376), and each callee whose writes block the body's own (`blocking`): its
-/// writes composed over its blocking calls, nothing else (D441). Whether any did. O(asked) reads.
+/// States each callee nothing states whose call's writes kept a loaded place in memory: its reads
+/// from its alone read (D376), its writes composed over its own blocking calls (D441). Whether any
+/// did. O(asked) reads.
 fn state_asked(
     (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
-    (entry, asked, blocking): (u64, BTreeSet<u64>, BTreeSet<u64>),
+    (entry, asked): (u64, BTreeSet<u64>),
     callees: &mut Callees,
 ) -> bool {
     let program = native.program;
-    let unstated = |address: &u64| {
-        *address != entry
-            && !callees.writes.contains_key(address)
-            && program.import_at(*address).is_none()
-            && crate::stated::sealed_import(program, *address).is_none()
-    };
-    let asked = (asked.iter().copied())
-        .filter(|address| unstated(address) && !callees.interfaces.contains_key(address))
-        .collect::<Vec<_>>();
-    let blocking = (blocking.into_iter())
-        .filter(|address| unstated(address) && !asked.contains(address))
+    let asked = (asked.into_iter())
+        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| !callees.writes.contains_key(address))
+        .filter(|address| program.import_at(*address).is_none())
+        .filter(|address| crate::stated::sealed_import(program, *address).is_none())
         .collect::<Vec<_>>();
     let mut stated = false;
-    for address in &asked {
-        let read = program.callee_statement(*address, &mut || {
-            read_callee(native, target, *address, ptr_bits)
+    for address in asked {
+        let read = program.callee_statement(address, &mut || {
+            read_callee(native, target, address, ptr_bits)
         });
         if let Some(interface) = &read.interface {
-            callees.interfaces.insert(*address, interface.clone());
+            callees.interfaces.insert(address, interface.clone());
         }
         if let Ok(facts) = &read.facts {
-            callees.record_reads(*address, facts, program);
+            callees.record_reads(address, facts, program);
             stated = true;
         }
-    }
-    for address in asked.into_iter().chain(blocking) {
         if let Some(writes) = program.callee_writes(address) {
             callees.writes.insert(address, writes);
             stated = true;
@@ -1474,9 +1466,7 @@ fn resolved_alone(
         (native.construct_first(walked, &imports, &declared_root)).map_err(unreadable)?;
     if stated.asks {
         let asked = construction.unstated_rewriting_callees();
-        let blocking = construction.writes_blocking_callees();
-        let asked = (address, asked, blocking);
-        if state_asked((native, target, ptr_bits), asked, &mut imports) {
+        if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
             let premises = premises_reading(false);
             let restated =
                 native.restate_against(&walked.root, construction, (&imports, &premises));

@@ -9850,11 +9850,34 @@ fn a_write_cycle_through_a_correlated_tail_folds() {
     assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
 }
 
-/// D441, default-deny: `odd` leaves through `jne even`, a transfer no source site names: the
-/// tail is uncorrelated, so `odd` states no write and the slot stays a load.
+/// `root` calling `a` (`mov edi, 0` and the other registers set, then `leaves` to `b`), and `b`
+/// at 0x1060 (`xor eax, eax; ret`), which writes nothing.
+fn leaving_for_a_leaf(leaves: Leaves) -> &'static [u8] {
+    let mut code = WRITE_CYCLE_ROOT.to_vec();
+    code.extend(member(
+        BASE + 0x20,
+        (&[0xbf, 0, 0, 0, 0], &[]),
+        leaves,
+        BASE + 0x60,
+    ));
+    code.resize(0x60, 0x90);
+    code.extend([0x31, 0xc0, 0xc3]);
+    Vec::leak(code)
+}
+
+/// D441: `a` leaves for `b` through `jmp`, a tail the source correlates: `b`'s statement (no
+/// write) is `a`'s, so `root`'s slot folds.
 #[test]
-fn a_write_cycle_through_an_uncorrelated_tail_bounds_nothing() {
-    let text = surveyed_cycle(write_cycle((&[], &[]), Leaves::Branch, &[]), None, BASE);
+fn a_place_past_a_correlated_tail_to_a_leaf_folds() {
+    let text = surveyed_cycle(leaving_for_a_leaf(Leaves::Tail), None, BASE);
+    assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
+}
+
+/// D441, default-deny: `a` leaves for `b` through `jne`, a transfer no source site names: the
+/// tail is uncorrelated, so `a` states no write and the slot stays a load.
+#[test]
+fn a_place_past_an_uncorrelated_tail_to_a_leaf_stays_a_load() {
+    let text = surveyed_cycle(leaving_for_a_leaf(Leaves::Branch), None, BASE);
     assert!(text.contains("r2sleigh_load_u32("), "{text}");
 }
 
@@ -9964,4 +9987,26 @@ fn a_result_cycle_and_a_write_cycle_state_one_answer() {
     let (a, b) = (render(BASE), render(BASE + 0x20));
     assert!(a.contains("return r2sleigh_carrier_u32(5);"), "{a}");
     assert!(b.contains("return r2sleigh_carrier_u32(7);"), "{b}");
+}
+
+/// D441, default-deny: `root` calls `a` (`mov edi, 0` and the other registers set; `call b`), and
+/// `b` writes `[rsp + 0x10]` on its entry pointer, above `a`'s: `a`'s points were walked with its
+/// unstated call writing below its entry only, so the composed span bounds nothing.
+#[test]
+fn a_composed_write_past_the_entry_pointer_bounds_nothing() {
+    let mut code = WRITE_CYCLE_ROOT.to_vec();
+    let a = member(
+        BASE + 0x20,
+        (&[0xbf, 0, 0, 0, 0], &[]),
+        Leaves::Call,
+        BASE + 0x60,
+    );
+    code.extend(a);
+    code.resize(0x60, 0x90);
+    // 1060 b: mov dword [rsp + 0x10], 0; xor eax, eax; ret
+    code.extend([
+        0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3,
+    ]);
+    let text = surveyed_cycle(Vec::leak(code), None, BASE);
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
 }
