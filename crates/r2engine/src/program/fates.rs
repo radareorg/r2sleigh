@@ -1055,8 +1055,9 @@ impl BoundaryResult {
             true => None,
             false => decided_result(supply, forwarding, &mut every_way_in),
         };
-        // The integer lane's own `Dead` below needs no other lane dead (D440).
-        if !grouped && integer_dead_at_every_call(supply, forwarding) {
+        // The integer lane's own `Dead` below needs no other lane dead (D440); a read decides it.
+        let read = matches!(result, Some(SourceClosedResult::Read(_)));
+        if !grouped && !read && integer_dead_at_every_call(supply, forwarding) {
             every_way_in();
         }
         let result = result.or_else(|| declared_void(db, entry, supply, forwarding));

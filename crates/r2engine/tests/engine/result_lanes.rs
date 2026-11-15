@@ -752,7 +752,7 @@ const OVERWRITES_EVERY_LANE: &[u8] = &[
     0xc3, // 103f ret
 ];
 
-/// `lea rax, [rip - 0x47] (f); mov [rdi], rax; ret`: `f`'s address goes into a stored word.
+/// `lea rax, [rip - 0x47] (f); mov [rdi], rax; ret`: code names `f`'s address and stores it.
 const STORES_F: &[u8] = &[
     0x48, 0x8d, 0x05, 0xb9, 0xff, 0xff, 0xff, // 1040 lea rax, [0x1000]
     0x48, 0x89, 0x07, // 1047 mov [rdi], rax
@@ -784,6 +784,9 @@ const FORWARDS_F_INTO_A_CYCLE: &[(u64, &[u8])] = &[
         ],
     ),
 ];
+
+/// Bodies placed beside `f`, each at its offset.
+type Bodies = Vec<(u64, &'static [u8])>;
 
 /// `f` at 0x1000 and each `(offset, bytes)` body, `ferror`'s stub at 0x1090, `f` rendered under `aa`.
 fn narrow_result_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> String {
@@ -851,13 +854,13 @@ fn a_written_result_no_call_reads_reads_no_bits_above_a_narrow_callee() {
 #[test]
 fn an_integer_lane_not_dead_at_every_way_in_keeps_the_bits_above_a_narrow_callee() {
     let overwrites = (0x30, OVERWRITES_EVERY_LANE);
-    let cases: [(&str, Vec<(u64, &[u8])>); 4] = [
+    let cases: [(&str, Bodies); 4] = [
         (
             "RAX taken at a call",
             vec![(0x20, LEAVES_RAX_TO_AN_INDIRECT_CALL), overwrites],
         ),
         (
-            "address stored",
+            "address named by code and stored",
             vec![(0x20, OVERWRITES_RAX_ONLY), overwrites, (0x40, STORES_F)],
         ),
         ("no call", Vec::new()),
