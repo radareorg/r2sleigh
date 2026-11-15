@@ -672,7 +672,11 @@ fn argument_area_slots(
         else {
             break;
         };
+        // An unproven read past the observed bytes leaves those bytes' use unknown (default deny).
         let (observed_bytes, read) = match (observed_bytes, unproven.get(&slot)) {
+            (Some(bytes), Some(wider)) if rounded(*wider) > bytes => {
+                (rounded(*wider), StackSlotRead::Unproven)
+            }
             (Some(bytes), _) => (bytes, StackSlotRead::Observed),
             (None, Some(bytes)) => (rounded(*bytes), StackSlotRead::Unproven),
             (None, None) => (slot_bytes, StackSlotRead::Unread),
@@ -4634,6 +4638,25 @@ mod tests {
             interface.boundary().slots[crate::body_boundary::SlotId(1)],
             SlotUse::Unread
         );
+    }
+
+    /// A slot read one byte to an observation and eight bytes to a call nothing bounds keeps the
+    /// unproven use of its other seven bytes (PR #401 review).
+    #[test]
+    fn an_unproven_read_wider_than_the_observed_one_keeps_the_slot_unknown() {
+        let observed = BTreeMap::from([(0, Some(1)), (1, Some(8))]);
+        let unproven = BTreeMap::from([(0, 8)]);
+        let area = argument_area_slots((&observed, &unproven), 8, 8);
+        assert_eq!(area.slots[0].read(), StackSlotRead::Unproven);
+        assert_eq!(area.slots[0].observed_bytes(), 8);
+        let narrow = BTreeMap::from([(0, 1)]);
+        let area = argument_area_slots(
+            (&BTreeMap::from([(0, Some(4)), (1, Some(8))]), &narrow),
+            8,
+            8,
+        );
+        assert_eq!(area.slots[0].read(), StackSlotRead::Observed);
+        assert_eq!(area.slots[0].observed_bytes(), 4);
     }
 
     #[test]
