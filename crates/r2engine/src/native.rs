@@ -917,9 +917,8 @@ pub(crate) fn convention_seal_of(
         .map_err(NativeRefusal::of_preparation)
 }
 
-/// States each callee nothing states whose call's writes kept a loaded place in memory: its reads
-/// from its alone read (D376), its writes composed over its own blocking calls (D441). Whether any
-/// did. O(asked) reads.
+/// States each unstated callee whose writes kept a loaded place: reads alone (D376), writes composed
+/// (D441). Whether any did. O(asked) reads.
 fn state_asked(
     (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
     (entry, asked): (u64, BTreeSet<u64>),

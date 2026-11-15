@@ -223,9 +223,8 @@ impl FramePoints {
         }
     }
 
-    /// What a call to this body may write of its caller's stack before its blocking calls are
-    /// stated: a direct call or source-correlated tail nothing states (D377, D381, D441).
-    /// `O(calls x spans)`.
+    /// What a call to this body may write of its caller's stack before its blocking calls (direct
+    /// calls and correlated tails nothing states) are stated (D377, D381, D441). `O(calls x spans)`.
     pub fn incoming_bound(
         &self,
         context: &SourceMachineContext,
@@ -396,9 +395,8 @@ impl crate::call_reads::WritesBound {
         self.blocking.iter().map(|(_, target)| *target).collect()
     }
 
-    /// The writes with each blocking call's spans from `stated`, shifted by the call's base;
-    /// `None` where one states none, or writes at or above the entry pointer, past the unstated
-    /// call's area the body's points were walked under (D441). `O(calls x spans log spans)`.
+    /// The writes with each blocking call's `stated` spans at its base; `None` where one states none
+    /// or reaches the entry pointer, past the area the points assumed (D441). `O(calls x spans)`.
     pub fn solve<'s>(
         &self,
         stated: impl Fn(u64) -> Option<&'s [(i64, i64)]>,

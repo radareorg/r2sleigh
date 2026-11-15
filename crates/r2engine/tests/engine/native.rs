@@ -9739,9 +9739,8 @@ fn member(at: u64, (before, after): (&[u8], &[u8]), leaves: Leaves, to: u64) -> 
     code
 }
 
-/// `root` at 0x1000, `even` at 0x1020 (`push rbp; test edi, edi; je` past its call to `odd`;
-/// `dec edi`; `pop rbp`, a reload past the call, which asks `odd`) and `odd` at 0x1060 (`mov edi,
-/// 0` after `before`); each body padded to 0x40 bytes.
+/// `root`; `even` at 0x1020 (`push rbp`, `call odd` unless `edi` is 0, `pop rbp`: a reload that
+/// asks `odd`); `odd` at 0x1060 (`before`, `mov edi, 0`); each body 0x40 bytes.
 fn write_cycle(odd: (&[u8], &[u8]), leaves: Leaves, more: &[u8]) -> &'static [u8] {
     let mut code = WRITE_CYCLE_ROOT.to_vec();
     let mut even = vec![0x55, 0x85, 0xff, 0x74, 0x00, 0xff, 0xcf];
@@ -9917,9 +9916,8 @@ fn a_write_cycle_asked_from_either_root_first_states_one_summary() {
     );
 }
 
-/// `rootA` reads `even`'s writes through its result cycle with `odd` (`Resolved`'s fixpoint);
-/// `rootB` through `mid`, which owns nothing of `even` and asks it to state its writes
-/// (`IncomingWrites`).
+/// `rootA` reads `even`'s writes through its result cycle with `odd` (`Resolved`); `rootB` through
+/// `mid`, which owns nothing of `even` and asks its writes (`IncomingWrites`).
 const READ_BACK_PAST_A_RESULT_AND_WRITE_CYCLE: [u8; 0xa6] = [
     0x48, 0x83, 0xec, 0x18, // 1000 rootA: sub rsp, 0x18
     0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
@@ -9962,9 +9960,8 @@ const READ_BACK_PAST_A_RESULT_AND_WRITE_CYCLE: [u8; 0xa6] = [
     0xc3, // 10a5 ret
 ];
 
-/// D441: `even` is in a result cycle and a write cycle with `odd`. `Resolved`'s fixpoint states
-/// its writes to `rootA`'s build, `IncomingWrites` to `mid`'s ask: both state none, so both
-/// slots fold (doc/adr-callee-builds.md, "D441 as built", names each reader's path).
+/// D441: `even` in a result cycle and a write cycle states one answer on both paths: both slots
+/// fold (doc/adr-callee-builds.md, "D441 as built", names each reader's path).
 #[test]
 fn a_result_cycle_and_a_write_cycle_state_one_answer() {
     let functions = [
@@ -9989,9 +9986,8 @@ fn a_result_cycle_and_a_write_cycle_state_one_answer() {
     assert!(b.contains("return r2sleigh_carrier_u32(7);"), "{b}");
 }
 
-/// D441, default-deny: `root` calls `a` (`mov edi, 0` and the other registers set; `call b`), and
-/// `b` writes `[rsp + 0x10]` on its entry pointer, above `a`'s: `a`'s points were walked with its
-/// unstated call writing below its entry only, so the composed span bounds nothing.
+/// D441, default-deny: `root` calls `a`, which calls `b`, and `b` writes `[rsp + 0x10]`, above `a`'s
+/// entry pointer, where `a`'s points assumed no write: the composed span bounds nothing.
 #[test]
 fn a_composed_write_past_the_entry_pointer_bounds_nothing() {
     let mut code = WRITE_CYCLE_ROOT.to_vec();
