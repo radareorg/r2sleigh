@@ -1079,6 +1079,17 @@ fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
     assert!(!text.contains("frame + 16U"), "{text}");
 }
 
+/// A reloaded format's row is built at most once per reload a walk round decides and once per
+/// settled format (D432): a `work-meter` build counts both, process-wide, beside the rows.
+#[cfg(feature = "work-meter")]
+#[test]
+fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
+    let _ = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0x97ff_fffa]); // bl f
+    let meter = r2engine::query::call_reads_built().expect("a work-meter build");
+    assert!(meter.reloaded > 0, "{meter:?}");
+    assert!(meter.reloaded <= meter.reload_bound, "{meter:?}");
+}
+
 /// An unstated call between the spill and the reloads may write the slot: it stays in memory.
 #[test]
 fn a_format_reloaded_past_an_unstated_call_stays_in_memory() {

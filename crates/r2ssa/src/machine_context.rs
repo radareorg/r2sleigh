@@ -398,16 +398,28 @@ pub enum MachineRegisterGeometryState {
     Malformed,
 }
 
-/// `CallReads` built for the column, raw call sites stated by contexts made, and rows built for a
-/// reloaded format (D432), in a `work-meter` build (D436).
-pub fn call_reads_built() -> Option<(u64, u64, u64)> {
+/// The process's call-read work, in a `work-meter` build (D436, D432).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallReadsMeter {
+    /// `CallReads` built for the column.
+    pub built: u64,
+    /// Raw call sites stated by contexts made, and one unsited row each.
+    pub rows: u64,
+    /// Rows built for a reloaded format.
+    pub reloaded: u64,
+    /// What `reloaded` may reach: each walk round's reloads and each settle's formats.
+    pub reload_bound: u64,
+}
+
+/// The process's [`CallReadsMeter`]; `None` outside a `work-meter` build.
+pub fn call_reads_built() -> Option<CallReadsMeter> {
     #[cfg(feature = "work-meter")]
     return Some(meter::counts());
     #[cfg(not(feature = "work-meter"))]
     None
 }
 
-mod meter {
+pub(crate) mod meter {
     #[cfg(feature = "work-meter")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -417,31 +429,48 @@ mod meter {
     static SITES: AtomicU64 = AtomicU64::new(0);
     #[cfg(feature = "work-meter")]
     static RELOADED: AtomicU64 = AtomicU64::new(0);
-
     #[cfg(feature = "work-meter")]
-    pub(super) fn counts() -> (u64, u64, u64) {
-        let count = |meter: &AtomicU64| meter.load(Ordering::Relaxed);
-        (count(&BUILT), count(&SITES), count(&RELOADED))
+    static RELOAD_BOUND: AtomicU64 = AtomicU64::new(0);
+
+    /// Each meter read after the one it bounds, so a concurrent build never reads past its bound.
+    #[cfg(feature = "work-meter")]
+    pub(super) fn counts() -> super::CallReadsMeter {
+        let count = |meter: &AtomicU64| meter.load(Ordering::SeqCst);
+        let (built, reloaded) = (count(&BUILT), count(&RELOADED));
+        let (rows, reload_bound) = (count(&SITES), count(&RELOAD_BOUND));
+        super::CallReadsMeter {
+            built,
+            rows,
+            reloaded,
+            reload_bound,
+        }
+    }
+
+    /// `reloads` more rows a walk round or a settle may build for reloaded formats, counted first.
+    #[inline]
+    pub(crate) fn reloads_allowed(_reloads: usize) {
+        #[cfg(feature = "work-meter")]
+        RELOAD_BOUND.fetch_add(_reloads as u64, Ordering::SeqCst);
     }
 
     /// A row stated for a reloaded format: one per reload a walk round decides, one per settle.
     #[inline]
     pub(super) fn reloaded() {
         #[cfg(feature = "work-meter")]
-        RELOADED.fetch_add(1, Ordering::Relaxed);
+        RELOADED.fetch_add(1, Ordering::SeqCst);
     }
 
     #[inline]
     pub(super) fn built() {
         #[cfg(feature = "work-meter")]
-        BUILT.fetch_add(1, Ordering::Relaxed);
+        BUILT.fetch_add(1, Ordering::SeqCst);
     }
 
     /// A context's rows: each raw call site and the unsited one.
     #[inline]
     pub(super) fn made(_sites: usize) {
         #[cfg(feature = "work-meter")]
-        SITES.fetch_add(_sites as u64 + 1, Ordering::Relaxed);
+        SITES.fetch_add(_sites as u64 + 1, Ordering::SeqCst);
     }
 }
 
@@ -1471,6 +1500,7 @@ impl SourceMachineContext {
             "reloads settled before the bind or twice"
         );
         self.call_reads.settled = true;
+        meter::reloads_allowed(formats.len());
         for (instruction, literal) in formats {
             let Some(tail) = self.literal_tail(*literal) else {
                 continue;

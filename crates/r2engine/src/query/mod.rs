@@ -66,11 +66,11 @@ pub struct AnalysisStats {
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
-/// `CallReads` built and call-site rows stated, in a `work-meter` build (D436).
-pub use r2ssa::call_reads_built;
 /// The process's element visits, in all and by call site, in a `work-meter` build (D417): a count
 /// of the process, not of one program, so it stays out of [`AnalysisStats`].
 pub use r2ssa::dense::{element_visits as scans, element_visits_by_site as scan_sites};
+/// The call-read work counted in a `work-meter` build (D436, D432).
+pub use r2ssa::{CallReadsMeter, call_reads_built};
 pub use records::{
     Annotation, AnnotationKind, Answered, ArgumentSlot, CallArgument, Callee, Decoders,
     Instruction, Line, Listing, Memory, Operand, Parameters, Register, Registers, Semantics, Stop,
