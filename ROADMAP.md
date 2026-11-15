@@ -114,6 +114,7 @@ r2abi
 | D406 | 33 of 38 uncited noreturn rows are cited. Open, no source found: `__cxa_call_unexpected`, glibc and darwin `xalloc_die`, `__longjmp_chk`, darwin `__stack_chk_fail` | per-table uncited caps fall | open |
 | D428 | A call that may return twice keeps the frame | a red test | rejected: no failing program (rounds 6 and 7) |
 | D431 | An import's call reads RAX at AL's width where no stated bound covers it (psABI Figure 3.4) | `an_import_call_reads_the_count_register_alone_of_its_register`; D211 81 to 36 | built e3ab01f5c |
+| D448 | `__cxa_finalize` cites GCC 13 libstdc++'s `cxxabi.h` lines 134-135 and the Itanium C++ ABI 3.3.5.3: one fixed parameter, so a call reads RDI alone. Alone, 5 census records drop the stub from their floor line and keep the local callee's witness (frame_pointer_locals_clang_O0g 0x10e0, rv_O0g 0x1160, rv_O0g_stripped 0x1160, rv_O2 0x1320, two_units_O0g 0x1100); with D447 they equal master. Moves listed, not blessed | `call_boundary::a_cxa_finalize_call_reads_no_register_past_its_one_argument` | built (rd8-abi-cites) |
 
 r2il
 ----

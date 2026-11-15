@@ -13,6 +13,14 @@ func.__cxa_atexit.arg.2=void *,dso_handle
 func.__cxa_atexit.ret=int
 func.__cxa_atexit.include=cxxabi.h
 
+# cxxabi.h lines 134-135, GCC 13's libstdc++: `void __cxa_finalize(void*);`. The Itanium C++ ABI
+# 3.3.5.3: it runs the destructors registered with DSO handle `d`.
+__cxa_finalize=func
+func.__cxa_finalize.args=1
+func.__cxa_finalize.arg.0=void *,d
+func.__cxa_finalize.ret=void
+func.__cxa_finalize.include=cxxabi.h
+
 # cxxabi.h, as GCC 13's libstdc++ declares each `__attribute__((__noreturn__))`: the Itanium C++
 # ABI 3.2.6 pure and deleted virtual calls, the 2.9.5 failed cast and typeid, and the
 # array-new length check; libc++abi's cxxabi.h declares each `_LIBCXXABI_NORETURN` alike (D406).
