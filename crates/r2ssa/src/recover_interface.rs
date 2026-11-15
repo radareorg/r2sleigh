@@ -148,8 +148,19 @@ pub struct RecoveredStackParameter {
     offset: i64,
     slot_bytes: u32,
     observed_bytes: u32,
-    /// Unread below a read slot: a parameter by the convention's order alone.
-    hole: bool,
+    read: StackSlotRead,
+}
+
+/// What the body proves about the reads of one argument-area slot below the highest observed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackSlotRead {
+    /// A read of it reaches a program observation.
+    Observed,
+    /// A read at its exact place may reach an operation no rule proves, such as a call of unproven
+    /// arity: neither observed nor proven unread (D434).
+    Unproven,
+    /// No read reaches it: a parameter by the convention's order alone.
+    Unread,
 }
 
 impl RecoveredStackParameter {
@@ -171,14 +182,19 @@ impl RecoveredStackParameter {
 
     /// Whether no read reaches the slot: a hole below the highest one read.
     pub const fn is_hole(self) -> bool {
-        self.hole
+        matches!(self.read, StackSlotRead::Unread)
+    }
+
+    /// What the body proves about the slot's reads.
+    pub const fn read(self) -> StackSlotRead {
+        self.read
     }
 
     /// `Convention` for a hole, else `Decoded`.
     pub const fn basis(self) -> r2source::Basis {
-        match self.hole {
-            true => r2source::Basis::Convention,
-            false => r2source::Basis::Decoded,
+        match self.read {
+            StackSlotRead::Unread => r2source::Basis::Convention,
+            StackSlotRead::Observed | StackSlotRead::Unproven => r2source::Basis::Decoded,
         }
     }
 }
@@ -443,19 +459,22 @@ fn recovered_stack_parameters(
         .flat_map(|certificate| certificate.insts.iter().copied())
         .collect::<crate::dense::IdSet<_>>();
     let mut observed: BTreeMap<u64, Option<u32>> = BTreeMap::new();
+    let mut unproven: BTreeMap<u64, Option<u32>> = BTreeMap::new();
     let mut unknown = false;
     for access in facts.structured.memory_accesses.values() {
         if access.is_write || access.space != SpaceId::Ram || control.contains(access.id.inst) {
             continue;
         }
-        let (value, relative) = match area_read((facts, prep), observations, access, first_offset) {
-            AreaRead::Placed { value, relative } => (value, relative),
-            AreaRead::Unplaced => {
-                unknown = true;
-                continue;
-            }
-            AreaRead::Elsewhere => continue,
-        };
+        let (value, relative, reads) =
+            match area_read((facts, prep), observations, access, first_offset) {
+                AreaRead::Placed { value, relative } => (value, relative, &mut observed),
+                AreaRead::Unproven { value, relative } => (value, relative, &mut unproven),
+                AreaRead::Unplaced => {
+                    unknown = true;
+                    continue;
+                }
+                AreaRead::Elsewhere => continue,
+            };
         let Some(relative) = relative
             .checked_sub(first_offset)
             .and_then(|relative| u64::try_from(relative).ok())
@@ -475,13 +494,25 @@ fn recovered_stack_parameters(
             ),
             access.width
         );
-        let entry = observed.entry(slot).or_insert(Some(0));
+        let entry = reads.entry(slot).or_insert(Some(0));
         match entry {
             Some(bytes) if end <= slot_bytes => *bytes = (*bytes).max(end),
             _ => *entry = None,
         }
     }
-    let mut area = argument_area_slots(&observed, first_offset, slot_bytes);
+    // An unproven read places a slot only below an observed one; above, or across two, it bounds
+    // nothing, as an unplaced read.
+    let highest = observed.keys().next_back().copied();
+    let mut below = BTreeMap::new();
+    for (slot, bytes) in unproven {
+        match bytes {
+            Some(bytes) if highest.is_some_and(|highest| slot < highest) => {
+                below.insert(slot, bytes);
+            }
+            _ => unknown = true,
+        }
+    }
+    let mut area = argument_area_slots((&observed, &below), first_offset, slot_bytes);
     area.unknown |= unknown;
     area
 }
@@ -490,6 +521,11 @@ fn recovered_stack_parameters(
 enum AreaRead {
     /// An observed value read at one entry offset.
     Placed {
+        value: crate::ValueId,
+        relative: i64,
+    },
+    /// A value read at one entry offset that is neither observed nor proven unread.
+    Unproven {
         value: crate::ValueId,
         relative: i64,
     },
@@ -537,9 +573,11 @@ fn area_read(
     let exact = (access.provenance_complete && !indexed)
         .then(|| start?.checked_add(access.object_offset?))
         .flatten();
-    let value = access.value.filter(|value| observations.contains(*value));
-    if let Some((value, relative)) = value.zip(exact) {
-        return AreaRead::Placed { value, relative };
+    if let Some((value, relative)) = access.value.zip(exact) {
+        return match observations.contains(value) {
+            true => AreaRead::Placed { value, relative },
+            false => AreaRead::Unproven { value, relative },
+        };
     }
     // A place the model did not pin to one byte may still lie in the area.
     let annotated = |location: &crate::semantic::MemoryLocation| {
@@ -592,10 +630,10 @@ struct ArgumentArea {
     unknown: bool,
 }
 
-/// The slots below the highest read, each `observed` its widest read (`None` crossing two), are
-/// parameters (rule 4). Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
+/// The slots below the highest read are parameters (rule 4), each `observed` its widest read, an
+/// `unproven` read no hole. Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
 fn argument_area_slots(
-    observed: &BTreeMap<u64, Option<u32>>,
+    (observed, unproven): (&BTreeMap<u64, Option<u32>>, &BTreeMap<u64, u32>),
     first_offset: i64,
     slot_bytes: u32,
 ) -> ArgumentArea {
@@ -615,9 +653,10 @@ fn argument_area_slots(
             }
             holes += 1;
         }
-        let Some(observed_bytes) = observed.get(&slot).map_or(Some(None), |bytes| {
-            bytes.map(|bytes| Some(bytes.next_power_of_two().min(slot_bytes)))
-        }) else {
+        let rounded = |bytes: u32| bytes.next_power_of_two().min(slot_bytes);
+        let Some(observed_bytes) = (observed.get(&slot))
+            .map_or(Some(None), |bytes| bytes.map(|bytes| Some(rounded(bytes))))
+        else {
             // A read crossing into the next slot places no parameter: the slots below stand.
             r2il::refusal_evidence!(
                 "interface-recovery",
@@ -633,11 +672,16 @@ fn argument_area_slots(
         else {
             break;
         };
+        let (observed_bytes, read) = match (observed_bytes, unproven.get(&slot)) {
+            (Some(bytes), _) => (bytes, StackSlotRead::Observed),
+            (None, Some(bytes)) => (rounded(*bytes), StackSlotRead::Unproven),
+            (None, None) => (slot_bytes, StackSlotRead::Unread),
+        };
         parameters.push(RecoveredStackParameter {
             offset,
             slot_bytes,
-            observed_bytes: observed_bytes.unwrap_or(slot_bytes),
-            hole: observed_bytes.is_none(),
+            observed_bytes,
+            read,
         });
     }
     area
@@ -2596,12 +2640,18 @@ fn recover_interface_inner(
             let at = crate::dense::DenseId::index(id);
             match uses.get(at) {
                 Some(used) => used.clone(),
-                None => match stack_parameters[at - uses.len()] {
-                    parameter if parameter.is_hole() => SlotUse::Unread,
-                    parameter => SlotUse::Read {
-                        bytes: low_bytes(parameter.observed_bytes()),
-                    },
-                },
+                None => {
+                    let parameter = stack_parameters[at - uses.len()];
+                    match parameter.read() {
+                        StackSlotRead::Unread => SlotUse::Unread,
+                        StackSlotRead::Unproven => {
+                            SlotUse::Unknown(SourceFloorCause::ArgumentAreaRead)
+                        }
+                        StackSlotRead::Observed => SlotUse::Read {
+                            bytes: low_bytes(parameter.observed_bytes()),
+                        },
+                    }
+                }
             }
         }),
         floor: arity_floor.clone(),

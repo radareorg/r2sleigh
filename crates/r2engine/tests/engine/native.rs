@@ -6717,6 +6717,108 @@ fn a_place_an_unstated_call_may_rewrite_stays_a_load() {
     assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
 }
 
+/// `mov dword [rsp + 8], 5; call rdi; mov dword [rsp + 8], 7; mov eax, [rsp + 8]`.
+const STORED_AGAIN_PAST_AN_INDIRECT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xff, 0xd7, // 100c call rdi
+    0xc7, 0x44, 0x24, 0x08, 0x07, 0x00, 0x00, 0x00, // 100e mov dword [rsp + 8], 7
+    0x8b, 0x44, 0x24, 0x08, // 1016 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101a add rsp, 0x18
+    0xc3, // 101e ret
+];
+
+/// A store of the place's whole width after the call kills what the call may have written: the
+/// load reads the 7 stored, and the place is a variable (D427).
+#[test]
+fn a_place_stored_again_after_an_unstated_call_folds() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: STORED_AGAIN_PAST_AN_INDIRECT_CALL.to_vec(),
+        name: "stored_again_past_an_indirect_call",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u32(7);"), "{text}");
+}
+
+/// The same with `test esi, esi; jz` around the second store: on one path the call's write
+/// reaches the load.
+const STORED_ON_ONE_PATH_PAST_AN_INDIRECT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xff, 0xd7, // 100c call rdi
+    0x85, 0xf6, // 100e test esi, esi
+    0x74, 0x08, // 1010 jz 0x101a
+    0xc7, 0x44, 0x24, 0x08, 0x07, 0x00, 0x00, 0x00, // 1012 mov dword [rsp + 8], 7
+    0x8b, 0x44, 0x24, 0x08, // 101a mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101e add rsp, 0x18
+    0xc3, // 1022 ret
+];
+
+/// A kill on one path only leaves the call's write reaching the load on the other (D427).
+#[test]
+fn a_place_stored_on_one_path_after_an_unstated_call_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: STORED_ON_ONE_PATH_PAST_AN_INDIRECT_CALL.to_vec(),
+        name: "stored_on_one_path_past_an_indirect_call",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// `mov dword [rsp - 16], 5; call rdi; mov eax, [rsp - 16]`: the place lies below the call's
+/// pointer, where its return address and its callee's frame go.
+const READ_BACK_BELOW_AN_INDIRECT_CALLS_POINTER: &[u8] = &[
+    0xc7, 0x44, 0x24, 0xf0, 0x05, 0x00, 0x00, 0x00, // 1000 mov dword [rsp - 0x10], 5
+    0xff, 0xd7, // 1008 call rdi
+    0x8b, 0x44, 0x24, 0xf0, // 100a mov eax, [rsp - 0x10]
+    0xc3, // 100e ret
+];
+
+/// Every call writes below its own pointer, so a place there is read back as memory, never the
+/// 5 stored before the call (D427).
+#[test]
+fn a_place_below_an_unstated_calls_pointer_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_BELOW_AN_INDIRECT_CALLS_POINTER.to_vec(),
+        name: "read_back_below_an_indirect_calls_pointer",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
+/// `mov qword [rsp - 8], 5; call leaf; mov rax, [rsp - 8]`, where `leaf` is `ret`.
+const READ_BACK_WHERE_A_STATED_CALL_PUSHES: &[u8] = &[
+    0x48, 0xc7, 0x44, 0x24, 0xf8, 0x05, 0x00, 0x00, 0x00, // 1000 mov qword [rsp - 8], 5
+    0xe8, 0x12, 0x00, 0x00, 0x00, // 1009 call 0x1020
+    0x48, 0x8b, 0x44, 0x24, 0xf8, // 100e mov rax, [rsp - 8]
+    0xc3, // 1013 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1014
+    0xc3, // 1020 leaf: ret
+];
+
+/// A callee stating no write still has its return address pushed where the place is, so the
+/// load stays memory (D427).
+#[test]
+fn a_place_a_stated_calls_push_overwrites_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_WHERE_A_STATED_CALL_PUSHES.to_vec(),
+        name: "read_back_where_a_stated_call_pushes",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u64("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u64(5)"), "{text}");
+}
+
 /// `mov dword [rsp + 8], 5; call clear; mov eax, [rsp + 8]`, where `clear` (no parameters) writes
 /// `[rsp + 0x10]` on its entry pointer: the caller's slot.
 const READ_BACK_PAST_A_CALLEE_WRITING_ITS_CALLERS_FRAME: &[u8] = &[

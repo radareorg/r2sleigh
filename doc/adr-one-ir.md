@@ -171,12 +171,36 @@ blocks a walk marked are cleared after it. The test `register_class_visits`
 grows `2^depth` leaves, each writing the result and a register across its top
 byte, and the class visits grow as `T log T`.
 
-## Reaching frame writes (D365, 2026-11-14)
+## Reaching frame writes (D365, 2026-11-14; D427, 2026-11-15)
 
-`frame_reach::walk`'s `reaching_writes` gives the merged write spans reaching
-each block's entry: the union of `gen(c)` over every block `c` with a path
-`c ->+ b`, since the transfer `out = in | gen` kills nothing. One condensation,
-then components predecessors first: an acyclic one takes its in-edges' outs, a
-cyclic one adds its members' gen. One linear union per edge gives
-`O(B + E x K)` for `K` spans, against the floor `Omega(B + E + sum |in(b)|)`.
-Every block is seeded.
+`frame_reach::walk`'s `rewritten` names the loaded places a call may write
+before the load reads them. Invariant: a load of place `p` at width `w` reads a
+call's write iff some path runs from a non-tail call whose spans overlap
+`[p, p + w)` to the load with no exact store of `p` at its one width between.
+A place loaded or stored at two widths has no killing store.
+
+- Keys: one per loaded `(place, width)`, sorted; `P` keys, `P / 64` words.
+- Gen: a call's spans, each found by binary search and filled by word:
+  `O(S (log P + P / 64 + W))` per call for `W` keys starting below a span.
+  Every non-tail call also writes `[i64::MIN, base)`: its return address and
+  its callee's frame lie below its pointer, so a place there never folds
+  across it (`mov [rsp-16], 5; call rdi; mov eax, [rsp-16]`).
+- Kill: an exact store of a one-width place clears its key.
+- Solve: `out = (in & !kill) | gen` on `fixpoint::sparse` over the walk's
+  nodes in reverse postorder, the successors as readers. The transfer is
+  monotone and a cell only gains bits, so it moves at most `P` times; the
+  driver refuses past that and the walk denies every place. A pass costs
+  `O((B + E) P / 64)`; reverse postorder settles in `d + 2` passes for loop
+  depth `d`.
+- Replay: each block once from the join of its predecessors' outs, in index
+  order, reading each load's bit: `O((B + E) P / 64 + A log A)`.
+
+Equivalence: with no kill the solution is the old path union per key, so the
+new set is a subset of D365's. A place in the difference has every load
+reached only by a store executed after the last covering call, so no load
+reads a callee's write, and promotion's reaching store for each load is
+unchanged. The union's one-pass condensation (D426 R3) was exact only for a
+transfer that kills nothing, and is deleted with its tests. The tests
+`reaching_rewrites_is_the_kill_aware_union_over_every_path` (200 random graphs
+against a path search) and `reaching_rewrites_grows_linearly_in_the_blocks`
+(a chain and a cycle) replace them.
