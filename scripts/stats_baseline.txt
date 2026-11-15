@@ -110,7 +110,7 @@ bash aa; pdd @ 0x2e630 | call_boundaries.recomputed | 0
 bash aa; pdd @ 0x2e630 | call_boundaries.reused | 1
 bash aa; pdd @ 0x2e630 | callee_reads.computed | 3
 bash aa; pdd @ 0x2e630 | callee_reads.recomputed | 0
-bash aa; pdd @ 0x2e630 | callee_reads.reused | 4
+bash aa; pdd @ 0x2e630 | callee_reads.reused | 8
 bash aa; pdd @ 0x2e630 | defects | 0
 bash aa; pdd @ 0x2e630 | direct_sites.computed | 138
 bash aa; pdd @ 0x2e630 | direct_sites.recomputed | 0
@@ -144,7 +144,7 @@ pumasim aa; pdd @ 0x3b6b20 | call_boundaries.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | call_boundaries.reused | 309
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.computed | 13
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.recomputed | 0
-pumasim aa; pdd @ 0x3b6b20 | callee_reads.reused | 21
+pumasim aa; pdd @ 0x3b6b20 | callee_reads.reused | 33
 pumasim aa; pdd @ 0x3b6b20 | defects | 0
 pumasim aa; pdd @ 0x3b6b20 | direct_sites.computed | 158
 pumasim aa; pdd @ 0x3b6b20 | direct_sites.recomputed | 0

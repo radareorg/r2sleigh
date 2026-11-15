@@ -9864,6 +9864,14 @@ fn leaving_for_a_leaf(leaves: Leaves) -> &'static [u8] {
     Vec::leak(code)
 }
 
+/// D441: `a` calls `b`, and `a`'s closed world decides nothing, so no ask runs at `a`: the `aa`
+/// root states `a`'s writes composed over `b`'s, none, and its slot folds.
+#[test]
+fn a_place_past_a_callee_whose_callee_writes_nothing_folds() {
+    let text = surveyed_cycle(leaving_for_a_leaf(Leaves::Call), None, BASE);
+    assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
+}
+
 /// D441: `a` leaves for `b` through `jmp`, a tail the source correlates: `b`'s statement (no
 /// write) is `a`'s, so `root`'s slot folds.
 #[test]
