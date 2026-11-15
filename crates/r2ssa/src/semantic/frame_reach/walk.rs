@@ -559,6 +559,9 @@ struct Reload {
     literal: u64,
 }
 
+/// A reload the gate passed, with the area its call writes were its format the stored literal.
+type Gated = (Reload, Vec<(i64, i64)>);
+
 /// What every round of one walk shares, none of it a callee's.
 #[derive(Debug)]
 struct WalkSite {
@@ -660,6 +663,15 @@ pub(crate) struct FrameWalk {
 }
 
 impl FrameWalk {
+    /// The walk that decided `points`: what a restatement compares against.
+    fn of(points: &FramePoints, decided: Decided) -> Self {
+        Self {
+            decided,
+            named: points.named(),
+            formats: points.formats.clone(),
+        }
+    }
+
     /// The last round's exact accesses, by place, for promotion's rewrite.
     pub(crate) fn accesses(&self) -> Option<&Accesses> {
         match &self.decided {
@@ -799,7 +811,7 @@ fn conditional(
     site: &WalkSite,
     points: &FramePoints,
     evidence: &Evidence<'_>,
-) -> Vec<(Reload, Vec<(i64, i64)>)> {
+) -> Vec<Gated> {
     let clean = |reload: &Reload| {
         let kept = kept(points, &table.places, reload.place);
         !site.reentered && kept.is_some_and(|(width, kept)| width == reload.width && !kept)
@@ -956,19 +968,17 @@ fn walk_at_entry<C: SsaWorkControl + ?Sized>(
     let unplaced = points.unplaced();
     let points = settle(points, &promoted, None, &site, (evidence, &mut steps));
     control.frame_decided(steps);
-    let walk = FrameWalk {
-        named: points.named(),
-        formats: points.formats.clone(),
-        decided: Decided::Rounds(Box::new(HeldRounds {
-            site,
-            rounds: vec![HeldRound {
-                table,
-                promoted: promoted.clone(),
-                unplaced,
-            }],
-            no_carrier: None,
-        })),
+    let rounds = vec![HeldRound {
+        table,
+        promoted: promoted.clone(),
+        unplaced,
+    }];
+    let held = HeldRounds {
+        site,
+        rounds,
+        no_carrier: None,
     };
+    let walk = FrameWalk::of(&points, Decided::Rounds(Box::new(held)));
     (walk, points, promoted)
 }
 
@@ -982,11 +992,7 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
     control: &C,
 ) -> (FrameWalk, FramePoints, BTreeMap<i64, u32>) {
     let whole = || {
-        let walk = FrameWalk {
-            decided: Decided::Whole,
-            named: FramePoints::whole_frame().named(),
-            formats: BTreeMap::new(),
-        };
+        let walk = FrameWalk::of(&FramePoints::whole_frame(), Decided::Whole);
         (walk, FramePoints::whole_frame(), BTreeMap::new())
     };
     let Some(stack_pointer) = machine.stack_pointer_carrier() else {
@@ -1054,15 +1060,12 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
             true => BTreeMap::new(),
             false => promoted,
         };
-        let walk = FrameWalk {
-            named: points.named(),
-            formats: points.formats.clone(),
-            decided: Decided::Rounds(Box::new(HeldRounds {
-                site,
-                rounds,
-                no_carrier,
-            })),
+        let held = HeldRounds {
+            site,
+            rounds,
+            no_carrier,
         };
+        let walk = FrameWalk::of(&points, Decided::Rounds(Box::new(held)));
         return (walk, points, promotable);
     }
 }
@@ -1230,99 +1233,81 @@ fn by_call(calls: &[CallArguments], values: &IdMap<VarId, Value>) -> Vec<CallBas
 /// A call's written area as spans from its pointer; `None` where nothing bounds it.
 type Area<'a> = Option<&'a [(i64, i64)]>;
 
+/// The loaded keys, then one unset key per reloaded place (D432), and what a span covers of them.
+struct Keys {
+    /// One per loaded `(place, width)`, sorted: a load's bit is its key's.
+    loaded: Vec<(i64, u32)>,
+    /// One per reloaded `(place, width)`, sorted, numbered after `loaded`.
+    unset: Vec<(i64, u32)>,
+    /// Each unset key with its place's loaded key.
+    paired: Vec<(usize, usize)>,
+    widest: i64,
+}
+
+impl Keys {
+    fn of(accesses: &Accesses, reloads: &[Gated]) -> Self {
+        let mut loaded = (accesses.iter())
+            .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
+            .filter(|(_, access)| !access.store)
+            .map(|(place, access)| (place, access.width))
+            .collect::<Vec<_>>();
+        loaded.sort_unstable();
+        loaded.dedup();
+        let mut unset = (reloads.iter())
+            .map(|(reload, _)| (reload.place, reload.width))
+            .collect::<Vec<_>>();
+        unset.sort_unstable();
+        unset.dedup();
+        let paired = (unset.iter().enumerate())
+            .filter_map(|(at, key)| Some((loaded.binary_search(key).ok()?, loaded.len() + at)))
+            .collect();
+        let widest = (loaded.iter().map(|(_, width)| i64::from(*width)).max()).unwrap_or(0);
+        Self {
+            loaded,
+            unset,
+            paired,
+            widest,
+        }
+    }
+
+    fn bits(&self) -> usize {
+        self.loaded.len() + self.unset.len()
+    }
+
+    fn loaded(&self, place: i64, width: u32) -> Option<usize> {
+        self.loaded.binary_search(&(place, width)).ok()
+    }
+
+    fn unset(&self, place: i64, width: u32) -> Option<usize> {
+        let at = self.unset.binary_search(&(place, width)).ok()?;
+        Some(self.loaded.len() + at)
+    }
+
+    /// The keys `spans` cover: a loaded key's unset key with it.
+    fn covered(&self, spans: &[(i64, i64)]) -> Vec<u64> {
+        let mut words = covered(&self.loaded, self.widest, spans, self.bits());
+        for (loaded, unset) in &self.paired {
+            if bit(&words, *loaded) {
+                words[unset / 64] |= 1 << (unset % 64);
+            }
+        }
+        words
+    }
+}
+
 /// Places a call's write reaches with no exact store of theirs between (D369, D427), and each
 /// reload's literal where its place holds it (D432); doc/adr-one-ir.md, "Reaching frame writes".
 fn rewritten(
     site: &WalkSite,
     (bases, writes): (&[Option<i64>], &[Area<'_>]),
     accesses: &Accesses,
-    reloads: &[(Reload, Vec<(i64, i64)>)],
+    reloads: &[Gated],
 ) -> (BTreeSet<i64>, BTreeMap<u64, u64>) {
     let every = || (accesses.keys().copied().collect(), BTreeMap::new());
-    // One key per loaded place and width, sorted: a load's bit is its key's.
-    let mut keys = (accesses.iter())
-        .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
-        .filter(|(_, access)| !access.store)
-        .map(|(place, access)| (place, access.width))
-        .collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys.dedup();
-    let key = |place: i64, width: u32| keys.binary_search(&(place, width)).ok();
-    // One unset key per reloaded place past them: set at entry, by a write, cleared by a store.
-    let mut unset = (reloads.iter())
-        .map(|(reload, _)| (reload.place, reload.width))
-        .collect::<Vec<_>>();
-    unset.sort_unstable();
-    unset.dedup();
-    let unset_key = |place: i64, width: u32| {
-        let at = unset.binary_search(&(place, width)).ok()?;
-        Some(keys.len() + at)
-    };
-    let paired = (unset.iter().enumerate())
-        .filter_map(|(at, (place, width))| Some((key(*place, *width)?, keys.len() + at)))
-        .collect::<Vec<_>>();
-    let bits = keys.len() + unset.len();
-    let widest = keys
-        .iter()
-        .map(|(_, width)| i64::from(*width))
-        .max()
-        .unwrap_or(0);
-    let words_of = |spans: &[(i64, i64)]| {
-        let mut words = covered(&keys, widest, spans, bits);
-        for (loaded, unset) in &paired {
-            if bit(&words, *loaded) {
-                words[unset / 64] |= 1 << (unset % 64);
-            }
-        }
-        words
-    };
+    let keys = Keys::of(accesses, reloads);
     let mut events = IdVec::from_fn(site.blocks.len(), |_: Node| Vec::<(usize, Event)>::new());
-    let calls = (site.calls.iter()).zip(bases).zip(writes).enumerate();
-    for (index, ((call, base), area)) in calls.filter(|(_, ((call, _), _))| !call.tail) {
-        let spans = |area: Area<'_>| match (base, area) {
-            (None, _) => vec![(i64::MIN, i64::MAX)],
-            // The call's own push and its callee's frame lie below its pointer.
-            (Some(base), Some(area)) => merged(
-                (area.iter())
-                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
-                    .chain([(i64::MIN, *base)]),
-            ),
-            // Unbounded, it is still this frame's: it ends at the entry pointer.
-            (Some(base), None) => merged([(i64::MIN, *base), (*base, 0)].into_iter()),
-        };
-        // Default deny: a call outside the numbered blocks may rewrite every loaded place.
-        let Some(node) = site.node(call.at.0) else {
-            return every();
-        };
-        let slot = (reloads
-            .binary_search_by_key(&index, |(reload, _)| reload.call)
-            .ok())
-        .filter(|_| base.is_some());
-        let unset = slot.and_then(|slot| {
-            let (reload, bounded) = &reloads[slot];
-            Some((
-                slot,
-                reload.load,
-                bounded,
-                unset_key(reload.place, reload.width)?,
-            ))
-        });
-        let event = match unset {
-            Some((slot, load, bounded, unset)) => {
-                let (bounded, whole) = (words_of(&spans(Some(bounded))), words_of(&spans(*area)));
-                let extra = (whole.iter().zip(&bounded))
-                    .map(|(whole, bounded)| whole & !bounded)
-                    .collect();
-                events[node].push((load, Event::Format(slot, unset)));
-                Event::Reloaded {
-                    slot,
-                    bounded,
-                    extra,
-                }
-            }
-            None => Event::Write(words_of(&spans(*area))),
-        };
-        events[node].push((call.at.1, event));
+    if !call_events(site, (bases, writes), (&keys, reloads), &mut events) {
+        return every();
     }
     let mut loads = Vec::new();
     let mut rewritten = BTreeSet::new();
@@ -1332,7 +1317,7 @@ fn rewritten(
         list.iter().map(move |access| (*place, one, access))
     });
     for (place, one, access) in each {
-        let Some(at) = key(place, access.width) else {
+        let Some(at) = keys.loaded(place, access.width) else {
             continue;
         };
         let Some(node) = site.node(access.block) else {
@@ -1350,16 +1335,16 @@ fn rewritten(
                 Event::Load(at, loads.len() - 1)
             }
         };
-        if let (Event::Kill(_), Some(unset)) = (&event, unset_key(place, access.width)) {
+        if let (Event::Kill(_), Some(unset)) = (&event, keys.unset(place, access.width)) {
             events[node].push((access.index, Event::Kill(unset)));
         }
         events[node].push((access.index, event));
     }
-    let mut seed = vec![0u64; bits.div_ceil(64)];
-    fill(&mut seed, keys.len(), bits);
+    let mut seed = vec![0u64; keys.bits().div_ceil(64)];
+    fill(&mut seed, keys.loaded.len(), keys.bits());
     let solve = (site.order.as_slice(), &site.successors, &site.predecessors);
-    let entry = (site.root, seed.as_slice());
-    let Some(solved) = reaching_rewrites(solve, &mut events, (bits, entry), reloads.len()) else {
+    let entry = (keys.bits(), (site.root, seed.as_slice()));
+    let Some(solved) = reaching_rewrites(solve, &mut events, entry, reloads.len()) else {
         return every();
     };
     let reached = (loads.iter()).zip(solved.reached);
@@ -1370,6 +1355,66 @@ fn rewritten(
         Some((instruction, reload.literal))
     });
     (rewritten, formats.collect())
+}
+
+/// Each non-tail call's write, a reload's as its format load and its conditional write (D432);
+/// false where a call lies outside the numbered blocks, which may rewrite every loaded place.
+fn call_events(
+    site: &WalkSite,
+    (bases, writes): (&[Option<i64>], &[Area<'_>]),
+    (keys, reloads): (&Keys, &[Gated]),
+    events: &mut IdVec<Node, Vec<(usize, Event)>>,
+) -> bool {
+    let calls = (site.calls.iter()).zip(bases).zip(writes).enumerate();
+    for (index, ((call, base), area)) in calls.filter(|(_, ((call, _), _))| !call.tail) {
+        let spans = |area: Area<'_>| match (base, area) {
+            (None, _) => vec![(i64::MIN, i64::MAX)],
+            // The call's own push and its callee's frame lie below its pointer.
+            (Some(base), Some(area)) => merged(
+                (area.iter())
+                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
+                    .chain([(i64::MIN, *base)]),
+            ),
+            // Unbounded, it is still this frame's: it ends at the entry pointer.
+            (Some(base), None) => merged([(i64::MIN, *base), (*base, 0)].into_iter()),
+        };
+        let Some(node) = site.node(call.at.0) else {
+            return false;
+        };
+        let slot = (reloads
+            .binary_search_by_key(&index, |(reload, _)| reload.call)
+            .ok())
+        .filter(|_| base.is_some());
+        let unset = slot.and_then(|slot| {
+            let (reload, bounded) = &reloads[slot];
+            Some((
+                slot,
+                reload.load,
+                bounded,
+                keys.unset(reload.place, reload.width)?,
+            ))
+        });
+        let event = match unset {
+            Some((slot, load, bounded, unset)) => {
+                let (bounded, whole) = (
+                    keys.covered(&spans(Some(bounded))),
+                    keys.covered(&spans(*area)),
+                );
+                let extra = (whole.iter().zip(&bounded))
+                    .map(|(whole, bounded)| whole & !bounded)
+                    .collect();
+                events[node].push((load, Event::Format(slot, unset)));
+                Event::Reloaded {
+                    slot,
+                    bounded,
+                    extra,
+                }
+            }
+            None => Event::Write(keys.covered(&spans(*area))),
+        };
+        events[node].push((call.at.1, event));
+    }
+    true
 }
 
 /// One event of a block, by its index there.
@@ -1440,9 +1485,8 @@ struct Solved {
     held: Vec<bool>,
 }
 
-/// The least solution of `out = f(in)` on `fixpoint::sparse` in reverse postorder, `f` a block's
-/// events in order (a gen/kill pair where it holds no reload), the root entered with `seed`; `None`
-/// where the driver refuses (doc/adr-one-ir.md, "Reaching frame writes").
+/// The least solution of each block's events on `fixpoint::sparse` in reverse postorder, the root
+/// entered with `seed`; `None` where the driver refuses (doc/adr-one-ir.md, "D432 as built").
 fn reaching_rewrites(
     (order, successors, predecessors): (&[Node], &Csr<Node, Node>, &Csr<Node, Node>),
     events: &mut IdVec<Node, Vec<(usize, Event)>>,
@@ -2287,6 +2331,9 @@ mod tests {
         )
     }
 
+    /// An event's block, its position there and its key.
+    type At = (Node, usize, usize);
+
     fn one_key(key: usize, keys: usize) -> Vec<u64> {
         let mut words = vec![0; keys.div_ceil(64)];
         words[key / 64] |= 1 << (key % 64);
@@ -2298,7 +2345,7 @@ mod tests {
     fn reached_by_paths(
         successors: &Csr<Node, Node>,
         events: &IdVec<Node, Vec<(usize, Event)>>,
-        (block, at, key): (Node, usize, usize),
+        (block, at, key): At,
     ) -> bool {
         let kills = |event: &Event| matches!(event, Event::Kill(killed) if *killed == key);
         let writes = |event: &Event| matches!(event, Event::Write(set) if set[key / 64] >> (key % 64) & 1 == 1);
@@ -2392,8 +2439,85 @@ mod tests {
         }
     }
 
-    /// The least solution with reloads and an entry seed (D432): by the definition, each reload's
-    /// call writes `extra` exactly where its load is reached unset, iterated from no such reload.
+    /// One random event at the end of `node`: a write, a kill, a load, or a reload's format load
+    /// and its call. Loads and format loads are recorded as `(node, at, key)`.
+    fn push_random(
+        next: &mut impl FnMut(u64) -> u64,
+        (list, keys): (&mut Vec<(usize, Event)>, usize),
+        (node, loads, formats): (Node, &mut Vec<At>, &mut Vec<At>),
+    ) {
+        let key = next(keys as u64) as usize;
+        let at = list.len();
+        match next(4) {
+            0 => list.push((at, Event::Write(random_set(next, key, keys)))),
+            1 => list.push((at, Event::Kill(key))),
+            2 => {
+                loads.push((node, at, key));
+                list.push((at, Event::Load(key, loads.len() - 1)));
+            }
+            _ => {
+                let slot = formats.len();
+                formats.push((node, at, key));
+                list.push((at, Event::Format(slot, key)));
+                let (bounded, extra) = (random_set(next, key, keys), random_set(next, key, keys));
+                let reloaded = Event::Reloaded {
+                    slot,
+                    bounded,
+                    extra,
+                };
+                list.push((at + 1, reloaded));
+            }
+        }
+    }
+
+    /// `events` with each reload's call a plain write: `extra` included where `unset` says.
+    fn as_writes(
+        events: &IdVec<Node, Vec<(usize, Event)>>,
+        unset: &[bool],
+    ) -> IdVec<Node, Vec<(usize, Event)>> {
+        let write = |event: &Event| match event {
+            Event::Reloaded {
+                slot,
+                bounded,
+                extra,
+            } => {
+                let mut set = bounded.clone();
+                (unset[*slot]).then(|| or_into(&mut set, extra));
+                Event::Write(set)
+            }
+            other => other.clone(),
+        };
+        IdVec::from_fn(events.len(), |node: Node| {
+            (events[node].iter())
+                .map(|(at, event)| (*at, write(event)))
+                .collect()
+        })
+    }
+
+    /// The least solution by the definition: the path search, each reload unset where its format
+    /// load is reached, iterated from none unset to its fixpoint.
+    fn least_by_paths(
+        successors: &Csr<Node, Node>,
+        events: &IdVec<Node, Vec<(usize, Event)>>,
+        (loads, formats): (&[At], &[At]),
+    ) -> Solved {
+        let mut unset = vec![false; formats.len()];
+        loop {
+            let plain = as_writes(events, &unset);
+            let reached = |at: &At| reached_by_paths(successors, &plain, *at);
+            let next = formats.iter().map(reached).collect::<Vec<_>>();
+            if next == unset {
+                let held = unset.iter().map(|unset| !unset).collect();
+                return Solved {
+                    reached: loads.iter().map(reached).collect(),
+                    held,
+                };
+            }
+            unset = next;
+        }
+    }
+
+    /// The least solution with reloads and an entry seed (D432), against [`least_by_paths`].
     #[test]
     fn reaching_rewrites_with_reloads_is_their_least_path_solution() {
         let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
@@ -2412,86 +2536,22 @@ mod tests {
             let (order, successors, predecessors) = graph(n, &edges);
             let first = next(keys as u64) as usize;
             let entry = random_set(&mut next, first, keys);
-            // The root's seed is a write before its first event, for the path definition.
-            let mut events = IdVec::from_fn(n, |node: Node| match node.index() {
-                0 => vec![(0, Event::Write(entry.clone()))],
-                _ => Vec::new(),
-            });
+            // For the path search the root's seed is a write before its first event.
+            let root = Node::from_index(0);
+            let mut events = IdVec::from_fn(n, |_: Node| Vec::<(usize, Event)>::new());
+            events[root].push((0, Event::Write(entry.clone())));
             let (mut loads, mut formats) = (Vec::new(), Vec::new());
             for _ in 0..next(16) {
                 let node = Node::from_index(next(n as u64) as usize);
-                let key = next(keys as u64) as usize;
-                let at = events[node].len();
-                match next(4) {
-                    0 => events[node].push((at, Event::Write(random_set(&mut next, key, keys)))),
-                    1 => events[node].push((at, Event::Kill(key))),
-                    2 => {
-                        loads.push((node, at, key));
-                        events[node].push((at, Event::Load(key, loads.len() - 1)));
-                    }
-                    _ => {
-                        let slot = formats.len();
-                        formats.push((node, at, key));
-                        events[node].push((at, Event::Format(slot, key)));
-                        let (bounded, extra) = (
-                            random_set(&mut next, key, keys),
-                            random_set(&mut next, key, keys),
-                        );
-                        events[node].push((
-                            at + 1,
-                            Event::Reloaded {
-                                slot,
-                                bounded,
-                                extra,
-                            },
-                        ));
-                    }
-                }
+                let at = (node, &mut loads, &mut formats);
+                push_random(&mut next, (&mut events[node], keys), at);
             }
-            let unbounded = |unset: &[bool]| {
-                let write = |event: &Event| match event {
-                    Event::Reloaded {
-                        slot,
-                        bounded,
-                        extra,
-                    } => {
-                        let mut set = bounded.clone();
-                        if unset[*slot] {
-                            or_into(&mut set, extra);
-                        }
-                        Event::Write(set)
-                    }
-                    other => other.clone(),
-                };
-                IdVec::from_fn(n, |node: Node| {
-                    (events[node].iter())
-                        .map(|(at, event)| (*at, write(event)))
-                        .collect::<Vec<_>>()
-                })
-            };
-            let mut unset = vec![false; formats.len()];
-            let plain = loop {
-                let plain = unbounded(&unset);
-                let next_unset = (formats.iter())
-                    .map(|format| reached_by_paths(&successors, &plain, *format))
-                    .collect::<Vec<_>>();
-                if next_unset == unset {
-                    break plain;
-                }
-                unset = next_unset;
-            };
-            let expected = Solved {
-                reached: (loads.iter())
-                    .map(|load| reached_by_paths(&successors, &plain, *load))
-                    .collect(),
-                held: unset.iter().map(|unset| !unset).collect(),
-            };
-            // The solver takes the seed as the root's entering state, not as an event.
-            events[Node::from_index(0)].remove(0);
+            let expected = least_by_paths(&successors, &events, (&loads, &formats));
+            events[root].remove(0);
             let solved = reaching_rewrites(
                 (order.as_slice(), &successors, &predecessors),
                 &mut events,
-                (keys, (Some(Node::from_index(0)), &entry)),
+                (keys, (Some(root), &entry)),
                 formats.len(),
             );
             assert_eq!(solved, Some(expected), "{edges:?} {events:?}");
