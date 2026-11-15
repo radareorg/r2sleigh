@@ -398,8 +398,9 @@ pub enum MachineRegisterGeometryState {
     Malformed,
 }
 
-/// `CallReads` built and raw call sites stated by contexts made, in a `work-meter` build (D436).
-pub fn call_reads_built() -> Option<(u64, u64)> {
+/// `CallReads` built for the column, raw call sites stated by contexts made, and rows built for a
+/// reloaded format (D432), in a `work-meter` build (D436).
+pub fn call_reads_built() -> Option<(u64, u64, u64)> {
     #[cfg(feature = "work-meter")]
     return Some(meter::counts());
     #[cfg(not(feature = "work-meter"))]
@@ -414,10 +415,20 @@ mod meter {
     static BUILT: AtomicU64 = AtomicU64::new(0);
     #[cfg(feature = "work-meter")]
     static SITES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "work-meter")]
+    static RELOADED: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(feature = "work-meter")]
-    pub(super) fn counts() -> (u64, u64) {
-        (BUILT.load(Ordering::Relaxed), SITES.load(Ordering::Relaxed))
+    pub(super) fn counts() -> (u64, u64, u64) {
+        let count = |meter: &AtomicU64| meter.load(Ordering::Relaxed);
+        (count(&BUILT), count(&SITES), count(&RELOADED))
+    }
+
+    /// A row stated for a reloaded format: one per reload a walk round decides, one per settle.
+    #[inline]
+    pub(super) fn reloaded() {
+        #[cfg(feature = "work-meter")]
+        RELOADED.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
@@ -1464,13 +1475,14 @@ impl SourceMachineContext {
             let Some(tail) = self.literal_tail(*literal) else {
                 continue;
             };
-            self.format_tails.insert(*instruction, tail);
             let column = &self.call_reads.sites;
-            let Ok(at) = column.binary_search_by_key(instruction, |row| row.0) else {
-                continue;
-            };
-            let reads = self.stated_call_reads(Some(*instruction));
-            self.call_reads.sites[at].1.0 = reads;
+            let at = column.binary_search_by_key(instruction, |row| row.0);
+            meter::reloaded();
+            let reads = self.stated_call_reads_with(Some(*instruction), Some(&tail));
+            self.format_tails.insert(*instruction, tail);
+            if let Ok(at) = at {
+                self.call_reads.sites[at].1.0 = reads;
+            }
         }
     }
 
@@ -1512,6 +1524,7 @@ impl SourceMachineContext {
     /// What the call at `instruction` may read (`CallReads`): the locations of its complete, fixed
     /// interface, else every location; none where the machine names no convention.
     fn stated_call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
+        meter::built();
         let tail = instruction.and_then(|at| self.format_tails.get(&at));
         self.stated_call_reads_with(instruction, tail)
     }
@@ -1523,6 +1536,7 @@ impl SourceMachineContext {
         instruction: u64,
         literal: u64,
     ) -> Option<crate::call_reads::CallReads> {
+        meter::reloaded();
         let tail = self.literal_tail(literal)?;
         self.stated_call_reads_with(Some(instruction), Some(&tail))
     }
@@ -1533,7 +1547,6 @@ impl SourceMachineContext {
         instruction: Option<u64>,
         tail: Option<&r2abi::format::PrintfConsumedArguments>,
     ) -> Option<crate::call_reads::CallReads> {
-        meter::built();
         let identity = instruction.and_then(|instruction| self.raw_call_site_at(instruction));
         let target = identity
             .map(SourceCallSiteIdentity::target)

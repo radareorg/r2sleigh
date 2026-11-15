@@ -256,6 +256,9 @@ reaches the load.
   through the same `stated_call_reads`. Nothing between the walk and the
   settle reads a row (`fold_loads`, the three decisions and `prepare` read
   none); a walk after the settle is a debug assertion.
+- Meter: a reloaded row (one per gated reload per decided round, one per
+  settle) counts as `reloaded` in `call_reads_built`, apart from the column's
+  one build per site that D436's gate holds.
 - Test: `reaching_rewrites_with_reloads_is_their_least_path_solution`, 300
   random graphs with a seed and reloads, against the path search iterated from
   no unset reload to its fixpoint.

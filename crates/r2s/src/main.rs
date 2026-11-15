@@ -78,8 +78,8 @@ fn report_stats(stats: r2engine::query::AnalysisStats) {
         "r2s: stats: site_fates_relifted {}",
         stats.site_fates_relifted
     );
-    if let Some((built, rows)) = r2engine::query::call_reads_built() {
-        eprintln!("r2s: stats: call_reads_built {built} of {rows} rows");
+    if let Some((built, rows, reloaded)) = r2engine::query::call_reads_built() {
+        eprintln!("r2s: stats: call_reads_built {built} of {rows} rows, {reloaded} reloaded");
     }
     if let Some(scans) = r2engine::query::scans() {
         eprintln!("r2s: stats: scans {scans}");

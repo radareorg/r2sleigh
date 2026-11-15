@@ -679,7 +679,7 @@ fn an_import_call_reads_the_count_register_alone_of_its_register() {
 #[test]
 fn a_context_builds_each_call_sites_reads_once() {
     let _ = read_at_call(CALL_STUB, "dcgettext");
-    let (built, rows) = r2ssa::call_reads_built().expect("a work-meter build");
+    let (built, rows, _) = r2ssa::call_reads_built().expect("a work-meter build");
     assert!(
         built <= rows,
         "{built} CallReads built for {rows} call-site rows"
