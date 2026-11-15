@@ -1134,15 +1134,15 @@ impl BoundaryResult {
     }
 }
 
-/// Whether a body's own register or unproven result has its integer lane dead at each of one or
-/// more calls, which `EveryWayIn` on that lane makes every way in (D202 per lane, D440, D444).
+/// Whether a register or unproven result's integer lane is dead at one or more ways in, calls or
+/// lane-0 tail callers (D445), which `EveryWayIn` on that lane closes (D202, D440, D444).
 fn integer_dead_at_every_call(supply: Supply, forwarding: &Forwarding) -> bool {
     let at = usize::from(LaneId::INTEGER.0);
     let lane = forwarding.lanes[at];
     let held = holds(supply, &forwarding.lanes)[at];
     !supply.declared
         && matches!(supply.returns, Returns::Register | Returns::Unproven)
-        && forwarding.calls > 0
+        && (forwarding.calls > 0 || !forwarding.forwarders_of(at).is_empty())
         && held
         && lane.dead
         && !(lane.read || lane.unknown || lane.cycle)
@@ -2002,8 +2002,8 @@ impl CallEffects for Effects<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Authority, Carriers, Dispute, Forwarding, JoinedLane, LANES, LaneId, Returned, Returns,
-        Supply, disputes_of, forwarded_lanes, integer_dead_at_every_call,
+        Authority, Carriers, Dispute, Forwarder, Forwarding, JoinedLane, LANES, LaneId, Returned,
+        Returns, Supply, disputes_of, forwarded_lanes, integer_dead_at_every_call,
     };
     use r2source::confidence::{Basis, Confidence};
     use r2source::{ConventionId, SourceFunctionInterface, SourceFunctionReturn};
@@ -2232,8 +2232,8 @@ mod tests {
         assert!(any.clobbers(rbx));
     }
 
-    /// `calls` calls joined, every held lane dead at each.
-    fn dead_at(calls: u32) -> Forwarding {
+    /// `calls` calls joined, every held lane dead at each, and `forwarders` waiting on their own.
+    fn dead_at(calls: u32, forwarders: &[Forwarder]) -> Forwarding {
         Forwarding {
             lanes: [JoinedLane {
                 held: true,
@@ -2244,7 +2244,7 @@ mod tests {
             loader_calls: 0,
             slot_read: false,
             unread: false,
-            forwarders: Box::default(),
+            forwarders: forwarders.into(),
         }
     }
 
@@ -2264,10 +2264,26 @@ mod tests {
             integer_undefined: true,
             float_second: None,
         };
-        assert!(integer_dead_at_every_call(supply(None), &dead_at(1)));
+        assert!(integer_dead_at_every_call(supply(None), &dead_at(1, &[])));
         assert!(!integer_dead_at_every_call(
             supply(Some(undefined)),
-            &dead_at(1)
+            &dead_at(1, &[])
         ));
+    }
+
+    /// A tail caller that forwards the integer lane is a way in on it (D445); with no call, a tail
+    /// caller of another lane alone, or none, the lane is not decided.
+    #[test]
+    fn a_lane_zero_tail_caller_is_a_way_in_on_the_integer_lane() {
+        let supply = Supply {
+            declared: false,
+            returns: Returns::Register,
+            carriers: None,
+            handed_back: false,
+        };
+        let tail = |at| Forwarder { at, caller: 0x40 };
+        assert!(integer_dead_at_every_call(supply, &dead_at(0, &[tail(0)])));
+        assert!(!integer_dead_at_every_call(supply, &dead_at(0, &[tail(1)])));
+        assert!(!integer_dead_at_every_call(supply, &dead_at(0, &[])));
     }
 }

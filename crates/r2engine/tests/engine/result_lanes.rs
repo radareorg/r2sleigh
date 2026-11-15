@@ -1035,3 +1035,68 @@ fn an_integer_lane_forwarder_not_closed_keeps_the_bits_above_a_narrow_callee() {
         assert!(!text.contains("integer result register"), "{case}: {text}");
     }
 }
+
+/// `t`: `jmp f`.
+const TAILS_TO_F: &[u8] = &[0xe9, 0xbb, 0xff, 0xff, 0xff];
+
+/// `call t; mov eax, 1; call rsi; ret`.
+const CALLS_T_OVERWRITES_RAX: &[u8] = &[
+    0xe8, 0x1b, 0x00, 0x00, 0x00, // 1020 call 0x1040
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1025 mov eax, 1
+    0xff, 0xd6, // 102a call rsi
+    0xc3, // 102c ret
+];
+
+/// `call t; xor eax, eax; xor edx, edx; xorps xmm0, xmm0; xorps xmm1, xmm1; ret`.
+const CALLS_T_OVERWRITES_EVERY_LANE: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 1030 call 0x1040
+    0x31, 0xc0, 0x31, 0xd2, 0x0f, 0x57, 0xc0, 0x0f, 0x57, 0xc9, 0xc3,
+];
+
+/// `lea rax, [rip - 0x17] (t); mov [rdi], rax; ret`: code names `t`'s address and stores it.
+const STORES_T: &[u8] = &[
+    0x48, 0x8d, 0x05, 0xe9, 0xff, 0xff, 0xff, // 1050 lea rax, [0x1040]
+    0x48, 0x89, 0x07, // 1057 mov [rdi], rax
+    0xc3, // 105a ret
+];
+
+/// A tail caller is a way in on the integer lane: `f` has no call, and `t`'s every call overwrites
+/// RAX, so nothing reads `f`'s RAX after its return (D445).
+#[test]
+fn a_function_only_tailed_to_by_a_dead_lane_caller_reads_no_residual() {
+    let text = narrow_result_under_aa(
+        RETURNS_A_NARROW_CALL,
+        &[
+            (0x20, CALLS_T_OVERWRITES_RAX),
+            (0x30, CALLS_T_OVERWRITES_EVERY_LANE),
+            (0x40, TAILS_TO_F),
+        ],
+    );
+    assert!(!text.contains("r2sleigh_residual_u64("), "{text}");
+    assert!(
+        text.contains("no call reads the integer result register (assuming closed-world)"),
+        "{text}"
+    );
+}
+
+/// Default-deny: no call and no tail caller, or a tail caller whose own way in is open, keeps the
+/// residual (D445).
+#[test]
+fn a_function_with_no_closed_lane_zero_way_in_keeps_the_bits_above_a_narrow_callee() {
+    let cases: [(&str, Bodies); 2] = [
+        ("no call and no tail caller", Vec::new()),
+        (
+            "a tail caller whose address escapes",
+            vec![
+                (0x20, CALLS_T_OVERWRITES_RAX),
+                (0x40, TAILS_TO_F),
+                (0x50, STORES_T),
+            ],
+        ),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(!text.contains("integer result register"), "{case}: {text}");
+    }
+}
