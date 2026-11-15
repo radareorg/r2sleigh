@@ -460,8 +460,30 @@ pub struct Forwarding {
     /// A cited slot every take reaches reads the result (D227).
     pub slot_read: bool,
     pub unread: bool,
-    /// The callers a returned lane is dead in only if their own calls are every way in.
-    pub forwarders: Box<[u64]>,
+    /// Each caller a lane is returned to and dead in only if its own ways in on that lane are every
+    /// way in, by lane, then caller (D444).
+    pub forwarders: Box<[Forwarder]>,
+}
+
+/// A caller lane `at` is returned to, dead there only where its own ways in on that lane are every
+/// way in: a `Returned` lane hands the bytes to the caller's same lane only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Forwarder {
+    pub at: usize,
+    pub caller: u64,
+}
+
+impl Forwarding {
+    /// The forwarders of lane `at`. O(log forwarders).
+    fn forwarders_of(&self, at: usize) -> &[Forwarder] {
+        let start = self
+            .forwarders
+            .partition_point(|forwarder| forwarder.at < at);
+        let end = self
+            .forwarders
+            .partition_point(|forwarder| forwarder.at <= at);
+        &self.forwarders[start..end]
+    }
 }
 
 /// A function's forwarding, solved with every member of its strongly connected component of the
@@ -859,7 +881,7 @@ impl Component<'_> {
     fn fixed(
         &self,
         outside: &impl Fn(u64) -> Option<Option<Forwarding>>,
-        forwarders: &mut [BTreeSet<u64>],
+        forwarders: &mut [BTreeSet<Forwarder>],
     ) -> Vec<Option<[JoinedLane; LANES]>> {
         let fixed = (self.directs.iter().zip(forwarders)).map(|(direct, forwarders)| {
             let direct = direct.as_ref()?;
@@ -869,7 +891,10 @@ impl Component<'_> {
                 let theirs = outside(returned.caller).flatten();
                 let fate = forwarded(theirs.as_ref(), returned.at, returned.bytes);
                 let dead = matches!(fate, Some(Forwarded::DeadIfEveryWayIn));
-                forwarders.extend(dead.then_some(returned.caller));
+                forwarders.extend(dead.then_some(Forwarder {
+                    at: returned.at,
+                    caller: returned.caller,
+                }));
                 join(&mut lanes[returned.at], fate);
             }
             Some(lanes)
@@ -909,32 +934,40 @@ fn read_inside(theirs: JoinedLane, bytes: ByteMask) -> Option<Forwarded> {
     }
 }
 
-/// Whether the calls a forwarding joined are every way the image enters a function, and each
-/// forwarder's are too: a forwarder is in a later component, so the question ends.
+/// Whether a function's joined calls are every way in, and each of one lane's forwarders' are on
+/// that lane (D444): a forwarder is in a later component, so the question ends.
 pub(super) struct EveryWayIn;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for EveryWayIn {
-    type Key = u64;
+    type Key = (u64, usize);
     type Value = bool;
     const NAME: &'static str = "every-way-in";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: `only_called` once, and one ask per forwarder.
-    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> bool {
+    /// Work: `only_called` once, and one ask per forwarder of the lane.
+    fn compute(db: &Db<ProgramInputs<S>>, &(callee, at): &(u64, usize)) -> bool {
         let found = db.get::<ComponentForwarding>(&callee).ok();
         let Some(forwarding) = found.as_deref().and_then(Option::as_ref) else {
             return false;
         };
-        let mut answer =
-            !forwarding.unread && super::reads::only_called(db, callee, forwarding.calls);
-        for caller in forwarding.forwarders.iter() {
-            if !answer {
-                break;
-            }
-            answer = db.get::<EveryWayIn>(caller).is_ok_and(|theirs| *theirs);
-        }
-        answer
+        ways_in(db, callee, forwarding, forwarding.forwarders_of(at))
     }
+}
+
+/// Whether `forwarding`'s calls are every way into `callee`, and each of `forwarders`' are on its
+/// lane; a cycle of asks is an error, which answers false. The all-lane ask passes every forwarder.
+fn ways_in<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    forwarding: &Forwarding,
+    forwarders: &[Forwarder],
+) -> bool {
+    !forwarding.unread
+        && super::reads::only_called(db, callee, forwarding.calls)
+        && (forwarders.iter()).all(|forwarder| {
+            let key = (forwarder.caller, forwarder.at);
+            db.get::<EveryWayIn>(&key).is_ok_and(|theirs| *theirs)
+        })
 }
 
 /// Whether a float result is one group with the lane after it: the body writes that lane at a
@@ -1038,7 +1071,7 @@ fn read(lane: &mut JoinedLane, bytes: ByteMask, width: Option<Option<u32>>) {
 
 impl BoundaryResult {
     /// The decision from the open read's supply and the calls' forwarding (the demand): every way
-    /// in is asked only where every lane, or a register result's integer lane, is dead.
+    /// in is asked only where every lane, or the integer lane alone on its own forwarders, is dead.
     fn decided<S: Source + 'static>(
         db: &Db<ProgramInputs<S>>,
         (entry, thumb): (u64, bool),
@@ -1048,18 +1081,23 @@ impl BoundaryResult {
         let supply = Supply::of(open);
         let lanes = &forwarding.lanes;
         let mut asked = None;
-        let mut every_way_in =
-            || *asked.get_or_insert_with(|| db.get::<EveryWayIn>(&entry).is_ok_and(|all| *all));
+        let mut every_way_in = || {
+            let every = &forwarding.forwarders;
+            *asked.get_or_insert_with(|| ways_in(db, entry, forwarding, every))
+        };
         let grouped = group_read(supply, lanes);
         let result = match grouped {
             true => None,
             false => decided_result(supply, forwarding, &mut every_way_in),
         };
-        // The integer lane's own `Dead` below needs no other lane dead (D440); a read decides it.
+        let every = asked == Some(true);
+        // The integer lane's own `Dead` needs no other lane dead (D440), and its ways in are its own
+        // forwarders' (D444); a read decides it.
         let read = matches!(result, Some(SourceClosedResult::Read(_)));
-        if !grouped && !read && integer_dead_at_every_call(supply, forwarding) {
-            every_way_in();
-        }
+        let at = usize::from(LaneId::INTEGER.0);
+        let integer = every
+            || (!grouped && !read && integer_dead_at_every_call(supply, forwarding))
+                && db.get::<EveryWayIn>(&(entry, at)).is_ok_and(|all| *all);
         let result = result.or_else(|| declared_void(db, entry, supply, forwarding));
         let overwritten = |lane: LaneId| {
             let effect = db.get::<RegisterEffects>(&(entry, thumb));
@@ -1069,12 +1107,12 @@ impl BoundaryResult {
         let disputes = disputes_of(supply, lanes, overwritten);
         let disputes = (disputes.into_iter().chain(body_disputes(open))).collect::<Vec<_>>();
         let holds = holds(supply, lanes);
-        let dead = asked == Some(true);
-        let decisions = std::array::from_fn(|at| match lanes[at] {
-            _ if !holds[at] => LaneDecision::NoResult,
-            lane if lane.read => LaneDecision::Read,
-            lane if lane.cycle => LaneDecision::Cycle,
-            lane if lane.dead && dead => LaneDecision::Dead,
+        let closed = |lane: usize| every || (lane == at && integer);
+        let decisions = std::array::from_fn(|lane| match lanes[lane] {
+            _ if !holds[lane] => LaneDecision::NoResult,
+            joined if joined.read => LaneDecision::Read,
+            joined if joined.cycle => LaneDecision::Cycle,
+            joined if joined.dead && closed(lane) => LaneDecision::Dead,
             _ => LaneDecision::Open,
         });
         Self {
@@ -1096,14 +1134,14 @@ impl BoundaryResult {
     }
 }
 
-/// Whether a body's own register result has its integer lane dead at each of one or more calls,
-/// which `EveryWayIn` makes every way in; the other lanes play no part (D202 per lane, D440).
+/// Whether a body's own register or unproven result has its integer lane dead at each of one or
+/// more calls, which `EveryWayIn` on that lane makes every way in (D202 per lane, D440, D444).
 fn integer_dead_at_every_call(supply: Supply, forwarding: &Forwarding) -> bool {
     let at = usize::from(LaneId::INTEGER.0);
     let lane = forwarding.lanes[at];
     let held = holds(supply, &forwarding.lanes)[at];
     !supply.declared
-        && supply.returns == Returns::Register
+        && matches!(supply.returns, Returns::Register | Returns::Unproven)
         && forwarding.calls > 0
         && held
         && lane.dead
@@ -1964,8 +2002,8 @@ impl CallEffects for Effects<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Authority, Dispute, JoinedLane, LANES, LaneId, Returned, Supply, disputes_of,
-        forwarded_lanes,
+        Authority, Carriers, Dispute, Forwarding, JoinedLane, LANES, LaneId, Returned, Returns,
+        Supply, disputes_of, forwarded_lanes, integer_dead_at_every_call,
     };
     use r2source::confidence::{Basis, Confidence};
     use r2source::{ConventionId, SourceFunctionInterface, SourceFunctionReturn};
@@ -2192,5 +2230,44 @@ mod tests {
             .expect("held");
         let any = (*any).clone().expect("joined");
         assert!(any.clobbers(rbx));
+    }
+
+    /// `calls` calls joined, every held lane dead at each.
+    fn dead_at(calls: u32) -> Forwarding {
+        Forwarding {
+            lanes: [JoinedLane {
+                held: true,
+                dead: true,
+                ..JoinedLane::default()
+            }; LANES],
+            calls,
+            loader_calls: 0,
+            slot_read: false,
+            unread: false,
+            forwarders: Box::default(),
+        }
+    }
+
+    /// The integer lane's rule holds for an unproven result as for a register one: every byte of
+    /// the lane is unobserved, whatever the result's later shape (D444); no integer byte, no rule.
+    #[test]
+    fn an_unproven_results_integer_lane_dead_at_every_call_is_decided_on_its_ways_in() {
+        let supply = |carriers| Supply {
+            declared: false,
+            returns: Returns::Unproven,
+            carriers,
+            handed_back: false,
+        };
+        let undefined = Carriers {
+            float: false,
+            second: false,
+            integer_undefined: true,
+            float_second: None,
+        };
+        assert!(integer_dead_at_every_call(supply(None), &dead_at(1)));
+        assert!(!integer_dead_at_every_call(
+            supply(Some(undefined)),
+            &dead_at(1)
+        ));
     }
 }
