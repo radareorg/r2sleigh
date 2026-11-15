@@ -592,9 +592,9 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D8 | The observation journal is replaced by D, not kept | none |
 | D9 | Location SSA is superseded | none |
 | D20 | The decompiler is rewritten, not refactored | none |
-| D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instruction-relative label on its op, and (cut) | f3985f01a |
+| D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instruction-relative label on its op, and (cut) | 050434e3b, 35657f480 |
 | D37 | r2ssa states why an arity is a floor, one typed variant per floor branch (an unresolved transfer, a supervisor entry, an argument area (cut) | 8a6e99f45 |
-| D58 | A rendering decision depends on facts, not on the order placement writes blocks | 6631526eb |
+| D58 | A rendering decision depends on facts, not on the order placement writes blocks | 13769b53c |
 | D59 | A condition chain whose exit is a `continue` to its own head is certified | 135aaba14 |
 | D60 | The structurer's data guards each have an end to end engine test and the certificate reads what a copy says | 39a1edad0 |
 | D62 | A callee's result presence is one fact per callee, stated by r2ssa and joined by r2engine's `CallBoundary` (D166) and projected by r2types, (cut) | f2256c1aa |
@@ -602,13 +602,12 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D77 | `crates/r2s/tests/commands.rs` `a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt` failed about 1 run in 4 under load on macOS (cut) | 445b4c45a |
 | D100 | A header whose parameters are only a floor says so (D71's second review | 8859e701a |
 | D106 | A declared prototype that reads fewer registers than an undeclared call left a producer with no owner in r2dec's ledger, and the function (cut) | 865a4bfe6 |
-| D150 | A dead flag write in the block that ends at a table jump is accounted, so the switch renders | 8843e8617 |
+| D150 | A dead flag write in the block that ends at a table jump is accounted, so the switch renders | 45a20491a (D253) |
 | D151 | A library row is keyed by the name a program links and a platform is read from what the container states | e616a0b87 |
 | D153 | `pdd` after `aa` costs only what the function needs | e953c1269 |
-| D154 | The Win64 frame boundary is the ABI's | 8843e8617 |
+| D154 | The Win64 frame boundary is the ABI's | cae55e25f, 5a7d42b63 |
 | D155 | The ELF frame-boundary forms are the ABI's | 85e6c4532 |
-| D156 | Signedness reaches the declaration | 8843e8617 |
-| D160 | The call boundary has one owner chain | 12ffe2165 |
+| D160 | The call boundary has one owner chain | ab93d6950, e7f542ebc |
 | D161 | A call-defined value has the callee's width | 23bfb8832 |
 | D162 | D153's design, from the profile ([call-boundary](adr-call-boundary.md), "S3 as built") | 8a8f77220 |
 | D163 | One placement rule in r2ssa for declared, recovered and import parameters, with stack locations, the DWARF arrival check and `DW_CC_nocall` (cut) | feed8ef82 |
@@ -619,11 +618,11 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D168 | Types reach r2types as `SourceTypeGraph` and `TypeId` through one converter | 1b6d0256c |
 | D169 | D154's design | cae55e25f |
 | D170 | D155's design | 9361be1f5 |
-| D172 | The "`_exit` is `AtLeast(1)`" gate is dropped | 12ffe2165 |
-| D200 | A result lane holds a value only where a C expression of the function defines a byte that a return leaves | 65a043c24 |
+| D172 | The "`_exit` is `AtLeast(1)`" gate is dropped | 1bf5c694c |
+| D200 | A result lane holds a value only where a C expression of the function defines a byte that a return leaves | ed78febf2 |
 | D201 | `Unproven` renders without claiming a result | 45dd6419d |
 | D202 | The closed world proves a written result unread, never void | d0be1b46c |
-| D208 | Decision | 65a043c24 |
+| D208 | Decision | none (decided 2026-11-10) |
 | D209 | The target's C data model has one owner | e32c632c8 |
 | D210 | Call-boundary S13 | cf8b0dfd6 |
 | D214 | A select whose arm is dead under its own condition reads nothing | dd52d2a59 |
@@ -632,8 +631,8 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D218 | A variadic import's vector reads at one call come from its format | 8cc30d289 |
 | D219 | A lane forwarded through a caller whose own result is read is never `Dead` | 8cc30d289 |
 | D220 | Microsoft x64 floating varargs and a home `va_list`'s count | 5a7d42b63 |
-| D221 | A format spilled to the frame is still the call's format | 2fac06ed5 |
-| D225 | Callees whose parameters are a floor mint no call contract, so a caller's extern comes from the call's own classes (`uint64_t (cut) | 33a971ccc |
+| D221 | A format spilled to the frame is still the call's format | 4ed8bbf7c |
+| D225 | Callees whose parameters are a floor mint no call contract, so a caller's extern comes from the call's own classes (`uint64_t (cut) | 628c264f3 |
 | D228 | The hand-off `Read` for a cited fixed parameter (`sqrt(avg())` decides `double`) | 27d20ec95 |
 | D250 | A call in a program that states a second convention may run under either | 9b1494a16 |
 | D251 | An import binds the library its container identity names, never a bare name (design review finding 6) | 9b1494a16 |

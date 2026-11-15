@@ -88,13 +88,14 @@ r2image
 | **P8** Data objects and strings | `iz` reads Mach-O C-string sections and no pointer tables or debug sections (audit W32); an address constant passed as an argument names its object (M17); r2ssa's `source_string_literals`, a second string table, is deleted; string addresses print as integers in 178 DecBench functions (hand audit 3.9) | `iz` agrees with radare2, each disagreement judged | open |
 | D152 | A call with a C++ landing pad carries a residual mark until pads are recovered: `safe_div`'s catch changes the result and the C shows none; 2,712 of 8,430 FDEs in 0pack carry an LSDA (hand audit 3.3). r2image states the pad, r2dec marks the call | an engine test where a catch changes the result; no LSDA function renders without the mark | open |
 | D158 | `elf_stripped`, whose section header table lies past the file end, does not open; radare2 opens it (hand audit 3.9) | a golden `i` and `afl` | open |
+| D259 | A static `__stack_chk_guard` guard row (gap G5) | canary elided only with a binding | open |
 
 r2abi
 -----
 
 | Row | Fact or invariant | Gate | Status |
 |-----|-------------------|------|--------|
-| D78 | The noreturn rows fall short of what the C libraries declare (`pthread_exit`, `quick_exit`, `longjmp`, `verr`, `verrx`), so an arm ending in one keeps its `else` and the walk falls through | an engine test per callee; census, corpus and equivalence read line by line | open |
+| D78 | The noreturn rows fall short of what the C libraries declare (`pthread_exit`, `thrd_exit`, `longjmp`, `_longjmp`, `verr`, `verrx`), so an arm ending in one keeps its `else` and the walk falls through | an engine test per callee; census, corpus and equivalence read line by line | open |
 | D205 | A function whose address flows only into `void (*)(...)` parameters is `Void { Declared, UbFreeSource }`. Open: the `twalk`, `tdestroy`, `pthread_once` and `_obstack_begin` rows, the `Dispute { kept: Calls, lost: Slot }` record, the slot on the proof line, the DecBench 4 | `scratch_void.py` `void-closed` +4, 0 false | open |
 | D229 | `TerminateProcess` on the current-process handle and `int 0x29` end a path | an engine test per form | built 87d1419fe |
 | D230 | `/GS` past x86-64 UCRT: i386 and live upper bytes built. Windows AArch64 (outlined helpers) is open | an engine test per form; testapp `0x140006138` elided | open |
@@ -105,8 +106,6 @@ r2abi
 | D243 | bionic states `mode_t` and its guard | `cited_rows.rs` | built 6eeae9da2 |
 | D257 | An AArch64 canary is read from the C library's `__stack_chk_guard`, placed only by a stated binding | canary elided only with a binding (gap G5) | built fe1b0fc6b |
 | D258 | Android's `tpidr_el0 + 0x28` guard row (gap G5) | canary elided only with a binding | open |
-| D259 | A static `__stack_chk_guard` guard row (gap G5) | canary elided only with a binding | open |
-| D260 | The frame extent apart from the protector call | none set | open |
 | D264 | `Tail::Flagged` counts only glibc's `open` with `__OPEN_NEEDS_MODE` cited; `prctl` is cited `...` and refuses | `only_glibc_counts_the_mode_open_reads`, `prctl_states_only_its_ellipsis` | built 13894db79 |
 | D281 | Cited `msvcrt.dll` and `VCRUNTIME140.dll` tables declare those calls by their DLL's row | each call declared by its DLL's row | open |
 | D332 | A mangled row's result in memory (`RSo`, Itanium C++ ABI 5.1.3) is refused by r2abi, so its lanes stay unstated; the parameter half is D263's | a template row returning a pointer states `Result` at `Declared` in RAX; 0pack `__ostream_insert` forwarders carry no `Returned` cause | open |
@@ -133,7 +132,7 @@ r2sleigh-lift
 | **M** One machine profile | RISC-V 64 as a qemu-user equivalence target and its 10 frame-base refusals (M6); one tuple-to-profile table, so AArch64 discovery and the trusted lift share one profile (audit D8); MIPS and RV32 profiles or a named refusal | one Sleigh parse per architecture per process | open |
 | **LF** Lift once | `Lifted(address, mode)` for the walk and the trusted lift (inside **SM**); discovery translates operations it never reads (audit P18); block lifting copies the rest of the block per instruction (audit P24) | spec load under 20 ms; `afl` decode under 50% of its time | open |
 | **LP** Language profiles ([language-profile](doc/adr-language-profile.md)) | LP1's boundary half (several results, two-register values, Rust scalar pairs); Go assembly declared `<ABIInternal>`; `runtime.(*moduledata).textAddr` refuses; LP2 Rust and C++ checks; LP3 pclntab `funcID`, Rust `core`, the C++ ABI, demangling; LP4 Rust, Go and C++ equivalence corpora on both arches | a Go or Rust function renders under its own convention or refuses with that reason | open |
-| **AO** Per-instruction facts ([command-gap](doc/command-gap.md)) | A shift by an immediate reads the flags it overwrites under an unfolded `count == 0` select (x86 265, ARM 4; next, the instruction-local fold); ARM `bx<c> lr`, `ldm<c> sp!, {.., pc}` and `and<c> pc, ..` lift to UNIMPLEMENTED; `ldmia<c> sp!` and `cmpxchg.lock` spellings (conditional). radare2's side flips as each fix merges: radare2#26987, #26992, #26988, #26984, #26991 | `diff_r2.py` compares size, bytes and register sets (met) | open |
+| **AO** Per-instruction facts ([command-gap](doc/command-gap.md)) | A shift by an immediate reads the flags it overwrites under an unfolded `count == 0` select (x86 265, ARM 4; next, the instruction-local fold); ARM `bx<c> lr`, `ldm<c> sp!, {.., pc}` and `and<c> pc, ..` lift to UNIMPLEMENTED; `ldmia<c> sp!` and `cmpxchg.lock` spellings (conditional). radare2's side flips as each fix merges: radare2#26992, #27397, #27398 | `diff_r2.py` compares size, bytes and register sets (met) | open |
 | **P11** Names and listings ([listing-spelling](doc/adr-listing-spelling.md)) | x86-32 negative displacements signed (audit W27); ARM aliases (W28, conditional); `entry.initN` by array slot (W36); preemptible PLT stubs named; `main` named in stripped binaries; one spelling per function; symbol flags filtered as radare2 filters them; a section-less object's stubs; conditional: a section table past the file end, ET_REL listings, `e_entry` 0 in a static-pie; the unjudged rows (`px` 9, `pd` 8, `iS` 8, `is` 6, `ie` 3) | every disagreement judged on elf, mach0 and pe | open |
 | D15 | One machine profile from the trusted Sleigh bundle; no architecture-name match below the lifter ([machine-profile](doc/adr-machine-profile.md)) | item **M**'s exit | open |
 | D21 | The source language is a profile; the IR, facts and proof name no language | item **LP**'s exit | open |
@@ -182,6 +181,7 @@ r2ssa
 | D287 | Interface recovery derives the certificates it reads | output byte-identical | built cb89c7950 |
 | D289 | A kept restatement's second recovery runs the dynamic phases only (`StaticPrefix`, Step A); Step B is D420 | `builds::a_kept_build_collects_its_static_phases_once` | built 3db753085 |
 | D290 | `FrameReach` walks once, before promotion and the canary | `a_canary_inside_a_callee_write_ends_no_escape_run` | built 55be5c4cf |
+| D260 | The frame extent apart from the protector call | none set | open |
 | D306 | `void` is default-deny at the header (gap G2) | `void_soundness` x87 16 to 0 | built f57e1cb57 |
 | D307 | A call no contract states leaves every killed result lane unstated | census | built f57e1cb57 |
 | D318 | `RegisterEffects` keyed by (entry, thumb); `SiteFates` deposits before any deep read | `a_deposited_register_effect_renders_as_the_one_asked_directly` | built 4399ad678 |
@@ -217,7 +217,7 @@ r2ssa
 | D372 | A stated call reads RAX whole where it does not state it (`stat`, `ferror`): the recovered half is D413's, the stated fixed half is open | D211's 45 leave | open |
 | D373 | A tail exit to a variadic, incomplete or unstated callee reads its count register beside its arguments | engine test | built c942ef737 |
 | D374 | Every dispatch-table read pays a whole convention seal (`read_tables` about 11.0 of 74.7 G on pumasim `aa; pdd @ 0x3b6b20`); a read that needs only values pays none | that case falls, every table read identical over the D367 sweep | open |
-| D377 | A stated callee bounds the incoming stack it writes by what it reads (`CallReads::stack`) | engine test | built 376254dee |
+| D377 | A stated callee's incoming stack writes are `CallReads::writes`, apart from its reads | `native::a_place_a_stated_callee_writes_above_its_arguments_stays_a_load` | built dc96ad6a8, 88d232c19 |
 | D378 | A callee whose frame address escapes, or that indexes a frame object it may store through, bounds no incoming write (default-deny). D441 recovers `shape_recurse_mutual` and the three zig `main`s; shapes `main`, `shape_variadic_local` and aarch64 shapes `main` stay (kinds V, I, F). Kinds E and O were rejected in round 7 | those three records leave their cause | open |
 | D381 | A tail transfer's writes count in its body's incoming writes | `default_deny.rs` | built 207460def |
 | D389 | A promoted stack argument is found by entry offset in O(log n) | no test red on the parent: gate open | built 37bd70411 |
@@ -237,8 +237,8 @@ r2ssa
 | D426 | Rescans R2 to R5 bounded; R4 virtual phis dropped (the R3 solver went with D427) | R3 against the path union on 200 random graphs; no D417 meter replay, and R3's and R4's counters pass on the parent too: gate open | built 5b39265a8 |
 | D427 | `rewritten` kills at an exact whole-width store; every non-tail call writes `(i64::MIN, base)` | `a_place_stored_again_after_an_unstated_call_folds` | built a1d1be599 |
 | D429 | `vfold`'s escaped incoming area bounds its writes (kind V) | a cost and a dry run | rejected: not costed (rounds 6 and 7) |
-| D432 | A printf format reloaded from a clean frame place is its stored literal: one least fixpoint in D427's `fixpoint::sparse` | aarch64 equal 748 to 749; `a_format_reloaded_from_a_clean_slot_is_its_stored_literal`; `reloaded <= reload_bound` | built on `rd7-format` bd9a515b3; landing open: conditions 3 (Dylint and structure counts) and 4 (CI full-ci shard), Codex P1 at `walk.rs:1581` |
-| D433 | A counted printf reads only its fixed parameters, counted operands and AL. Unverified: `counted_reads` checks no `Citation`, so an uncited printf-family row may reach it | `a_counted_printf_reads_only_its_placed_registers`; floors 940 to 873 | built 59ef32c49 |
+| D432 | A printf format reloaded from a clean frame place is its stored literal: one least fixpoint in D427's `fixpoint::sparse`. Open: shapes aarch64 clang-O0 `main` still keeps the slot through E, O and D callees (D378, D414) | aarch64 equal 748 to 749; `a_format_reloaded_from_a_clean_slot_is_its_stored_literal`; `reloaded <= reload_bound` | built on `rd7-format` fae7a854a; Codex P1 at `walk.rs:1581` fixed in fae7a854a; landing open: condition 3 (structure-report counts pasted; CI Dylint passes) and 4 (#402's full-ci: 53 of 55 checks pass, Timing vs Base and aarch64 clang-O2 shapes running) |
+| D433 | A counted printf reads only its fixed parameters, counted operands and AL. Unverified: `counted_reads` checks no `Citation`, so an uncited printf-family row may reach it | `a_counted_printf_reads_only_its_placed_registers`; floors 940 to 873 | built 59ef32c49; open part |
 | D434 | A slot the body reads is not `Unread` | `a_stack_slot_handed_to_a_call_nothing_bounds_is_not_unread` | built de1cef64d |
 | D435 | Semi-naive descent from W' | Kani `meet(x,x)=x`, `refine(x,x)=x` | built bc0741289 |
 | D436 | `CallReads` is a dense column per machine context | `a_context_builds_each_call_sites_reads_once`. Open, unruled: the demand pass runs twice per body | built ac851af97; open part |
@@ -253,7 +253,7 @@ r2source
 | **C** Provenance ([provenance](doc/adr-provenance.md)) | C1 r2dec reads the grade; C2 the convention, locals and syscalls as `Fact`s, JSON with confidence; C3 r2types on `Basis`; C4's Dylint | none stated | open |
 | D4 | Provenance on every fact, as `Fact<T>` | item **C** | open |
 | D261 | One parameter-type table keyed by `SlotId`, bases `Declared` and `DebugInfo`. Open: its `Option` | `a_slot_is_numbered_in_convention_order_whatever_the_formal_order` | open |
-| D273 | `ConventionModel` answers every register question the views answered | `the_model_answers_every_register_question_its_views_answer` | built 70243d460 |
+| D273 | `ConventionModel` answers every register question the views answered | `the_model_answers_every_register_question_its_views_answer`, deleted with the views in a352026da (D275) | built 70243d460 |
 | D275 | Convention views and `callconv` strings deleted (gap G14, gap G15) | `git grep -w` of the deleted names finds 0 | built dcd716c75 |
 | D386 | One call-site translation of the return-address spend | engine tests | built ac3e7d884 |
 | D410 | `Never` has private fields, a `Citation` witness and one `proves`; `Placement::reads` bounds only a cited row | `compile_fail` doctest; D405's `uncited_row` | built 3926b190b |
@@ -272,6 +272,7 @@ r2types
 | D71 | A value flowing into a declared pointer parameter, or defined by a declared pointer return, has that pointer type at `Basis::Declared` unless other evidence refuses it. A2 is D262's; A3 stays with **T** | the typed-values engine tests | open |
 | D73 | A declared width is never narrower than a lane the body moved whole (`rotl(unsigned, int)` prints `uint8_t arg1`). W50 deferred | engine tests per width | held: conditional |
 | D74 | `certified_parameter_pointers` is a second owner of what `gather_memory_widths` asserts: fold it into D71's meet or leave it to **P9** | one owner | held: conditional |
+| D156 | Signedness reaches the declaration of locals: 0 of 286 `int` locals typed signed (hand audit 3.6, not remeasured). The parameter half is D265's (0c26c0184) | a DWARF-graded signedness count on bzip2 -O0 and gzip -O2 rises; equivalence | open (with **T**) |
 | D206 | A write whose only reader is the return as Value evidence (Ghidra's `onlyOpUse`): ruled, pending the maintainer | a negative engine test: `h` is never declared with a value from its body alone | held: maintainer |
 | D262 | A width-only parameter handed to a declared pointer slot is that pointer | `a_parameter_handed_to_a_declared_pointer_is_that_pointer` | built 0d7185ef8 |
 | D265 | A parameter's sign is `Decoded` over every live sign-seeding use (hand audit 3.6) | `a_signed_division_declares_its_parameter_signed` | built 9232da795 |
@@ -279,7 +280,7 @@ r2types
 | D347 | `parse_c_type_like` is test-only | Dylint `TYPE_SPELLING_REPARSED`, no allowlist | built f25f6a6de |
 | D350 | One declaration per callee (gap G21): the join over calls is built (`DeclarationDisagrees`). Open: r2types states it upstream, and `decide_prototypes` (r2dec `render/values.rs:1934`) is deleted | `decide_prototypes` deleted | open |
 | D353 | A pointee every access carries as a float is that float (gap G20) | rv_O2 `double avg(double* arg0, int32_t arg1)` | built 3f07e9965 |
-| D382 | `SummaryArgEffect.assumed` holds the upper bound apart; r2types reads proven bits only | `a_handed_on_argument_is_no_pointer_or_out_param_evidence`; no engine-level trigger: gate open | built 8d183db39 |
+| D382 | An argument handed to an unknown call keeps an empty `SummaryArgEffect`; r2types reads proven bits only. 8d183db39 held the upper bound apart in `assumed`; 97e57ed19 (D411) deleted the field | `a_handed_on_argument_is_no_pointer_or_out_param_evidence`; no engine-level trigger: gate open | built 8d183db39, superseded by 97e57ed19 |
 | D387 | One aggregate table at the target's `ptr_bits` | r2types tests | built 4ca606ffc |
 | D388 | `EvidenceTypes.slot_types` deleted | build | built af0a9854c |
 | D391 | Handle tags (FILE, DIR) come from rows | r2abi data tests | built b908db75d |
@@ -333,8 +334,8 @@ r2engine
 | D399 | One restatement path, counted once | `builds.rs` | built 3af7b8489 |
 | D400 | One held `OwnerTakes` per `(owner, thumb)` | no test red on the parent: gate open | built cb80a1d54 |
 | D408 | A three-member forwarding cycle whose first member a cited slot reads decides `ForwardCycle` after the read joins (was rd3-exit's D379) | engine test; the `aa` census and equivalence moves are unread: gate open | built 49207be36 |
-| D413 | Summary lift grade: `reads` and `kept` as a greatest fixpoint; `KeptAcross` deleted. Its open item C2, a walked lane read composed through calls, enters on a composed fixpoint dry run over at least 2 functions and 6 sites, cold within 2%. Also open: `reads` as a least fixpoint over callee reads | `a_read_past_a_recursive_callee_that_keeps_the_lane_is_the_earlier_calls_read` | built b5cbc65db |
-| D414 | Summary build grade (`writes`, `reach`, `tail`), one grade for cold and `aa`, would delete `state_asked` and the two-round rule. Measured: 2,073 bodies, about +29 G cold | cold closure within D23's 2% | held: no-go on D23 |
+| D413 | Summary lift grade: `reads` and `kept` as a greatest fixpoint; `KeptAcross` deleted. Its open item C2, a walked lane read composed through calls, enters on a composed fixpoint dry run over at least 2 functions and 6 sites, cold within 2%. Also open: `reads` as a least fixpoint over callee reads | `a_read_past_a_recursive_callee_that_keeps_the_lane_is_the_earlier_calls_read` | built b5cbc65db; open part |
+| D414 | Summary build grade (`writes`, `reach`, `tail`), one grade for cold and `aa`, would delete `state_asked`, `Stated.asks` and the two-round rule. Measured: 2,073 bodies, about +29 G cold | cold closure within D23's 2% | held: no-go on D23 |
 | D418 | Statement firewall: structural equality of `CalleeReads`, `Resolved`, `Summarised`; `revision_identity` leaves `SourceFunctionInterface`; one frame per owner. Lands after D413 and the build key; V6 needs it | none set | deferred (foundation ruling 5) |
 | D419 | `later_tables` decodes G(empty) again after `DispatchTables`; continuing round 1 needs a `Newest` or merged query, which the no-cache rule leaves open | G(empty) decoded once per body | open |
 | D424 | Cross-root relifts: a deep read under one `ComponentForwarding` root lifts a body a later root's `DirectSites` asks (30 of D354's 50) | walks at or under 344 | open: needs a ruling on a multi-root seed |
@@ -347,7 +348,7 @@ r2dec
 | Row | Fact or invariant | Gate | Status |
 |-----|-------------------|------|--------|
 | **D** Decompiler rewrite | `uncompress2` and `deflateInit2_` read by hand; the rendered function named by its entry, not its loop header's `root()` (audit W44) | none stated | open |
-| **SD** Structuring and readability ([structure-dominator-tree](doc/adr-structure-dominator-tree.md)) | Inverted empty thens, merges spliced into the parent, dead reloads proved; the exit edge's copies after a latch-only loop; irreducible entries; the assignment before a joined return folded; tails of 5 to 16 statements (133 gotos); jumps over a block no rule closes (588); whether lexical ancestry equals dominance, which retires `region_does_not_dominate_occurrence` | no more labels or nesting than today on the census, each moved line judged | open |
+| **SD** Structuring and readability ([structure-dominator-tree](doc/adr-structure-dominator-tree.md)) | Inverted empty thens, merges spliced into the parent, dead reloads proved; the exit edge's copies after a latch-only loop; irreducible entries; the assignment before a joined return folded; tails of 5 to 16 statements (133 gotos); jumps over a block no rule closes (588) | no more labels or nesting than today on the census, each moved line judged | open |
 | D61 | A copy's place and text are read, and a copy may carry a residual. Next: bash `0x65bf0` and `0x48140` goldens read without the goto, and one engine test per guard; the rest waits for a producer | `structure/certify.rs` tests | open |
 | D63 | A merge with one gapped and one rendered forward copy reads residual; relaxing it is sound only while the emitted trap and the certificate agree (426 `gapped-forward-copy` edges) | bash `0x2dd90` and `0x48140` read first | held: conditional |
 | D64 | `Values` keeps interior mutability: the spelling pass as `&mut self`, `Values` immutable once spelled | no `RefCell` in `render::values` outside the pass | deferred |
@@ -450,12 +451,15 @@ Order
 | #399 | `rebuild-design-4` | the design-fit audit: D379 to D407 | open |
 | #400 | `rebuild-design-5` | the foundation ranking and round 5: D410 to D426 | open |
 | #401 | `rebuild-design-6` | round 6: D427, D431, D433 to D439 | open |
-| #402 | `rd7-format` | D432 | open: landing conditions 3 and 4, Codex P1 at `walk.rs:1581` |
-| none | `rd7-int-lane-dead` | D440 | building; adds its row on merge |
+| #402 | `rd7-format` fae7a854a | D432 | open: landing conditions 3 and 4 |
+| none | `rd7-int-lane-dead` | D440 | building; the branch adds no row, this file holds it |
 | none | `rd7-writes` | D441, notes on D376 and D378 | built; cost, equivalence and 25 DecBench functions to judge |
 
 Round 7 stacks in the order D432, D440, D441, and goldens are blessed once per step. This
-rewrite sits on `rebuild-design-6`; round 7's row edits merge into it as written above.
+rewrite merges after the three stack. On each merge the rewrite's row text wins and the branch's
+old-layout edits to D376, D378, D432 and D441 drop. Defects in those edits: rd7-format's D432
+puts `bounded | (unset ? extra : 0)` in backticks, whose `|` splits the cell (escape it `\|` if kept);
+rd7-writes' D441 ends in a literal `COSTS` placeholder, to fill or drop.
 
 ### Next rounds, from the rulings
 
@@ -473,10 +477,34 @@ rewrite sits on `rebuild-design-6`; round 7's row edits merge into it as written
 
 | # | Hack | State | Rows |
 |---|------|-------|------|
-| 1 | `Declared::reads` passed `stated = true` with no citation check | closed by D410 (3926b190b) and D411 (97e57ed19, a00158681) | the same class stays open in D425; D433's `counted_reads` checks no `Citation` (unverified) |
+| 1 | `Placement::reads` passed `stated = true` with no citation check | closed by D410 (3926b190b) and D411 (97e57ed19, a00158681) | the same class stays open in D425; D433's `counted_reads` checks no `Citation` (unverified) |
 | 2 | The two-round rule in `walk.rs` accepts a self call's writes only if round 2 equals round 1 | open | D414 holds its deletion and is no-go on D23. On `rd7-writes` a write cycle has three owners: `own_rounds`, D441's seed check and `Assumed::writes`; round 7 requires a test that the last two agree. Proposal, no row: a self call as a one-member `IncomingWrites` component, deleting `own_rounds` |
 | 3 | 5 uncited noreturn rows stay bounds, so callers name no exit | open | D406 |
 | 4 | The six default-deny violations of the call-boundary ruling, section 2 | closed | D276, D264 (twice), D265, D240, D252, each with its test |
+
+### Rejected, no row
+
+Rulings: RM-* the math designs, RF the foundation ranking, AWB the ABI write-bound judgement, R6 and R7 the round rulings (2026-11-14 to 15).
+
+| Candidate | Missing measurement or reason | Ruling |
+|---|---|---|
+| Dispatch Stage B (incremental re-seal) | B, I, V, C per body; incremental-equals-cold proof; `ComesBack` cycle answer; RSS | RM-dispatch |
+| Build-key rule 3 (held raw SSA) and the RSS fallback | a memo of an unpriced stage; a runtime cap | RM-buildkey |
+| Relift heap worklist | 7 fewer walks against 28 required; the lazy variant is D354 | RM-relift |
+| Build grade under `aa` alone | one key with two answers by session history breaks fresh-open identity (D153) | RF ruling 1 |
+| early-cutoff as named | `db.rs` already cuts off; firewall deferred to D418 | RF ruling 5 |
+| Write-bound rules E and N | no ABI words state the negative fact; contradicts gates `native.rs:6708`, `:6770` | AWB |
+| `R6_RET` (own result read at 4 bytes, 18 functions) | no proof bounds what callers read | R6 section 3 |
+| 13 return-expression functions, 7 unattributed sites | no mechanism | R6 section 3 |
+| AL rule at indirect calls (2 functions) | psABI line 410 exempts local functions | R6 section 3 |
+| `R6_CITE`: `dcgettext`, `getopt_long`, `fflush_unlocked`, `localtime`, `utimes` | 0 `<< 32` gain after D431; at most 10 floors | R6 section 3 |
+| Reuse of 95 of 230 repeated range solves | input equality unverified | R6 section 1 |
+| Unnamed +0.046 / +0.065 G (3f84dbe5f) | no design | R6 section 1 |
+| 426 walked non-floor chain roots | unexplained | R6 rows |
+| 15 functions with no fact | a fact | R7 section 6 |
+| `R7_LANEDEAD2` | 0 gain | R7 section 2 |
+| C1 with C2 (3 joint functions) | hand traces | R7 section 6 |
+| C4 (cited libexpat handler slots) | a cited binding fact and an expat 2.4.0+ header; no number | R7 section 4 |
 
 Renumbered rows
 ---------------
@@ -576,10 +604,10 @@ Upstream radare2
 ----------------
 
 radare2 is the differential target ([radare2-function-walk](doc/adr-radare2-function-walk.md)). Each fix is its own pull request, measured alone.
-Open pull requests: ARM `ldr r, [pc, rN]` (#26984), the ARM pseudo mode's pc-relative offset (#26985), the read-ahead cache (#26986),
-`/as` alignment (#26965), a fat Mach-O's entry header offset (#26970), `aea` on unmapped memory (#26987), Thumb `movs` (#26988),
-AArch64 `ret xN` (#26991), arm64 `mrs`/`msr` `tpidr_el0` (#26994), x87 registers in the 32-bit profile (#26995), 32-bit xmm5/xmm6
-half names (#26996), `fninit` emulation (#26997). Open issues: #26983 (BE8 code byte order), #26992 (`aea` under a failing ARM condition).
+Open pull requests: no pointer for an ARM pc load indexed by a register (#27397), the address an ARM pc-relative `pld` prefetches (#27398).
+Merged 2026-10-15: #26965, #26970, #26984, #26985, #26986, #26988, #26991, #26995, #26996, #26997.
+Closed unmerged: `aea` on unmapped memory (#26987), arm64 `mrs`/`msr` `tpidr_el0` (#26994). Issue #26983 (BE8 code byte order) is closed.
+Open issue: #26992 (`aea` under a failing ARM condition).
 Edge-labelled path state needs a design first.
 
 After the program, each only once its consumers exist: binary diffing over callee summaries, exception-handler
@@ -597,6 +625,7 @@ Standing debt
 Each item has an owner and no row yet.
 
 - A reload certified as the stored value binds as a copy of the stored temporary in three census functions (item **D**).
+- Partition-first's conservatism (read closure, `CallRestore`, return carrier, call-use reads) and the semantic-kernel ADR's rewrite fold into D's ADR (item **D**).
 - Listing claims follow the demand release, valid only for the function's meaning; annotations must read the index before it (**F2**).
 - `def_use_graph` seals a raw function to answer a listing (F2.1, in **LX**).
 - `seal_body_proven_interface` rewrites the format parameter after the build (**C**, C1).
@@ -620,5 +649,6 @@ Open questions
 --------------
 
 - AGENTS.md's Validation Bar still names the `rebuild` exemption (D27), which ended when `rebuild` merged as #142.
+- Item rows' open clauses (I, P4, P7, SD, T) and unknown-shaped clauses (D158 `elf_stripped`, D76 chain4500) are not yet checked against code.
 
-Next free row: D442.
+Next free row: D442. Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.
