@@ -759,9 +759,8 @@ const STORES_F: &[u8] = &[
     0xc3, // 104a ret
 ];
 
-/// `a` (0x1020): `test edi, edi; je 1f; call b; ret; 1: call f; ret`; `b` (0x1040) the same over
-/// `esi`, calling `a`, else `mov eax, 1`; `c` (0x1050) calls `a` and writes every lane. `f`'s
-/// RAX goes on into the forwarding cycle `a`, `b`.
+/// `a`: `test edi, edi; je 1f; call b; ret; 1: call f; ret`; `b`: the same calling `a`, else
+/// `mov eax, 1`; `c` calls `a`, writes every lane. `f`'s RAX goes on into the cycle `a`, `b`.
 const FORWARDS_F_INTO_A_CYCLE: &[(u64, &[u8])] = &[
     (
         0x20,
@@ -806,9 +805,8 @@ fn narrow_result_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> String {
     rendered.response.output.into_text()
 }
 
-/// Every call overwrites RAX before any read and they are every way in, so no executed instruction
-/// reads `f`'s RAX: the bytes above `ferror`'s `int` are no residual. XMM0's fate at one call is
-/// unknown, so only the integer lane is decided, and the return stays a written carrier (D440).
+/// Every way in overwrites RAX before a read, so no bit above `ferror`'s `int` is a residual; XMM0
+/// is unknown at one call, so only the integer lane is decided and the return stays a carrier (D440).
 #[test]
 fn a_result_whose_integer_lane_every_call_overwrites_reads_no_bits_above_a_narrow_callee() {
     let text = narrow_result_under_aa(
