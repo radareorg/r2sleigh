@@ -933,6 +933,20 @@ impl TrustedConstruction {
         rewriting_callees(function.function(), machine_context)
     }
 
+    /// The direct callees of calls and correlated tails nothing states whose writes alone leave
+    /// this body's incoming writes unbounded: each is asked to state its writes (D441). O(calls).
+    pub fn writes_blocking_callees(&self) -> BTreeSet<u64> {
+        let Constructed {
+            function,
+            machine_context,
+            ..
+        } = &self.constructed;
+        (function.function().frame_points())
+            .and_then(|points| points.incoming_bound(machine_context))
+            .map(|bound| bound.blocking())
+            .unwrap_or_default()
+    }
+
     /// This construction against other callee statements, and whether its build was kept
     /// (`BuildKey`); equal to `construct` over the same lift, which a debug build checks.
     pub fn restated<C: SsaWorkControl + ?Sized>(
