@@ -2045,7 +2045,13 @@ thread_local! {
     /// The register classes the walks visited, one per class a block is walked through.
     pub(crate) static REGISTER_CLASS_VISITS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// The buffers the walks allocated for instructions' written classes: one per walk.
+    pub(crate) static REGISTER_CLASS_LISTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
+
+/// A register byte no instruction writes, or a carrier the walk leaves out.
+const UNWRITTEN: u32 = u32::MAX;
 
 /// Split off a new class for each covered class a write leaves bytes of.
 fn split(size: &mut Vec<u32>, moved: &mut [(u32, u32, u32)]) {
@@ -2074,15 +2080,26 @@ impl Iterator for BitsSet {
 /// A set of register classes, one bit each.
 type Classes = Vec<u64>;
 
+/// `id` writes `class` in a block: its last writer there, where no later one was seen.
+fn first_write((written, last): (&mut Classes, &mut Vec<(u32, InstId)>), class: u32, id: InstId) {
+    let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
+    if written[word] & bit == 0 {
+        written[word] |= bit;
+        last.push((class, id));
+    }
+}
+
 /// A function's written register bytes cut into classes no instruction splits, each block's last
 /// writer per class (D254; doc/adr-one-ir.md, "Register classes").
 struct RegisterWalk<'g> {
     graph: &'g SsaGraph,
     call_results: &'g crate::dense::IdSet<ValueId>,
-    /// The register bytes, ascending, and each one's class.
-    bytes: Vec<u64>,
+    /// Each register byte's class, indexed from the lowest written byte `base`.
+    base: u64,
     class_of: Vec<u32>,
     classes: usize,
+    /// Each instruction's written classes, each once: one buffer, dense over `InstId`.
+    writes: crate::dense::Csr<InstId, u32>,
     /// Per block: the classes it writes, and each one's last writer there, by class.
     written: Vec<Classes>,
     last: Vec<Vec<(u32, InstId)>>,
@@ -2091,8 +2108,8 @@ struct RegisterWalk<'g> {
 }
 
 impl<'g> RegisterWalk<'g> {
-    /// One pass over the instructions to cut the classes by refinement, one to find each block's
-    /// last writers: `O(I x w)` for writes of at most `w` bytes.
+    /// Passes over the instructions to place bytes, cut classes, list each one's classes and find
+    /// each block's last writers: `O(I x w + span)` for writes of at most `w` bytes.
     fn of<'a>(
         graph: &'g SsaGraph,
         call_results: &'g crate::dense::IdSet<ValueId>,
@@ -2100,74 +2117,79 @@ impl<'g> RegisterWalk<'g> {
     ) -> Self {
         #[cfg(test)]
         REGISTER_WALKS.with(|walks| walks.set(walks.get() + 1));
-        let mut bytes = (graph.insts.iter())
-            .filter_map(|inst| register_bytes(graph, inst))
-            .flatten()
-            .collect::<Vec<u64>>();
-        bytes.sort_unstable();
-        bytes.dedup();
+        let ranges = || (graph.insts.iter()).filter_map(|inst| register_bytes(graph, inst));
+        let base = ranges().map(|range| range.start).min().unwrap_or(0);
+        let end = ranges().map(|range| range.end).max().unwrap_or(0);
+        let mut class_of = vec![UNWRITTEN; usize::try_from(end - base).unwrap_or(0)];
+        for range in ranges() {
+            class_of[(range.start - base) as usize..(range.end - base) as usize].fill(0);
+        }
         for carrier in state {
-            let carried = carrier.offset..carrier.offset + u64::from(carrier.size);
-            bytes.retain(|byte| !carried.contains(byte));
+            let (low, high) = (carrier.offset, carrier.offset + u64::from(carrier.size));
+            let (low, high) = (low.clamp(base, end), high.clamp(base, end));
+            class_of[(low - base) as usize..(high - base) as usize].fill(UNWRITTEN);
         }
         let mut walk = Self {
             graph,
             call_results,
-            class_of: vec![0; bytes.len()],
-            bytes,
+            base,
+            class_of,
             classes: 0,
+            writes: crate::dense::Csr::with_capacity(0, 0),
             written: Vec::new(),
             last: Vec::new(),
             walked: Vec::new(),
             touched: Vec::new(),
         };
         walk.refine();
+        walk.list_writes();
         let words = walk.classes.div_ceil(64);
         walk.written = vec![vec![0; words]; graph.blocks.len()];
         walk.last = vec![Vec::new(); graph.blocks.len()];
         walk.walked = vec![vec![0; words]; graph.blocks.len()];
         for (at, block) in graph.blocks.iter().enumerate() {
-            for id in block.insts.iter().rev() {
-                walk.written_by(*id)
-                    .into_iter()
-                    .for_each(|class| walk.first_write(at, class, *id));
-            }
-            walk.last[at].sort_unstable();
+            let (written, last) = (&mut walk.written[at], &mut walk.last[at]);
+            let writes = (block.insts.iter().rev())
+                .flat_map(|id| walk.writes.get(*id).iter().map(move |class| (*class, *id)));
+            writes.for_each(|(class, id)| first_write((written, last), class, id));
+            last.sort_unstable();
         }
         walk
-    }
-
-    /// `id` writes `class` in block `at`: its last writer, where no later one was seen.
-    fn first_write(&mut self, at: usize, class: u32, id: InstId) {
-        let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
-        if self.written[at][word] & bit == 0 {
-            self.written[at][word] |= bit;
-            self.last[at].push((class, id));
-        }
     }
 
     /// Cut the bytes into classes, one write at a time, each costing its width; classes are then
     /// numbered by their first byte.
     fn refine(&mut self) {
-        if self.bytes.is_empty() {
+        let placed = self
+            .class_of
+            .iter()
+            .filter(|class| **class != UNWRITTEN)
+            .count();
+        if placed == 0 {
             return;
         }
-        let mut size = vec![u32::try_from(self.bytes.len()).unwrap_or(u32::MAX)];
+        let mut size = vec![u32::try_from(placed).unwrap_or(u32::MAX)];
+        let mut moved: Vec<(u32, u32, u32)> = Vec::new();
         for inst in self.graph.insts.iter() {
-            let Some(range) = self.indices(inst.id) else {
-                continue;
-            };
-            let mut moved = self.covered(range.clone());
+            let range = self.span(inst.id);
+            moved.clear();
+            for class in self.class_of[range.clone()]
+                .iter()
+                .filter(|c| **c != UNWRITTEN)
+            {
+                match moved.iter_mut().find(|(from, _, _)| from == class) {
+                    Some(entry) => entry.2 += 1,
+                    None => moved.push((*class, u32::MAX, 1)),
+                }
+            }
             split(&mut size, &mut moved);
-            for index in range {
-                let class = self.class_of[index];
-                let to = moved.iter().find(|(from, _, _)| *from == class);
-                self.class_of[index] =
-                    (to.filter(|(_, to, _)| *to != u32::MAX)).map_or(class, |(_, to, _)| *to);
+            for class in self.class_of[range].iter_mut().filter(|c| **c != UNWRITTEN) {
+                let to = moved.iter().find(|(from, _, _)| from == class);
+                *class = (to.filter(|(_, to, _)| *to != u32::MAX)).map_or(*class, |(_, to, _)| *to);
             }
         }
         let mut number = vec![u32::MAX; size.len()];
-        for class in &mut self.class_of {
+        for class in self.class_of.iter_mut().filter(|c| **c != UNWRITTEN) {
             if number[*class as usize] == u32::MAX {
                 number[*class as usize] = u32::try_from(self.classes).unwrap_or(u32::MAX);
                 self.classes += 1;
@@ -2176,34 +2198,42 @@ impl<'g> RegisterWalk<'g> {
         }
     }
 
-    /// Each class a write covers, with no new class yet and how many of its bytes it covers.
-    fn covered(&self, range: std::ops::Range<usize>) -> Vec<(u32, u32, u32)> {
-        let mut moved: Vec<(u32, u32, u32)> = Vec::new();
-        for class in range.map(|index| self.class_of[index]) {
-            match moved.iter_mut().find(|(from, _, _)| *from == class) {
-                Some(entry) => entry.2 += 1,
-                None => moved.push((class, u32::MAX, 1)),
-            }
+    /// Each instruction's classes, each once, in one buffer: `O(I x w)`.
+    fn list_writes(&mut self) {
+        #[cfg(test)]
+        REGISTER_CLASS_LISTS.with(|lists| lists.set(lists.get() + 1));
+        let insts = self.graph.insts.len();
+        let room = (self.graph.insts.iter())
+            .map(|inst| self.span(inst.id).len())
+            .sum();
+        let mut writes = crate::dense::Csr::<InstId, u32>::with_capacity(insts, room);
+        // The last instruction that listed each class.
+        let mut listed = vec![u32::MAX; self.classes];
+        for inst in self.graph.insts.iter() {
+            let classes = self.class_of[self.span(inst.id)].iter();
+            writes.push_row(
+                classes
+                    .filter(|class| **class != UNWRITTEN)
+                    .filter(|class| {
+                        let fresh = listed[**class as usize] != inst.id.0;
+                        listed[**class as usize] = inst.id.0;
+                        fresh
+                    })
+                    .copied(),
+            );
         }
-        moved
+        self.writes = writes;
     }
 
-    /// The indices into `bytes` an instruction writes, by binary search.
-    fn indices(&self, id: InstId) -> Option<std::ops::Range<usize>> {
-        let range = register_bytes(self.graph, self.graph.inst(id)?)?;
-        let low = self.bytes.partition_point(|byte| *byte < range.start);
-        let high = self.bytes.partition_point(|byte| *byte < range.end);
-        (low < high).then_some(low..high)
-    }
-
-    /// The classes an instruction writes, each once.
-    fn written_by(&self, id: InstId) -> Vec<u32> {
-        let mut classes = (self.indices(id).into_iter().flatten())
-            .map(|index| self.class_of[index])
-            .collect::<Vec<_>>();
-        classes.sort_unstable();
-        classes.dedup();
-        classes
+    /// The bytes an instruction writes, as a span of `class_of`; empty where it writes none.
+    fn span(&self, id: InstId) -> std::ops::Range<usize> {
+        let held = self
+            .graph
+            .inst(id)
+            .and_then(|inst| register_bytes(self.graph, inst));
+        held.map_or(0..0, |range| {
+            (range.start - self.base) as usize..(range.end - self.base) as usize
+        })
     }
 
     /// Every register definition that may reach `at`, a call's clobber left out:
@@ -2222,8 +2252,7 @@ impl<'g> RegisterWalk<'g> {
         let insts = held.map_or(&[][..], |held| &held.insts[..]);
         let end = (insts.iter().position(|inst| *inst == at)).unwrap_or(insts.len());
         for id in insts[..end].iter().rev() {
-            let classes = self.written_by(*id);
-            let wrote = (classes.iter()).fold(false, |wrote, class| {
+            let wrote = (self.writes.get(*id).iter()).fold(false, |wrote, class| {
                 let (word, bit) = (*class as usize / 64, 1u64 << (class % 64));
                 let pending_bit = pending[word] & bit != 0;
                 pending[word] &= !bit;

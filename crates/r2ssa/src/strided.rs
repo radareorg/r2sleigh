@@ -699,6 +699,10 @@ mod tests {
             assert_eq!(described(&widened) & both, both, "{left:?} widen {right:?}");
             // Two progressions meet in a progression, so the meet is exact.
             let met = left.meet(right);
+            if left == right {
+                assert_eq!(met, *left, "{left:?} meet itself");
+                assert_eq!(left.refine(left), *left, "{left:?} refine itself");
+            }
             assert_eq!(
                 described(&met),
                 left_set & right_set,
@@ -765,6 +769,8 @@ mod tests {
                 (left.widen(&right), Some(b)),
                 (left.meet(&right), right.contains(a).then_some(a)),
             ];
+            prop_assert_eq!(left.meet(&left), left);
+            prop_assert_eq!(left.refine(&left), left);
             for (result, value) in checks {
                 if let Some(value) = value {
                     prop_assert!(result.contains(value), "{:?} {:?} -> {:?} misses {}", left, right, result, value);
@@ -871,6 +877,29 @@ mod kani_proofs {
             element,
             u64::from(low) + u64::from(stride) * u64::from(pick),
         )
+    }
+
+    /// An eight-bit element, bottom included.
+    fn any_eight_bit() -> StridedInterval {
+        match kani::any() {
+            true => StridedInterval::bottom(8),
+            false => any_element().0,
+        }
+    }
+
+    /// The descent skips a cell whose slot equals what its inputs compute (doc/adr-fixpoint.md, "Semi-naive descent").
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn eight_bit_meet_with_itself_is_itself() {
+        let element = any_eight_bit();
+        assert!(element.meet(&element) == element);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn eight_bit_refine_by_itself_is_itself() {
+        let element = any_eight_bit();
+        assert!(element.refine(&element) == element);
     }
 
     #[kani::proof]

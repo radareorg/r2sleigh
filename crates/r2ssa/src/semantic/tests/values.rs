@@ -1295,6 +1295,11 @@ fn every_unproven_machine_return_of_a_function_shares_one_register_walk() {
 /// The class visits over `2^depth` unproven returns at a branch tree's leaves, each writing the
 /// result and a register across its top byte: they grow as `T log T`.
 fn register_class_visits(depth: u32) -> usize {
+    register_walk_counts(depth).0
+}
+
+/// Class visits, class-list buffers and walks over [`register_class_visits`]'s tree.
+fn register_walk_counts(depth: u32) -> (usize, usize, usize) {
     let mut arch = composed_return_arch_spec("whole", "slice", "pc");
     arch.add_register(RegisterDef::new("partial", 3, 2));
     arch.add_register(RegisterDef::new("sp", 32, 8));
@@ -1341,13 +1346,27 @@ fn register_class_visits(depth: u32) -> usize {
         .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
         .expect("typed machine roles");
     super::super::boundaries::REGISTER_CLASS_VISITS.with(|visits| visits.set(0));
+    super::super::boundaries::REGISTER_CLASS_LISTS.with(|lists| lists.set(0));
+    super::super::boundaries::REGISTER_WALKS.with(|walks| walks.set(0));
     let artifact =
         SsaArtifact::raw_with_interface(&blocks, Some(&crate::Arch::from(arch)), interface)
             .expect("a tree of unproven machine returns");
     let returns = artifact.facts().boundaries.returns.values();
     let unproven = returns.filter(|boundary| !boundary.complete && boundary.machine_state_complete);
     assert_eq!(unproven.count(), 1 << depth);
-    super::super::boundaries::REGISTER_CLASS_VISITS.with(std::cell::Cell::get)
+    (
+        super::super::boundaries::REGISTER_CLASS_VISITS.with(std::cell::Cell::get),
+        super::super::boundaries::REGISTER_CLASS_LISTS.with(std::cell::Cell::get),
+        super::super::boundaries::REGISTER_WALKS.with(std::cell::Cell::get),
+    )
+}
+
+/// D438: a walk writes every instruction's classes into one buffer, whatever the returns.
+#[test]
+fn a_register_walk_allocates_its_written_classes_once() {
+    let (_, lists, walks) = register_walk_counts(4);
+    assert_eq!(walks, 1);
+    assert!(lists <= walks, "{lists} class lists over {walks} walks");
 }
 
 /// Rescans R4: a walk visits a class of a block once, so `T` returns `log T` deep cost
