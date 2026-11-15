@@ -591,28 +591,28 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D7 | The visual mode never calls the engine while drawing | none |
 | D8 | The observation journal is replaced by D, not kept | none |
 | D9 | Location SSA is superseded | none |
-| D20 | The decompiler is rewritten, not refactored (decompiler-rewrite) | none |
-| D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instructi | f3985f01a |
-| D37 | r2ssa states why an arity is a floor, one typed variant per floor branch (an unresolved transfer, | 8a6e99f45 |
+| D20 | The decompiler is rewritten, not refactored | none |
+| D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instruction-relative label on its op, and (cut) | f3985f01a |
+| D37 | r2ssa states why an arity is a floor, one typed variant per floor branch (an unresolved transfer, a supervisor entry, an argument area (cut) | 8a6e99f45 |
 | D58 | A rendering decision depends on facts, not on the order placement writes blocks | 6631526eb |
 | D59 | A condition chain whose exit is a `continue` to its own head is certified | 135aaba14 |
-| D60 | The structurer's data guards each have an end to end engine test and the certificate reads what a | 39a1edad0 |
-| D62 | A callee's result presence is one fact per callee, stated by r2ssa and joined by r2engine's `Call | f2256c1aa |
+| D60 | The structurer's data guards each have an end to end engine test and the certificate reads what a copy says | 39a1edad0 |
+| D62 | A callee's result presence is one fact per callee, stated by r2ssa and joined by r2engine's `CallBoundary` (D166) and projected by r2types, (cut) | f2256c1aa |
 | D72 | A function is declared with a value because its body leaves the carrier, though no caller reads it | a037e4c2a |
-| D77 | `crates/r2s/tests/commands.rs` `a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt` faile | 445b4c45a |
+| D77 | `crates/r2s/tests/commands.rs` `a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt` failed about 1 run in 4 under load on macOS (cut) | 445b4c45a |
 | D100 | A header whose parameters are only a floor says so (D71's second review | 8859e701a |
-| D106 | A declared prototype that reads fewer registers than an undeclared call left a producer with no o | 865a4bfe6 |
+| D106 | A declared prototype that reads fewer registers than an undeclared call left a producer with no owner in r2dec's ledger, and the function (cut) | 865a4bfe6 |
 | D150 | A dead flag write in the block that ends at a table jump is accounted, so the switch renders | 8843e8617 |
-| D151 | A library row is keyed by the name a program links and a platform is read from what the container | e616a0b87 |
+| D151 | A library row is keyed by the name a program links and a platform is read from what the container states | e616a0b87 |
 | D153 | `pdd` after `aa` costs only what the function needs | e953c1269 |
 | D154 | The Win64 frame boundary is the ABI's | 8843e8617 |
 | D155 | The ELF frame-boundary forms are the ABI's | 85e6c4532 |
 | D156 | Signedness reaches the declaration | 8843e8617 |
-| D160 | The call boundary has one owner chain (call-boundary) | 12ffe2165 |
+| D160 | The call boundary has one owner chain | 12ffe2165 |
 | D161 | A call-defined value has the callee's width | 23bfb8832 |
-| D162 | D153's design, from the profile (call-boundary, "S3 as built") | 8a8f77220 |
-| D163 | One placement rule in r2ssa for declared, recovered and import parameters, with stack locations, | feed8ef82 |
-| D164 | Stack parameters are formals (`FormalHome::Frame` in r2ssa formal facts; the r2source spec stays | 1134e3d2d |
+| D162 | D153's design, from the profile ([call-boundary](adr-call-boundary.md), "S3 as built") | 8a8f77220 |
+| D163 | One placement rule in r2ssa for declared, recovered and import parameters, with stack locations, the DWARF arrival check and `DW_CC_nocall` (cut) | feed8ef82 |
+| D164 | Stack parameters are formals (`FormalHome::Frame` in r2ssa formal facts | 1134e3d2d |
 | D165 | Parameters by section | 8859e701a |
 | D166 | One `CallBoundary` per `(CalleeKey, World)` in r2engine | 658927d90 |
 | D167 | D151's design | 34ce81b97 |
@@ -620,7 +620,7 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D169 | D154's design | cae55e25f |
 | D170 | D155's design | 9361be1f5 |
 | D172 | The "`_exit` is `AtLeast(1)`" gate is dropped | 12ffe2165 |
-| D200 | A result lane holds a value only where a C expression of the function defines a byte that a retur | 65a043c24 |
+| D200 | A result lane holds a value only where a C expression of the function defines a byte that a return leaves | 65a043c24 |
 | D201 | `Unproven` renders without claiming a result | 45dd6419d |
 | D202 | The closed world proves a written result unread, never void | d0be1b46c |
 | D208 | Decision | 65a043c24 |
@@ -633,13 +633,13 @@ Code and docs still cite them by number. Each row's full text is in `git show f0
 | D219 | A lane forwarded through a caller whose own result is read is never `Dead` | 8cc30d289 |
 | D220 | Microsoft x64 floating varargs and a home `va_list`'s count | 5a7d42b63 |
 | D221 | A format spilled to the frame is still the call's format | 2fac06ed5 |
-| D225 | Callees whose parameters are a floor mint no call contract, so a caller's extern comes from the c | 33a971ccc |
+| D225 | Callees whose parameters are a floor mint no call contract, so a caller's extern comes from the call's own classes (`uint64_t (cut) | 33a971ccc |
 | D228 | The hand-off `Read` for a cited fixed parameter (`sqrt(avg())` decides `double`) | 27d20ec95 |
 | D250 | A call in a program that states a second convention may run under either | 9b1494a16 |
-| D251 | An import binds the library its container identity names, never a bare name (design review findin | 9b1494a16 |
-| D253 | The obligation inventory owns who reads a value, a switch dispatch owns what only it reads, and e | 45a20491a |
-| D255 | A walk names a call's exit only where the callee's noreturn is declared (S23; D211; RULING 1.4) | 9725d9a82 |
-| D256 | A member pointing to an opaque name is `void *`, so the structure stays (S23; D333's second half; | 10453c109 |
+| D251 | An import binds the library its container identity names, never a bare name (design review finding 6) | 9b1494a16 |
+| D253 | The obligation inventory owns who reads a value, a switch dispatch owns what only it reads, and every obligation says why it was seeded (S23 | 45a20491a |
+| D255 | A walk names a call's exit only where the callee's noreturn is declared (S23 | 9725d9a82 |
+| D256 | A member pointing to an opaque name is `void *`, so the structure stays (S23 | 10453c109 |
 | D268 | The inferred signature is typed (D168 rest, RULING 1.3) | 6213b0cda |
 | D305 | The lane set | f57e1cb57 |
-| D309 | No new production reader of the convention views and strings S34 deletes (call-boundary, "The joi | c611eea2d |
+| D309 | No new production reader of the convention views and strings S34 deletes ([call-boundary](adr-call-boundary.md), "The joined model") | c611eea2d |
