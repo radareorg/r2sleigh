@@ -1025,6 +1025,66 @@ fn printing_twice(format: &[u8], writable: bool) -> String {
     rendered.response.output.into_text()
 }
 
+/// values.c clang -O0 `main`'s shape (D432): `caller` spills the format at `BASE + 0xb0` to
+/// `[sp, #16]`, calls `f` (`ret`) or, where `unstated`, `blr x9`, then reloads it for each printf.
+fn printing_reloaded(unstated: bool) -> String {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let between = if unstated { 0xd63f_0120 } else { 0x97ff_fffa }; // blr x9 | bl f
+    let words: [(u64, u32); 17] = [
+        (F, 0xd65f_03c0),           // f: ret
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x9000_0008), // adrp x8, 0x1000
+        (BASE + 0x18, 0x9102_c108), // add x8, x8, #0xb0
+        (BASE + 0x1c, 0xf900_0be8), // str x8, [sp, #16]
+        (BASE + 0x20, between),     // bl f | blr x9
+        (BASE + 0x24, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x28, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x2c, 0x9400_0019), // bl printf
+        (BASE + 0x30, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x34, 0x5280_0101), // mov w1, #8
+        (BASE + 0x38, 0x9400_0016), // bl printf
+        (BASE + 0x3c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x40, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+        (BASE + 0x98, 0x0000_0000), // the stub's slot
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x34)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, b"%d\n\0");
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D432: every store to the slot is the immutable format and one reaches each reload past `f`
+/// and the first printf, both bounded: both calls count their tails and the slot is promoted.
+#[test]
+fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
+    let text = printing_reloaded(false);
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)7U);"#), "{text}");
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
+    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("frame + 16U"), "{text}");
+}
+
+/// An unstated call between the spill and the reloads may write the slot: it stays in memory.
+#[test]
+fn a_format_reloaded_past_an_unstated_call_stays_in_memory() {
+    let text = printing_reloaded(true);
+    assert!(text.contains("format_argument_not_literal"), "{text}");
+    assert!(text.contains("frame + 16U"), "{text}");
+}
+
 /// hashes clang -O1 `main`'s shape (D409): `push rax` aligns the stack, `printf("%d\n", 7)` runs,
 /// and the pushed slot is read back as the next `printf`'s operand.
 fn printing_after_a_push() -> String {
