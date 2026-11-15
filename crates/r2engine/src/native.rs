@@ -3011,7 +3011,9 @@ impl<'a> Native<'a> {
         string_literals.extend(extra_literals);
         string_literals.sort_by_key(|(address, _)| *address);
         string_literals.dedup_by_key(|(address, _)| *address);
-        let immutable_literals = self.immutable_literals(&walked.body, &string_literals);
+        let (loads, stores) = literal_accesses(&walked.body);
+        let written = written_ranges(stores);
+        let immutable_literals = self.immutable_literals(&string_literals, &written);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
@@ -3019,7 +3021,7 @@ impl<'a> Native<'a> {
             calls,
             string_literals,
             immutable_literals,
-            read_only: self.read_only(&walked.body),
+            read_only: self.read_only(loads, &written),
             data_symbols,
             data_types,
             code_pointer_tables: (tables.iter().chain(call_tables))
@@ -3148,19 +3150,19 @@ impl Native<'_> {
 
     /// The bytes at each literal address the body loads from, where the program never writes
     /// them and the loader does not (`TableBytes::ReadOnly`): what every such load reads (P5).
-    fn read_only(&self, body: &crate::body::Body) -> Vec<(u64, Vec<u8>)> {
-        let (loads, stores) = literal_accesses(body);
+    fn read_only(
+        &self,
+        loads: BTreeMap<u64, usize>,
+        written: &[std::ops::Range<u64>],
+    ) -> Vec<(u64, Vec<u8>)> {
         loads
             .into_iter()
             .filter_map(|(address, size)| {
                 let bytes = self.program.read(address, size)?;
                 let range = address..address.checked_add(bytes.len() as u64)?;
                 // A body that stores there says the container's statement is not this run's.
-                let stored = stores
-                    .iter()
-                    .any(|written| written.start < range.end && range.start < written.end);
                 (bytes.len() == size
-                    && !stored
+                    && !stored(written, &range)
                     && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
                     .then_some((address, bytes))
             })
@@ -3169,13 +3171,15 @@ impl Native<'_> {
 
     /// Each of `literals` whose text and terminator are mapped read-only, untouched by the loader
     /// and by the body's own stores: a format a call reads as the file holds it (D409). Ascending.
-    fn immutable_literals(&self, body: &crate::body::Body, literals: &[(u64, String)]) -> Vec<u64> {
-        let (_, stores) = literal_accesses(body);
+    fn immutable_literals(
+        &self,
+        literals: &[(u64, String)],
+        written: &[std::ops::Range<u64>],
+    ) -> Vec<u64> {
         let immutable = literals.iter().filter(|(address, text)| {
             let end = address.saturating_add(text.len() as u64 + 1);
-            let stored =
-                (stores.iter()).any(|written| written.start < end && *address < written.end);
-            !stored && immutable_text_at(self.program, *address).as_ref() == Some(text)
+            !stored(written, &(*address..end))
+                && immutable_text_at(self.program, *address).as_ref() == Some(text)
         });
         immutable.map(|(address, _)| *address).collect()
     }
@@ -3378,6 +3382,26 @@ fn literal_accesses(body: &crate::body::Body) -> (BTreeMap<u64, usize>, Vec<std:
         }
     }
     (loads, stores)
+}
+
+/// The body's literal stores as disjoint ranges ascending, touching ones joined: O(S log S) (D437).
+fn written_ranges(mut stores: Vec<std::ops::Range<u64>>) -> Vec<std::ops::Range<u64>> {
+    stores.sort_unstable_by_key(|range| range.start);
+    let mut written: Vec<std::ops::Range<u64>> = Vec::with_capacity(stores.len());
+    for range in stores {
+        match written.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => written.push(range),
+        }
+    }
+    written
+}
+
+/// Whether a store in `written` (from `written_ranges`) meets `range`: the last range starting
+/// before `range` ends has the greatest end among them. O(log S).
+fn stored(written: &[std::ops::Range<u64>], range: &std::ops::Range<u64>) -> bool {
+    let before = written.partition_point(|store| store.start < range.end);
+    before > 0 && written[before - 1].end > range.start
 }
 
 /// State the machine from the compiler specification and the function's convention model.

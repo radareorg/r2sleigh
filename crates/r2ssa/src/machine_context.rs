@@ -456,7 +456,7 @@ pub struct SourceMachineContext {
     observed_projections: Box<[RegisterProjection]>,
     /// Every call site the raw lifted input has, by the instruction it was
     /// lifted from.
-    raw_call_sites: BTreeMap<u64, SourceCallSiteIdentity>,
+    raw_call_sites: BTreeMap<u64, RawCallSite>,
     tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// Who each raw call site calls, where the source knew.
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
@@ -838,7 +838,9 @@ impl SourceMachineContext {
             let schema_ok = interface.schema_version() == SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION;
             let revision_ok =
                 expected_call_site_revision.as_deref() == Some(interface.revision_identity());
-            let site_known = raw_call_sites.get(&identity.instruction()) == Some(&identity);
+            let site_known = raw_call_sites
+                .get(&identity.instruction())
+                .is_some_and(|site| site.identity == identity);
             let site_unclaimed = claimed_sites.insert(site);
             if !schema_ok || !revision_ok || !site_known || !site_unclaimed || !carriers_exist {
                 r2il::refusal_evidence!(
@@ -1146,13 +1148,15 @@ impl SourceMachineContext {
     }
 
     /// Every call site of the raw lifted input, by instruction.
-    pub const fn raw_call_sites(&self) -> &BTreeMap<u64, SourceCallSiteIdentity> {
+    pub(crate) const fn raw_call_sites(&self) -> &BTreeMap<u64, RawCallSite> {
         &self.raw_call_sites
     }
 
     /// The call site lifted from `instruction`, if that instruction is one.
     pub fn raw_call_site_at(&self, instruction: u64) -> Option<SourceCallSiteIdentity> {
-        self.raw_call_sites.get(&instruction).copied()
+        self.raw_call_sites
+            .get(&instruction)
+            .map(|site| site.identity)
     }
 
     pub fn is_tail_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
@@ -1416,8 +1420,8 @@ impl SourceMachineContext {
                 models.len() - 1
             }))
         };
-        let sites = (self.raw_call_sites.iter()).map(|(instruction, identity)| {
-            let direct = crate::semantic::direct_target_from_raw_identity(*identity);
+        let sites = (self.raw_call_sites.iter()).map(|(instruction, site)| {
+            let direct = crate::semantic::direct_target_from_raw_identity(site.identity);
             let model = row(self.site_model(Some(*instruction), direct));
             let reads = self.stated_call_reads(Some(*instruction));
             (*instruction, (reads, model))
@@ -1633,18 +1637,38 @@ impl SourceMachineContext {
         r2abi::format::printf_consumed_arguments(text).ok()
     }
 
-    /// Fold the format each call to a cited printf `...` passes in its own block, one forward pass
-    /// per block, and keep what a read-only format consumes (D409). O(operations + calls log calls).
+    /// Fold each cited printf's format in its own block and keep what a read-only one consumes (D409),
+    /// stepping a block only up to its last site: O(C log C + those operations) (D437).
     pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
         self.feeding_call_reads();
+        let mut sites = (self.raw_call_sites.iter())
+            .filter(|(instruction, _)| self.format_register(**instruction).is_some())
+            .map(|(instruction, site)| (site.block, site.op, *instruction))
+            .collect::<Vec<_>>();
+        sites.sort_unstable();
         let mut tails = BTreeMap::new();
-        for block in blocks {
-            let mut origins = BlockOrigins::default();
-            for (at, op) in block.ops.iter().enumerate() {
-                let instruction = (op.is_call()).then(|| block.instruction_of(at)).flatten();
-                let consumed = |at| Some((at, self.folded_format_tail(at, &origins, immutable)?));
-                tails.extend(instruction.and_then(consumed));
-                origins.step(op);
+        for in_block in sites.chunk_by(|left, right| left.0 == right.0) {
+            let Some(block) = blocks.get(in_block[0].0 as usize) else {
+                continue;
+            };
+            let (mut origins, mut folded) = (BlockOrigins::default(), 0);
+            for &(_, at, instruction) in in_block {
+                let at = at as usize;
+                for op in block.ops.get(folded..at).unwrap_or_default() {
+                    #[cfg(test)]
+                    FORMAT_FOLD_STEPS.with(|steps| steps.set(steps.get() + 1));
+                    origins.step(op);
+                }
+                folded = folded.max(at);
+                // A site is the one call its instruction lifts to (`collect_raw_call_site_identities`).
+                let call = block.ops.get(at).is_some_and(R2ILOp::is_call)
+                    && block.instruction_of(at) == Some(instruction);
+                let consumed = || self.folded_format_tail(instruction, &origins, immutable);
+                tails.extend(
+                    call.then(consumed)
+                        .flatten()
+                        .map(|tail| (instruction, tail)),
+                );
             }
         }
         self.format_tails = tails;
@@ -1702,17 +1726,14 @@ fn collect_raw_call_site_identities(
     blocks: &[R2ILBlock],
     tail_call_identities: &[SourceCallSiteIdentity],
     terminal_blocks: &BTreeSet<u64>,
-) -> (
-    BTreeMap<u64, SourceCallSiteIdentity>,
-    BTreeSet<SourceCallSiteIdentity>,
-) {
+) -> (BTreeMap<u64, RawCallSite>, BTreeSet<SourceCallSiteIdentity>) {
     let authorized_tail_calls = tail_call_identities
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    let mut by_instruction: BTreeMap<u64, Option<SourceCallSiteIdentity>> = BTreeMap::new();
+    let mut by_instruction: BTreeMap<u64, Option<RawCallSite>> = BTreeMap::new();
     let mut tails = BTreeSet::new();
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
         for (op_index, op) in block.ops.iter().enumerate() {
             let Some(instruction) = block.instruction_of(op_index) else {
                 continue;
@@ -1788,9 +1809,14 @@ fn collect_raw_call_site_identities(
                 }
                 _ => continue,
             };
+            let site = RawCallSite {
+                identity,
+                block: u32::try_from(block_index).expect("fewer than 2^32 blocks"),
+                op: u32::try_from(op_index).expect("fewer than 2^32 operations in a block"),
+            };
             match by_instruction.entry(instruction) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(Some(identity));
+                    slot.insert(Some(site));
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) => {
                     r2il::refusal_evidence!(
@@ -1804,10 +1830,27 @@ fn collect_raw_call_site_identities(
     }
     let by_instruction = by_instruction
         .into_iter()
-        .filter_map(|(instruction, identity)| identity.map(|identity| (instruction, identity)))
+        .filter_map(|(instruction, site)| site.map(|site| (instruction, site)))
         .collect::<BTreeMap<_, _>>();
-    tails.retain(|identity| by_instruction.get(&identity.instruction()) == Some(identity));
+    tails.retain(|identity| {
+        (by_instruction.get(&identity.instruction())).is_some_and(|site| site.identity == *identity)
+    });
     (by_instruction, tails)
+}
+
+/// A raw call site and where it was lifted: the one transfer its instruction lifts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawCallSite {
+    pub(crate) identity: SourceCallSiteIdentity,
+    /// Index of the block in the lifted input, and of the transfer in its operations.
+    pub(crate) block: u32,
+    pub(crate) op: u32,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many operations `bind_format_tails` folded on this thread (D437).
+    pub(crate) static FORMAT_FOLD_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The canonical RAM slot whose loaded value a terminal indirect branch reads.
@@ -3456,6 +3499,99 @@ mod tests {
                 .map(MachineMemorySpace::address_bits),
             Some(64)
         );
+    }
+
+    /// Blocks `0x1000` (a call to no printf, then a copy) and `0x1010` (rsi = format, a printf
+    /// at `0x1014` when `cited`, then two copies). Returns the context and the blocks.
+    fn format_fold_body(cited: bool) -> (SourceMachineContext, Vec<R2ILBlock>) {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        for (index, name) in ["rdi", "rsi", "rdx", "rcx"].iter().enumerate() {
+            arch.add_register(RegisterDef::new(*name, index as u64 * 8, 8));
+        }
+        let slot = |index: u64| register_storage(index * 8, 8);
+        let copy = |register: u64, value: u64| R2ILOp::Copy {
+            dst: Varnode::register(register * 8, 8),
+            src: Varnode::constant(value, 8),
+        };
+        let mut other = R2ILBlock::new(0x1000, 8);
+        let target = Varnode::constant(0x2100, 8);
+        other.push(R2ILOp::Call { target });
+        other.stamp_instruction(0, 0x1000);
+        other.push(copy(0, 1));
+        other.stamp_instruction(1, 0x1004);
+        let mut site = R2ILBlock::new(0x1010, 12);
+        let target = Varnode::constant(0x2000, 8);
+        for (at, (op, instruction)) in [
+            (copy(1, 0x3000), 0x1010),
+            (R2ILOp::Call { target }, 0x1014),
+            (copy(0, 0), 0x1018),
+            (copy(2, 0), 0x1018),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            site.push(op);
+            site.stamp_instruction(at, instruction);
+        }
+        let printf = CanonicalStorageId {
+            space: CanonicalStorageSpace::Constant,
+            offset: 0x2000,
+            size: 8,
+        };
+        let interface = SourceCallSiteInterface::new(
+            b"format-fold".to_vec(),
+            SourceCallSiteIdentity::new(0x1014, printf),
+            true,
+            r2source::ConventionId::SysVAmd64,
+            [
+                SourceCallArgumentSpec::new(0, slot(0)),
+                SourceCallArgumentSpec::new(1, slot(1)),
+            ],
+            true,
+            SourceCallResult::Void,
+        )
+        .expect("exact callsite interface")
+        .with_radare2_format_parameter(1)
+        .expect("format parameter belongs to the fixed prefix");
+        let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+            .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot));
+        let blocks = vec![other, site];
+        let mut context = SourceMachineContext::from_blocks_with_interfaces(
+            &blocks,
+            Some(&crate::Arch::from(arch)),
+            None,
+            SourceMachineRoles::default(),
+            Some(convention.killed((0..4).map(slot)).conventions()),
+            cited.then_some(interface).into_iter().collect(),
+        );
+        context.bind_source_string_literals(&[(0x3000, "%d\n".to_string())]);
+        (context, blocks)
+    }
+
+    fn format_fold_steps(context: &mut SourceMachineContext, blocks: &[R2ILBlock]) -> usize {
+        FORMAT_FOLD_STEPS.with(|steps| steps.set(0));
+        context.bind_format_tails(blocks, &[0x3000]);
+        FORMAT_FOLD_STEPS.with(std::cell::Cell::get)
+    }
+
+    /// D437: a body with no cited printf site folds no operation.
+    #[test]
+    fn a_body_with_no_format_site_folds_no_operation() {
+        let (mut context, blocks) = format_fold_body(false);
+        assert_eq!(format_fold_steps(&mut context, &blocks), 0);
+        assert_eq!(context.format_tail(0x1014), None);
+    }
+
+    /// D437: only the site's block is folded, up to the site, and the site's format is still bound.
+    #[test]
+    fn the_format_fold_stops_at_the_last_site_of_its_block() {
+        let (mut context, blocks) = format_fold_body(true);
+        assert_eq!(format_fold_steps(&mut context, &blocks), 1);
+        let tail = context
+            .format_tail(0x1014)
+            .expect("the literal format is folded");
+        assert_eq!(tail.count, 1);
     }
 }
 
