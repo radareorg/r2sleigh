@@ -1025,19 +1025,21 @@ fn printing_twice(format: &[u8], writable: bool) -> String {
     rendered.response.output.into_text()
 }
 
-/// values.c clang -O0 `main`'s shape (D432): `caller` spills the format at `BASE + 0xb0` to
-/// `[sp, #16]`, calls `f` (`ret`) or, where `unstated`, `blr x9`, then reloads it for each printf.
-fn printing_reloaded(unstated: bool) -> String {
+/// The spill of [`printing_reloaded`]: `adrp x8, 0x1000; add x8, x8, #0xb0; str x8, [sp, #16]`.
+const SPILL: [u32; 3] = [0x9000_0008, 0x9102_c108, 0xf900_0be8];
+
+/// values.c clang -O0 `main`'s shape (D432): `caller` runs `prologue` (four words, a spill of the
+/// format at `BASE + 0xb0` to `[sp, #16]` among them), then reloads it for each printf.
+fn printing_reloaded(prologue: [u32; 4]) -> String {
     const FORMAT: u64 = BASE + 0xb0;
     let mut code = vec![0u8; 0x100];
-    let between = if unstated { 0xd63f_0120 } else { 0x97ff_fffa }; // blr x9 | bl f
     let words: [(u64, u32); 17] = [
         (F, 0xd65f_03c0),           // f: ret
         (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
-        (BASE + 0x14, 0x9000_0008), // adrp x8, 0x1000
-        (BASE + 0x18, 0x9102_c108), // add x8, x8, #0xb0
-        (BASE + 0x1c, 0xf900_0be8), // str x8, [sp, #16]
-        (BASE + 0x20, between),     // bl f | blr x9
+        (BASE + 0x14, prologue[0]),
+        (BASE + 0x18, prologue[1]),
+        (BASE + 0x1c, prologue[2]),
+        (BASE + 0x20, prologue[3]),
         (BASE + 0x24, 0xf940_0be0), // ldr x0, [sp, #16]
         (BASE + 0x28, 0x5280_00e1), // mov w1, #7
         (BASE + 0x2c, 0x9400_0019), // bl printf
@@ -1070,7 +1072,7 @@ fn printing_reloaded(unstated: bool) -> String {
 /// and the first printf, both bounded: both calls count their tails and the slot is promoted.
 #[test]
 fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
-    let text = printing_reloaded(false);
+    let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0x97ff_fffa]); // bl f
     assert!(text.contains(r#"printf("%d\n", (uint64_t)7U);"#), "{text}");
     assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
     assert!(!text.contains("format_argument_not_literal"), "{text}");
@@ -1080,9 +1082,50 @@ fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
 /// An unstated call between the spill and the reloads may write the slot: it stays in memory.
 #[test]
 fn a_format_reloaded_past_an_unstated_call_stays_in_memory() {
-    let text = printing_reloaded(true);
+    let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
     assert!(text.contains("format_argument_not_literal"), "{text}");
     assert!(text.contains("frame + 16U"), "{text}");
+}
+
+/// `cbz x0` skips the spill: no store reaches the reload on that path, so the format is no
+/// literal and `printf` may write `[sp, #28]`, which `caller` returns (D432's unset key at entry).
+#[test]
+fn a_format_spilled_on_one_path_only_bounds_no_write() {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let words: [(u64, u32); 16] = [
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x5280_00a9), // mov w9, #5
+        (BASE + 0x18, 0xb900_1fe9), // str w9, [sp, #28]
+        (BASE + 0x1c, 0xb400_0080), // cbz x0, 0x102c
+        (BASE + 0x20, SPILL[0]),    // adrp x8, 0x1000
+        (BASE + 0x24, SPILL[1]),    // add x8, x8, #0xb0
+        (BASE + 0x28, SPILL[2]),    // str x8, [sp, #16]
+        (BASE + 0x2c, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x34, 0x9400_0017), // bl printf
+        (BASE + 0x38, 0xb940_1fe0), // ldr w0, [sp, #28]
+        (BASE + 0x3c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x40, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+        (BASE + 0x98, 0x0000_0000), // the stub's slot
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x34)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, b"%d\n\0");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(text.contains("format_argument_not_literal"), "{text}");
+    assert!(text.contains("frame + 28U"), "{text}");
 }
 
 /// hashes clang -O1 `main`'s shape (D409): `push rax` aligns the stack, `printf("%d\n", 7)` runs,

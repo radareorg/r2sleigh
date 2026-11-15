@@ -814,7 +814,8 @@ fn conditional(
 ) -> Vec<Gated> {
     let clean = |reload: &Reload| {
         let kept = kept(points, &table.places, reload.place);
-        !site.reentered && kept.is_some_and(|(width, kept)| width == reload.width && !kept)
+        let entered = site.root.is_some() && !site.reentered;
+        entered && kept.is_some_and(|(width, kept)| width == reload.width && !kept)
     };
     (table.reloads.iter().filter(|reload| clean(reload)))
         .filter_map(|reload| {
