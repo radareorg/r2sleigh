@@ -1519,6 +1519,8 @@ fn reaching_rewrites(
         state
     };
     let start = vec![0u64; words];
+    // Each reload's load verdict, written at its format load and taken at its call.
+    let mut unset = vec![None; slots];
     let cells = crate::fixpoint::sparse(
         "rewritten",
         keys,
@@ -1535,7 +1537,7 @@ fn reaching_rewrites(
                         *word = (*word & !killed) | generated;
                     }
                 }
-                None => step(&mut state, &events[node], None),
+                None => step(&mut state, &events[node], &mut unset, None),
             }
             state
         },
@@ -1547,15 +1549,19 @@ fn reaching_rewrites(
     };
     for (node, list) in events.iter() {
         let mut state = entering(node, &cells);
-        step(&mut state, list, Some(&mut solved));
+        step(&mut state, list, &mut unset, Some(&mut solved));
     }
     Some(solved)
 }
 
 /// Run a block's events over `state` in index order, recording loads and reloads into `solved`.
-/// Monotone: a set unset bit only adds `extra`. `O(events x words)`.
-fn step(state: &mut [u64], list: &[(usize, Event)], mut solved: Option<&mut Solved>) {
-    let mut unset = Vec::new();
+/// `unset` is by slot; a call whose load went unread is unset. Monotone. `O(events x words)`.
+fn step(
+    state: &mut [u64],
+    list: &[(usize, Event)],
+    unset: &mut [Option<bool>],
+    mut solved: Option<&mut Solved>,
+) {
     for (_, event) in list {
         match event {
             Event::Write(set) => or_into(state, set),
@@ -1567,7 +1573,7 @@ fn step(state: &mut [u64], list: &[(usize, Event)], mut solved: Option<&mut Solv
             }
             Event::Format(slot, key) => {
                 let held = !bit(state, *key);
-                unset.push((*slot, !held));
+                unset[*slot] = Some(!held);
                 if let Some(solved) = solved.as_deref_mut() {
                     solved.held[*slot] = held;
                 }
@@ -1578,8 +1584,7 @@ fn step(state: &mut [u64], list: &[(usize, Event)], mut solved: Option<&mut Solv
                 extra,
             } => {
                 or_into(state, bounded);
-                let found = unset.iter().find(|(at, _)| at == slot);
-                if found.is_none_or(|(_, unset)| *unset) {
+                if unset[*slot].take().unwrap_or(true) {
                     or_into(state, extra);
                 }
             }
