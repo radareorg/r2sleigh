@@ -803,6 +803,14 @@ Measured against `rd7-format` (0c75d191d):
 - Census: 1 record, `syscalls_static_O2` `0x401050`, proof line only, C identical.
 - Tests (`result_lanes.rs`): the call form, the tail form and an existing `Unread`, red on 0c75d191d; default-deny (RAX taken by an indirect call, address stored, no call, a forwarding cycle), each case killed by a mutant of its guard; the lane clause, red on 0c75d191d.
 
+## D442 as built (2026-11-15)
+
+A closed-world body is sealed once. `Native::resolve` asks `CallBoundary`'s decision before the first seal and captures under it; `finish` seals again only where the body has no open interface (the decision is dropped, as before) or the decision was not asked first (`resolve_built`, the callee path). Before, `finish` sealed, then asked, then sealed again whenever a decision held, so D440 sealed every body whose integer lane is decided twice. The decision is a query of the entry and the database (`View::closed_result`), so asking it first reads nothing of the first seal and moves no dependency; the capture is the one the second seal used, so the output is the same.
+
+- Gate: `result_lanes::a_body_the_closed_world_decides_seals_once`: rendering a decided `f` reads as many build recoveries as its undecided twin, 5 against 4 on 41003ea2e.
+- Found by Scaling Bench on PR #403: `unproven_returns` Ir grew 2.300 (budget 2.3; rd6 2.280, D432 2.266). Callgrind on `unproven_returns-64` and `-128`: `TrustedSsaArtifact::sealed` ran 1x on rd6 and 2x on the merge, +172 M and +406 M instructions, for a proof-line clause.
+- What is left superlinear in one seal on that dimension is D443's.
+
 ## Open questions
 
 1. The register effect is computed on ask or deposited by `SiteFates` ("S31b as built", ruled). pumasim `0x3b6b20` does not meet the note's gate (-0.07 G against -0.08 G, run spread 0.014 G); the next lever is D354.

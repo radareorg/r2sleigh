@@ -792,6 +792,11 @@ type Bodies = Vec<(u64, &'static [u8])>;
 
 /// `f` at 0x1000 and each `(offset, bytes)` body, `ferror`'s stub at 0x1090, `f` rendered under `aa`.
 fn narrow_result_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> String {
+    rendered_under_aa(f, bodies).0
+}
+
+/// `f`'s text under `aa`, and the build recoveries its rendering read.
+fn rendered_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> (String, u64) {
     let mut code = [0xcc_u8; 0xa0];
     code[..f.len()].copy_from_slice(f);
     let mut functions = vec![("f", BASE, f.len() as u64)];
@@ -806,8 +811,36 @@ fn narrow_result_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> String {
     let code: &'static [u8] = Box::leak(Box::new(code));
     let mut open = OpenProgram::of(Literal::of_code(code, &functions).importing("ferror"));
     open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats().static_prefixes;
     let rendered = open.rendered(BASE).expect("it renders");
-    rendered.response.output.into_text()
+    let read = open.analysis_stats().static_prefixes - before;
+    (rendered.response.output.into_text(), read)
+}
+
+/// `call f; 5 nops; call rsi; ret`: `OVERWRITES_RAX_ONLY` with RAX left to the indirect call.
+const LEAVES_RAX_PADDED: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0x90, 0x90, 0x90, 0x90, 0x90, // 1025 nop x5
+    0xff, 0xd6, // 102a call rsi
+    0xc3, // 102c ret
+];
+
+/// A decided body seals once: the decision is asked before the first seal, so `f` reads as many
+/// build recoveries as its twin whose caller reads RAX and decides nothing (D442).
+#[test]
+fn a_body_the_closed_world_decides_seals_once() {
+    let callers = |first: &'static [u8]| [(0x20, first), (0x30, OVERWRITES_EVERY_LANE)];
+    let (text, decided) = rendered_under_aa(RETURNS_A_NARROW_CALL, &callers(OVERWRITES_RAX_ONLY));
+    assert!(
+        text.contains("no call reads the integer result register"),
+        "{text}"
+    );
+    let (text, undecided) = rendered_under_aa(RETURNS_A_NARROW_CALL, &callers(LEAVES_RAX_PADDED));
+    assert!(!text.contains("no call reads"), "{text}");
+    assert_eq!(
+        decided, undecided,
+        "build recoveries, decided against undecided"
+    );
 }
 
 /// Every way in overwrites RAX before a read, so no bit above `ferror`'s `int` is a residual; XMM0

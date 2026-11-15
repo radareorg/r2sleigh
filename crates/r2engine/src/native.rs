@@ -1477,6 +1477,7 @@ fn resolved_alone(
         entry: address,
         declared_root,
         seal: seal.map_err(|why| unreadable(NativeRefusal::of_preparation(why)))?,
+        asked: None,
     };
     let finished = native.finish(walked, &imports, stated.world, first);
     finished
@@ -1556,11 +1557,13 @@ pub(crate) struct Built {
     declared_root: Restatement,
 }
 
-/// A body's first seal, by its entry, and the declaration it was captured under.
+/// A body's first seal, by its entry, and the declaration and closed decision it was captured
+/// under; `asked` is `None` where the decision was not asked before the seal.
 struct First {
     entry: u64,
     declared_root: Restatement,
     seal: r2ssa::TrustedSeal,
+    asked: Option<Option<r2source::SourceClosedDecision>>,
 }
 
 impl Built {
@@ -2220,11 +2223,15 @@ impl<'a> Native<'a> {
         world: crate::program::World,
     ) -> Result<Resolution, NativeRefusal> {
         let declared_root = self.declaration(entry);
-        let seal = self.seal_first(walk, callees, &declared_root, None)?;
+        // The decision is asked before the first seal, so a decided body seals once (D442).
+        let asked =
+            (world == crate::program::World::Closed).then(|| self.program.closed_result(entry));
+        let seal = self.seal_first(walk, callees, &declared_root, asked.flatten())?;
         let first = First {
             entry,
             declared_root,
             seal,
+            asked,
         };
         Ok(self.finish(walk, callees, world, first)?.0)
     }
@@ -2253,6 +2260,7 @@ impl<'a> Native<'a> {
             entry: address,
             declared_root,
             seal: seal.map_err(NativeRefusal::of_preparation)?,
+            asked: None,
         };
         self.finish(walk, &imports, crate::program::World::Open, first)
     }
@@ -2354,17 +2362,19 @@ impl<'a> Native<'a> {
             entry,
             declared_root,
             seal: mut first,
+            asked,
         } = first;
         let (root, tables, calls) = (&walk.root, &walk.tables[..], &walk.calls[..]);
         // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
         // The closed world's held decision, from the open read's supply (doc/adr-result-side.md, D317).
+        // A body with no open interface takes none; a seal under another decision is built again.
         let open = first.machine_context().function_interface().is_some();
         let reads = (world == crate::program::World::Closed && open)
-            .then(|| self.program.closed_result(entry))
+            .then(|| asked.unwrap_or_else(|| self.program.closed_result(entry)))
             .flatten();
-        if reads.is_some() {
+        if reads != asked.flatten() {
             drop(first);
             first = self.seal_first(walk, callees, &declared_root, reads)?;
         }
