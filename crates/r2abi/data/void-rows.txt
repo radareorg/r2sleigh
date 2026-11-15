@@ -108,6 +108,7 @@ _ZSt20__throw_future_errori | void | libstdc++ bits/functexcept.h
 _ZSt25__throw_bad_function_callv | void | libstdc++ bits/functexcept.h
 
 # The glibc and POSIX tables S8 cites (D167).
+qsort | void | C17 7.22.5.2; glibc 2.39 <stdlib.h> line 970
 __assert_fail | void | glibc <assert.h>: void __assert_fail(const char *, const char *, unsigned int, const char *), noreturn
 __fpurge | void | glibc <stdio_ext.h>: void __fpurge(FILE *); __fpurge(3)
 clearerr_unlocked | void | glibc <stdio.h>: void clearerr_unlocked(FILE *); unlocked_stdio(3)

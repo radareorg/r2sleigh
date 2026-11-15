@@ -785,3 +785,474 @@ func.on_exit.arg.0=void (*)(int, void *),function
 func.on_exit.arg.1=void *,arg
 func.on_exit.ret=int
 func.on_exit.include=stdlib.h
+
+# D449: rows radare2's portable and glibc tables held uncited, each read from the glibc 2.39
+# header that declares it (`-D_GNU_SOURCE -D_FORTIFY_SOURCE=2`), its line named below.
+
+# sys/select.h: glibc 2.39 declares it at bits/select-decl.h line 27, which sys/select.h includes:
+# `long int __fdelt_chk (long int __d)`.
+__fdelt_chk=func
+func.__fdelt_chk.args=1
+func.__fdelt_chk.arg.0=long,d
+func.__fdelt_chk.ret=long
+func.__fdelt_chk.include=sys/select.h
+
+# bits/stdio2-decl.h line 106: glibc 2.39 declares
+# `char *__fgets_chk (char *__restrict __s, size_t __size, int __n, FILE *__restrict __stream)`.
+__fgets_chk=func
+func.__fgets_chk.args=4
+func.__fgets_chk.arg.0=char *,s
+func.__fgets_chk.arg.1=size_t,size
+func.__fgets_chk.arg.2=int,n
+func.__fgets_chk.arg.3=FILE *,stream
+func.__fgets_chk.ret=char *
+func.__fgets_chk.include=bits/stdio2-decl.h
+
+# bits/stdio2-decl.h line 122: glibc 2.39 declares
+# `size_t __fread_chk (void *__restrict __ptr, size_t __ptrlen, size_t __size, size_t __n, FILE
+# *__restrict __stream)`.
+__fread_chk=func
+func.__fread_chk.args=5
+func.__fread_chk.arg.0=void *,ptr
+func.__fread_chk.arg.1=size_t,ptrlen
+func.__fread_chk.arg.2=size_t,size
+func.__fread_chk.arg.3=size_t,n
+func.__fread_chk.arg.4=FILE *,stream
+func.__fread_chk.ret=size_t
+func.__fread_chk.include=bits/stdio2-decl.h
+
+# unistd.h: glibc 2.39 declares it at bits/unistd-decl.h line 26, which unistd.h includes:
+# `ssize_t __read_chk (int __fd, void *__buf, size_t __nbytes, size_t __buflen)`.
+__read_chk=func
+func.__read_chk.args=4
+func.__read_chk.arg.0=int,fd
+func.__read_chk.arg.1=void *,buf
+func.__read_chk.arg.2=size_t,nbytes
+func.__read_chk.arg.3=size_t,buflen
+func.__read_chk.ret=ssize_t
+func.__read_chk.include=unistd.h
+
+# stdlib.h: glibc 2.39 declares it at bits/stdlib.h line 23, which stdlib.h includes:
+# `char *__realpath_chk (const char *__restrict __name, char *__restrict __resolved, size_t
+# __resolvedlen)`.
+__realpath_chk=func
+func.__realpath_chk.args=3
+func.__realpath_chk.arg.0=const char *,name
+func.__realpath_chk.arg.1=char *,resolved
+func.__realpath_chk.arg.2=size_t,resolvedlen
+func.__realpath_chk.ret=char *
+func.__realpath_chk.include=stdlib.h
+
+# stdlib.h line 657: glibc 2.39 declares
+# `__uint32_t arc4random (void)`.
+arc4random=func
+func.arc4random.args=0
+func.arc4random.ret=__uint32_t
+func.arc4random.include=stdlib.h
+
+# time.h line 180: glibc 2.39 declares
+# `char *asctime (const struct tm *__tp)`.
+asctime=func
+func.asctime.args=1
+func.asctime.arg.0=const struct tm *,tp
+func.asctime.ret=char *
+func.asctime.include=time.h
+
+# string.h line 540: glibc 2.39 declares
+# `char *basename (const char *__filename)`.
+basename=func
+func.basename.args=1
+func.basename.arg.0=const char *,filename
+func.basename.ret=char *
+func.basename.include=string.h
+
+# sys/socket.h line 112: glibc 2.39 declares
+# `int bind (int __fd, __CONST_SOCKADDR_ARG __addr, socklen_t __len)`.
+bind=func
+func.bind.args=3
+func.bind.arg.0=int,fd
+func.bind.arg.1=const struct sockaddr *,addr
+func.bind.arg.2=socklen_t,len
+func.bind.ret=int
+func.bind.include=sys/socket.h
+
+# libintl.h line 86: glibc 2.39 declares
+# `char *bindtextdomain (const char *__domainname, const char *__dirname)`.
+bindtextdomain=func
+func.bindtextdomain.args=2
+func.bindtextdomain.arg.0=const char *,domainname
+func.bindtextdomain.arg.1=const char *,dirname
+func.bindtextdomain.ret=char *
+func.bindtextdomain.include=libintl.h
+
+# stdlib.h line 960: glibc 2.39 declares
+# `void *bsearch (const void *__key, const void *__base, size_t __nmemb, size_t __size,
+# __compar_fn_t __compar)`.
+bsearch=func
+func.bsearch.args=5
+func.bsearch.arg.0=const void *,key
+func.bsearch.arg.1=const void *,base
+func.bsearch.arg.2=size_t,nmemb
+func.bsearch.arg.3=size_t,size
+func.bsearch.arg.4=int (*)(const void *, const void *),compar
+func.bsearch.ret=void *
+func.bsearch.include=stdlib.h
+
+# strings.h line 42: glibc 2.39 declares
+# `void bzero (void *__s, size_t __n)`.
+bzero=func
+func.bzero.args=2
+func.bzero.arg.0=void *,s
+func.bzero.arg.1=size_t,n
+func.bzero.ret=void
+func.bzero.include=strings.h
+
+# sys/socket.h line 126: glibc 2.39 declares
+# `int connect (int __fd, __CONST_SOCKADDR_ARG __addr, socklen_t __len)`.
+connect=func
+func.connect.args=3
+func.connect.arg.0=int,fd
+func.connect.arg.1=const struct sockaddr *,addr
+func.connect.arg.2=socklen_t,len
+func.connect.ret=int
+func.connect.include=sys/socket.h
+
+# libintl.h line 51: glibc 2.39 declares
+# `char *dcgettext (const char *__domainname, const char *__msgid, int __category)`.
+dcgettext=func
+func.dcgettext.args=3
+func.dcgettext.arg.0=const char *,domainname
+func.dcgettext.arg.1=const char *,msgid
+func.dcgettext.arg.2=int,category
+func.dcgettext.ret=char *
+func.dcgettext.include=libintl.h
+
+# libintl.h line 73: glibc 2.39 declares
+# `char *dcngettext (const char *__domainname, const char *__msgid1, const char *__msgid2, unsigned
+# long int __n, int __category)`.
+dcngettext=func
+func.dcngettext.args=5
+func.dcngettext.arg.0=const char *,domainname
+func.dcngettext.arg.1=const char *,msgid1
+func.dcngettext.arg.2=const char *,msgid2
+func.dcngettext.arg.3=unsigned long,n
+func.dcngettext.arg.4=int,category
+func.dcngettext.ret=char *
+func.dcngettext.include=libintl.h
+
+# libintl.h line 44: glibc 2.39 declares
+# `char *dgettext (const char *__domainname, const char *__msgid)`.
+dgettext=func
+func.dgettext.args=2
+func.dgettext.arg.0=const char *,domainname
+func.dgettext.arg.1=const char *,msgid
+func.dgettext.ret=char *
+func.dgettext.include=libintl.h
+
+# libintl.h line 67: glibc 2.39 declares
+# `char *dngettext (const char *__domainname, const char *__msgid1, const char *__msgid2, unsigned
+# long int __n)`.
+dngettext=func
+func.dngettext.args=4
+func.dngettext.arg.0=const char *,domainname
+func.dngettext.arg.1=const char *,msgid1
+func.dngettext.arg.2=const char *,msgid2
+func.dngettext.arg.3=unsigned long,n
+func.dngettext.ret=char *
+func.dngettext.include=libintl.h
+
+# fenv.h line 123: glibc 2.39 declares
+# `int fesetenv (const fenv_t *__envp)`.
+fesetenv=func
+func.fesetenv.args=1
+func.fesetenv.arg.0=const fenv_t *,envp
+func.fesetenv.ret=int
+func.fesetenv.include=fenv.h
+
+# fenv.h line 88: glibc 2.39 declares
+# `int fesetexceptflag (const fexcept_t *__flagp, int __excepts)`.
+fesetexceptflag=func
+func.fesetexceptflag.args=2
+func.fesetexceptflag.arg.0=const fexcept_t *,flagp
+func.fesetexceptflag.arg.1=int,excepts
+func.fesetexceptflag.ret=int
+func.fesetexceptflag.include=fenv.h
+
+# fenv.h line 128: glibc 2.39 declares
+# `int feupdateenv (const fenv_t *__envp)`.
+feupdateenv=func
+func.feupdateenv.args=1
+func.feupdateenv.arg.0=const fenv_t *,envp
+func.feupdateenv.ret=int
+func.feupdateenv.include=fenv.h
+
+# stdio.h line 245: glibc 2.39 declares
+# `int fflush_unlocked (FILE *__stream)`.
+fflush_unlocked=func
+func.fflush_unlocked.args=1
+func.fflush_unlocked.arg.0=FILE *,stream
+func.fflush_unlocked.ret=int
+func.fflush_unlocked.include=stdio.h
+
+# sys/stat.h line 242: glibc 2.39 declares
+# `int fstat64 (int __fd, struct stat64 *__buf)`.
+fstat64=func
+func.fstat64.args=2
+func.fstat64.arg.0=int,fd
+func.fstat64.arg.1=struct stat64 *,buf
+func.fstat64.ret=int
+func.fstat64.include=sys/stat.h
+
+# getopt.h: glibc 2.39 declares it at bits/getopt_ext.h line 66, which getopt.h includes:
+# `int getopt_long (int ___argc, char *__getopt_argv_const *___argv, const char *__shortopts, const
+# struct option *__longopts, int *__longind)`.
+getopt_long=func
+func.getopt_long.args=5
+func.getopt_long.arg.0=int,argc
+func.getopt_long.arg.1=char **,argv
+func.getopt_long.arg.2=const char *,shortopts
+func.getopt_long.arg.3=const struct option *,longopts
+func.getopt_long.arg.4=int *,longind
+func.getopt_long.ret=int
+func.getopt_long.include=getopt.h
+
+# libintl.h line 39: glibc 2.39 declares
+# `char *gettext (const char *__msgid)`.
+gettext=func
+func.gettext.args=1
+func.gettext.arg.0=const char *,msgid
+func.gettext.ret=char *
+func.gettext.include=libintl.h
+
+# time.h line 133: glibc 2.39 declares
+# `struct tm *gmtime (const time_t *__timer)`.
+gmtime=func
+func.gmtime.args=1
+func.gmtime.arg.0=const time_t *,timer
+func.gmtime.ret=struct tm *
+func.gmtime.include=time.h
+
+# arpa/inet.h line 73: glibc 2.39 declares
+# `int inet_aton (const char *__cp, struct in_addr *__inp)`.
+inet_aton=func
+func.inet_aton.args=2
+func.inet_aton.arg.0=const char *,cp
+func.inet_aton.arg.1=struct in_addr *,inp
+func.inet_aton.ret=int
+func.inet_aton.include=arpa/inet.h
+
+# sys/ioctl.h line 42: glibc 2.39 declares
+# `int ioctl (int __fd, unsigned long int __request, ...)`.
+ioctl=func
+func.ioctl.args=3
+func.ioctl.arg.0=int,fd
+func.ioctl.arg.1=unsigned long,request
+func.ioctl.arg.2=,...
+func.ioctl.ret=int
+func.ioctl.include=sys/ioctl.h
+func.ioctl.tail=variadic
+
+# math.h: glibc 2.39 declares it at bits/mathcalls.h line 177, which math.h includes:
+# `__MATHDECL_ALIAS (int,isinf,, (_Mdouble_ __value), isinf)`.
+isinf=func
+func.isinf.args=1
+func.isinf.arg.0=double,value
+func.isinf.ret=int
+func.isinf.include=math.h
+
+# math.h: glibc 2.39 declares it at bits/mathcalls.h line 213, which math.h includes:
+# `__MATHDECL_ALIAS (int,isnan,, (_Mdouble_ __value), isnan)`.
+isnan=func
+func.isnan.args=1
+func.isnan.arg.0=double,value
+func.isnan.ret=int
+func.isnan.include=math.h
+
+# sys/xattr.h line 80: glibc 2.39 declares
+# `ssize_t listxattr (const char *__path, char *__list, size_t __size)`.
+listxattr=func
+func.listxattr.args=3
+func.listxattr.arg.0=const char *,path
+func.listxattr.arg.1=char *,list
+func.listxattr.arg.2=size_t,size
+func.listxattr.ret=ssize_t
+func.listxattr.include=sys/xattr.h
+
+# locale.h line 125: glibc 2.39 declares
+# `struct lconv *localeconv (void)`.
+localeconv=func
+func.localeconv.args=0
+func.localeconv.ret=struct lconv *
+func.localeconv.include=locale.h
+
+# time.h line 137: glibc 2.39 declares
+# `struct tm *localtime (const time_t *__timer)`.
+localtime=func
+func.localtime.args=1
+func.localtime.arg.0=const time_t *,timer
+func.localtime.ret=struct tm *
+func.localtime.include=time.h
+
+# sys/stat.h line 338: glibc 2.39 declares
+# `int lstat64 (const char *__restrict __file, struct stat64 *__restrict __buf)`.
+lstat64=func
+func.lstat64.args=2
+func.lstat64.arg.0=const char *,file
+func.lstat64.arg.1=struct stat64 *,buf
+func.lstat64.ret=int
+func.lstat64.include=sys/stat.h
+
+# string.h line 389: glibc 2.39 declares
+# `void *memmem (const void *__haystack, size_t __haystacklen, const void *__needle, size_t
+# __needlelen)`.
+memmem=func
+func.memmem.args=4
+func.memmem.arg.0=const void *,haystack
+func.memmem.arg.1=size_t,haystacklen
+func.memmem.arg.2=const void *,needle
+func.memmem.arg.3=size_t,needlelen
+func.memmem.ret=void *
+func.memmem.include=string.h
+
+# stdlib.h line 814: glibc 2.39 declares
+# `char *mktemp (char *__template)`.
+mktemp=func
+func.mktemp.args=1
+func.mktemp.arg.0=char *,template
+func.mktemp.ret=char *
+func.mktemp.include=stdlib.h
+
+# time.h line 83: glibc 2.39 declares
+# `time_t mktime (struct tm *__tp)`.
+mktime=func
+func.mktime.args=1
+func.mktime.arg.0=struct tm *,tp
+func.mktime.ret=time_t
+func.mktime.include=time.h
+
+# libintl.h line 61: glibc 2.39 declares
+# `char *ngettext (const char *__msgid1, const char *__msgid2, unsigned long int __n)`.
+ngettext=func
+func.ngettext.args=3
+func.ngettext.arg.0=const char *,msgid1
+func.ngettext.arg.1=const char *,msgid2
+func.ngettext.arg.2=unsigned long,n
+func.ngettext.ret=char *
+func.ngettext.include=libintl.h
+
+# sys/ptrace.h: glibc 2.39 declares it at bits/ptrace-shared.h line 152, which sys/ptrace.h
+# includes:
+# `long int ptrace (enum __ptrace_request __request, ...)`.
+ptrace=func
+func.ptrace.args=2
+func.ptrace.arg.0=enum __ptrace_request,request
+func.ptrace.arg.1=,...
+func.ptrace.ret=long
+func.ptrace.include=sys/ptrace.h
+func.ptrace.tail=variadic
+
+# utmpx.h line 83: glibc 2.39 declares
+# `struct utmpx *pututxline (const struct utmpx *__utmpx)`.
+pututxline=func
+func.pututxline.args=1
+func.pututxline.arg.0=const struct utmpx *,utmpx
+func.pututxline.ret=struct utmpx *
+func.pututxline.include=utmpx.h
+
+# stdlib.h line 970: glibc 2.39 declares
+# `void qsort (void *__base, size_t __nmemb, size_t __size, __compar_fn_t __compar)`.
+qsort=func
+func.qsort.args=4
+func.qsort.arg.0=void *,base
+func.qsort.arg.1=size_t,nmemb
+func.qsort.arg.2=size_t,size
+func.qsort.arg.3=int (*)(const void *, const void *),compar
+func.qsort.ret=void
+func.qsort.include=stdlib.h
+
+# signal.h line 232: glibc 2.39 declares
+# `int sigprocmask (int __how, const sigset_t *__restrict __set, sigset_t *__restrict __oset)`.
+sigprocmask=func
+func.sigprocmask.args=3
+func.sigprocmask.arg.0=int,how
+func.sigprocmask.arg.1=const sigset_t *,set
+func.sigprocmask.arg.2=sigset_t *,oset
+func.sigprocmask.ret=int
+func.sigprocmask.include=signal.h
+
+# sys/stat.h line 240: glibc 2.39 declares
+# `int stat64 (const char *__restrict __file, struct stat64 *__restrict __buf)`.
+stat64=func
+func.stat64.args=2
+func.stat64.arg.0=const char *,file
+func.stat64.arg.1=struct stat64 *,buf
+func.stat64.ret=int
+func.stat64.include=sys/stat.h
+
+# time.h line 100: glibc 2.39 declares
+# `size_t strftime (char *__restrict __s, size_t __maxsize, const char *__restrict __format, const
+# struct tm *__restrict __tp)`.
+strftime=func
+func.strftime.args=4
+func.strftime.arg.0=char *,s
+func.strftime.arg.1=size_t,maxsize
+func.strftime.arg.2=const char *,format
+func.strftime.arg.3=const struct tm *,tp
+func.strftime.ret=size_t
+func.strftime.include=time.h
+
+# string.h line 506: glibc 2.39 declares
+# `size_t strlcpy (char *__restrict __dest, const char *__restrict __src, size_t __n)`.
+strlcpy=func
+func.strlcpy.args=3
+func.strlcpy.arg.0=char *,dest
+func.strlcpy.arg.1=const char *,src
+func.strlcpy.arg.2=size_t,n
+func.strlcpy.ret=size_t
+func.strlcpy.include=string.h
+
+# libintl.h line 82: glibc 2.39 declares
+# `char *textdomain (const char *__domainname)`.
+textdomain=func
+func.textdomain.args=1
+func.textdomain.arg.0=const char *,domainname
+func.textdomain.ret=char *
+func.textdomain.include=libintl.h
+
+# unistd.h line 480: glibc 2.39 declares
+# `int usleep (__useconds_t __useconds)`.
+usleep=func
+func.usleep.args=1
+func.usleep.arg.0=unsigned int,useconds
+func.usleep.ret=int
+func.usleep.include=unistd.h
+
+# utime.h line 50: glibc 2.39 declares
+# `int utime (const char *__file, const struct utimbuf *__file_times)`.
+utime=func
+func.utime.args=2
+func.utime.arg.0=const char *,file
+func.utime.arg.1=const struct utimbuf *,file_times
+func.utime.ret=int
+func.utime.include=utime.h
+
+# sys/time.h line 162: glibc 2.39 declares
+# `int utimes (const char *__file, const struct timeval __tvp[2])`.
+utimes=func
+func.utimes.args=2
+func.utimes.arg.0=const char *,file
+func.utimes.arg.1=const struct timeval *,tvp
+func.utimes.ret=int
+func.utimes.include=sys/time.h
+
+# wchar.h line 1043: glibc 2.39 declares
+# `size_t wcsftime (wchar_t *__restrict __s, size_t __maxsize, const wchar_t *__restrict __format,
+# const struct tm *__restrict __tp)`.
+wcsftime=func
+func.wcsftime.args=4
+func.wcsftime.arg.0=wchar_t *,s
+func.wcsftime.arg.1=size_t,maxsize
+func.wcsftime.arg.2=const wchar_t *,format
+func.wcsftime.arg.3=const struct tm *,tp
+func.wcsftime.ret=size_t
+func.wcsftime.include=wchar.h
