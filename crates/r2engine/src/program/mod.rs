@@ -20,6 +20,7 @@ mod slots;
 pub mod source;
 mod starts;
 mod view;
+mod writes;
 
 use view::View;
 

@@ -156,6 +156,12 @@ pub trait Program: crate::body::Program {
     ) -> Arc<CalleeRead> {
         Arc::new(read())
     }
+
+    /// What a call to the asked callee may write of its caller's stack, composed over the calls its
+    /// alone read leaves unstated (`IncomingWrites`, D441); none where no database holds them.
+    fn callee_writes(&self, _address: u64) -> Option<r2ssa::call_reads::StackWrites> {
+        None
+    }
 }
 
 /// What reading one callee's body gave a caller.
@@ -911,8 +917,9 @@ pub(crate) fn convention_seal_of(
         .map_err(NativeRefusal::of_preparation)
 }
 
-/// States each callee nothing states whose call's writes kept a loaded place in memory, from its
-/// alone read: depth one, since an alone read asks none (D376). Whether any did. O(asked) reads.
+/// States each callee nothing states whose call's writes kept a loaded place in memory: its reads
+/// from its alone read (D376), its writes composed over its own blocking calls (D441). Whether any
+/// did. O(asked) reads.
 fn state_asked(
     (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
     (entry, asked): (u64, BTreeSet<u64>),
@@ -934,7 +941,11 @@ fn state_asked(
             callees.interfaces.insert(address, interface.clone());
         }
         if let Ok(facts) = &read.facts {
-            callees.record(address, facts, program);
+            callees.record_reads(address, facts, program);
+            stated = true;
+        }
+        if let Some(writes) = program.callee_writes(address) {
+            callees.writes.insert(address, writes);
             stated = true;
         }
     }
@@ -1923,6 +1934,15 @@ impl Callees {
 
     /// One callee's statement; what it keeps is its register effect's, the one owner (D320).
     fn record(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
+        self.record_reads(address, facts, program);
+        match facts.summary().incoming_writes() {
+            Some(writes) => _ = self.writes.insert(address, writes),
+            None => _ = self.writes.remove(&address),
+        }
+    }
+
+    /// One callee's statement but its writes, which an asked callee's `IncomingWrites` states.
+    fn record_reads(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
             .insert(address, program.kept_at(address).unwrap_or_default());
@@ -1930,10 +1950,6 @@ impl Callees {
         // arguments is described, and a callee with no entry is one nothing
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
-        match facts.summary().incoming_writes() {
-            Some(writes) => _ = self.writes.insert(address, writes.clone()),
-            None => _ = self.writes.remove(&address),
-        }
     }
 }
 
