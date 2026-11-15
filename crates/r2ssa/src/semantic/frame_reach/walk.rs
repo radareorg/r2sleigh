@@ -397,7 +397,8 @@ impl crate::call_reads::WritesBound {
     }
 
     /// The writes with each blocking call's spans from `stated`, shifted by the call's base;
-    /// `None` where one states none (D441). `O(calls x spans log spans)`.
+    /// `None` where one states none, or writes at or above the entry pointer, past the unstated
+    /// call's area the body's points were walked under (D441). `O(calls x spans log spans)`.
     pub fn solve<'s>(
         &self,
         stated: impl Fn(u64) -> Option<&'s [(i64, i64)]>,
@@ -405,6 +406,9 @@ impl crate::call_reads::WritesBound {
         let mut fixed = self.fixed.clone();
         for (base, target) in &self.blocking {
             let writes = stated(*target)?;
+            if writes.iter().any(|(_, high)| base + high > 0) {
+                return None;
+            }
             fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
         }
         let spans = own_rounds(self.spent, &fixed, &self.own_bases)?;
