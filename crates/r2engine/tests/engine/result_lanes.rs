@@ -708,3 +708,182 @@ fn a_tail_stating_no_narrower_result_passes_a_wide_result_whole() {
     assert_eq!(demanded_tailing_into(WIDE_BESIDE, "unstated"), Some(0xff));
     assert_eq!(demanded_tailing_into(WIDE_BESIDE, "free"), Some(0xff));
 }
+
+/// `f`: `call ferror; test eax, eax; je 1f; movabs rax, imm64; 1: ret`, a 64-bit result whose one
+/// path returns `ferror`'s `int` whole (bzip2 O2 `0x78b0`, D440).
+const RETURNS_A_NARROW_CALL: &[u8] = &[
+    0xe8, 0x8b, 0x00, 0x00, 0x00, // 1000 call 0x1090
+    0x85, 0xc0, // 1005 test eax, eax
+    0x74, 0x0a, // 1007 je 0x1013
+    0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // 1009 movabs rax, imm64
+    0xc3, // 1013 ret
+];
+
+/// `f`: `test edi, edi; je 1f; movabs rax, imm64; ret; 1: jmp ferror` (D440's tail form).
+const TAILS_A_NARROW_CALL: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x0b, // 1002 je 0x100f
+    0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // 1004 movabs rax, imm64
+    0xc3, // 100e ret
+    0xe9, 0x7c, 0x00, 0x00, 0x00, // 100f jmp 0x1090
+];
+
+/// `call f; mov eax, 1; call rsi; ret`: RAX is written before any read, and the indirect call
+/// leaves XMM0's fate unknown.
+const OVERWRITES_RAX_ONLY: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1025 mov eax, 1
+    0xff, 0xd6, // 102a call rsi
+    0xc3, // 102c ret
+];
+
+/// `call f; call rsi; ret`: the indirect call takes RAX as `f` left it.
+const LEAVES_RAX_TO_AN_INDIRECT_CALL: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xff, 0xd6, // 1025 call rsi
+    0xc3, // 1027 ret
+];
+
+/// `call f; xor eax, eax; xor edx, edx; xorps xmm0, xmm0; xorps xmm1, xmm1; ret`: every lane dead.
+const OVERWRITES_EVERY_LANE: &[u8] = &[
+    0xe8, 0xcb, 0xff, 0xff, 0xff, // 1030 call 0x1000
+    0x31, 0xc0, // 1035 xor eax, eax
+    0x31, 0xd2, // 1037 xor edx, edx
+    0x0f, 0x57, 0xc0, // 1039 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 103c xorps xmm1, xmm1
+    0xc3, // 103f ret
+];
+
+/// `lea rax, [rip - 0x47] (f); mov [rdi], rax; ret`: code names `f`'s address and stores it.
+const STORES_F: &[u8] = &[
+    0x48, 0x8d, 0x05, 0xb9, 0xff, 0xff, 0xff, // 1040 lea rax, [0x1000]
+    0x48, 0x89, 0x07, // 1047 mov [rdi], rax
+    0xc3, // 104a ret
+];
+
+/// `a`: `test edi, edi; je 1f; call b; ret; 1: call f; ret`; `b`: the same calling `a`, else
+/// `mov eax, 1`; `c` calls `a`, writes every lane. `f`'s RAX goes on into the cycle `a`, `b`.
+const FORWARDS_F_INTO_A_CYCLE: &[(u64, &[u8])] = &[
+    (
+        0x20,
+        &[
+            0x85, 0xff, 0x74, 0x06, 0xe8, 0x17, 0x00, 0x00, 0x00, 0xc3, 0xe8, 0xd1, 0xff, 0xff,
+            0xff, 0xc3,
+        ],
+    ),
+    (
+        0x40,
+        &[
+            0x85, 0xf6, 0x74, 0x06, 0xe8, 0xd7, 0xff, 0xff, 0xff, 0xc3, 0xb8, 0x01, 0x00, 0x00,
+            0x00, 0xc3,
+        ],
+    ),
+    (
+        0x50,
+        &[
+            0xe8, 0xcb, 0xff, 0xff, 0xff, 0x31, 0xc0, 0x31, 0xd2, 0x0f, 0x57, 0xc0, 0x0f, 0x57,
+            0xc9, 0xc3,
+        ],
+    ),
+];
+
+/// Bodies placed beside `f`, each at its offset.
+type Bodies = Vec<(u64, &'static [u8])>;
+
+/// `f` at 0x1000 and each `(offset, bytes)` body, `ferror`'s stub at 0x1090, `f` rendered under `aa`.
+fn narrow_result_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> String {
+    let mut code = [0xcc_u8; 0xa0];
+    code[..f.len()].copy_from_slice(f);
+    let mut functions = vec![("f", BASE, f.len() as u64)];
+    let names = ["caller", "second", "third"];
+    for (at, (offset, body)) in bodies.iter().enumerate() {
+        let start = usize::try_from(*offset).expect("an offset");
+        code[start..start + body.len()].copy_from_slice(body);
+        functions.push((names[at], BASE + offset, body.len() as u64));
+    }
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..].fill(0);
+    let code: &'static [u8] = Box::leak(Box::new(code));
+    let mut open = OpenProgram::of(Literal::of_code(code, &functions).importing("ferror"));
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// Every way in overwrites RAX before a read, so no bit above `ferror`'s `int` is a residual; XMM0
+/// is unknown at one call, so only the integer lane is decided and the return stays a carrier (D440).
+#[test]
+fn a_result_whose_integer_lane_every_call_overwrites_reads_no_bits_above_a_narrow_callee() {
+    let text = narrow_result_under_aa(
+        RETURNS_A_NARROW_CALL,
+        &[(0x20, OVERWRITES_RAX_ONLY), (0x30, OVERWRITES_EVERY_LANE)],
+    );
+    assert!(!text.contains("r2sleigh_residual_u64("), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u64("), "{text}");
+    assert!(
+        text.contains("no call reads the integer result register (assuming closed-world)"),
+        "{text}"
+    );
+}
+
+/// The tail form: `jmp ferror` beside a 64-bit return reads no bits above the `int` (D440, C1a).
+#[test]
+fn a_tail_whose_integer_lane_every_call_overwrites_reads_no_bits_above_a_narrow_callee() {
+    let text = narrow_result_under_aa(
+        TAILS_A_NARROW_CALL,
+        &[(0x20, OVERWRITES_RAX_ONLY), (0x30, OVERWRITES_EVERY_LANE)],
+    );
+    assert!(!text.contains("r2sleigh_residual_u64("), "{text}");
+    assert!(
+        text.contains("no call reads the integer result register (assuming closed-world)"),
+        "{text}"
+    );
+}
+
+/// Every call writes every lane: the closed world's `Unread` reads no register at the return, so no
+/// bit above `ferror`'s `int` is a residual (D440, C1a).
+#[test]
+fn a_written_result_no_call_reads_reads_no_bits_above_a_narrow_callee() {
+    let text = narrow_result_under_aa(
+        RETURNS_A_NARROW_CALL,
+        &[(0x20, OVERWRITES_EVERY_LANE), (0x30, OVERWRITES_EVERY_LANE)],
+    );
+    assert!(!text.contains("r2sleigh_residual_u64("), "{text}");
+    assert!(text.contains("unproven (Unread)"), "{text}");
+}
+
+/// Default-deny: each way the integer lane is not proven dead keeps the residual above the `int`.
+#[test]
+fn an_integer_lane_not_dead_at_every_way_in_keeps_the_bits_above_a_narrow_callee() {
+    let overwrites = (0x30, OVERWRITES_EVERY_LANE);
+    let cases: [(&str, Bodies); 4] = [
+        (
+            "RAX taken at a call",
+            vec![(0x20, LEAVES_RAX_TO_AN_INDIRECT_CALL), overwrites],
+        ),
+        (
+            "address named by code and stored",
+            vec![(0x20, OVERWRITES_RAX_ONLY), overwrites, (0x40, STORES_F)],
+        ),
+        ("no call", Vec::new()),
+        ("a cycle on RAX", FORWARDS_F_INTO_A_CYCLE.to_vec()),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(!text.contains("integer result register"), "{case}: {text}");
+    }
+}
+
+/// A decision on the integer lane alone states nothing of the result: with XMM0's fate unknown at a
+/// call, the proof line never says no call reads the result (D440).
+#[test]
+fn an_integer_lane_decision_is_no_claim_about_the_result() {
+    let text = narrow_result_under_aa(
+        RETURNS_A_NARROW_CALL,
+        &[(0x20, OVERWRITES_RAX_ONLY), (0x30, OVERWRITES_EVERY_LANE)],
+    );
+    assert!(!text.contains("no call reads the result"), "{text}");
+    assert!(!text.contains("unproven (Unread)"), "{text}");
+    assert!(text.contains("integer result register"), "{text}");
+}

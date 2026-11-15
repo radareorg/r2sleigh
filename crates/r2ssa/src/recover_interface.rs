@@ -1764,6 +1764,8 @@ pub(crate) fn recover_interface(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Stated {
     closed: Option<r2source::SourceClosedResult>,
+    /// Whether no call reads the integer result register (`SourceClosedDecision::integer_unread`).
+    integer_unread: bool,
     /// Whether that decision rests on a cited slot (`SourceClosedDecision::premises`).
     through_slot: bool,
     /// Whether the walk left a transfer it did not follow: code no read sees may take more arguments.
@@ -1773,9 +1775,11 @@ pub(crate) struct Stated {
 impl Stated {
     pub(crate) fn of(source: &r2source::OwnedFunctionSnapshot) -> Self {
         let function = source.function();
+        let decided = function.closed_decision();
         Self {
             closed: function.closed_result(),
-            through_slot: (function.closed_decision()).is_some_and(|decided| decided.through_slot),
+            integer_unread: decided.is_some_and(|decided| decided.integer_unread),
+            through_slot: decided.is_some_and(|decided| decided.through_slot),
             unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
         }
     }
@@ -1812,6 +1816,7 @@ fn recover_interface_inner(
     machine_context: Option<&crate::SourceMachineContext>,
     Stated {
         closed,
+        integer_unread,
         through_slot,
         unseen,
     }: Stated,
@@ -2238,6 +2243,12 @@ fn recover_interface_inner(
         }
         None => {}
     }
+    // The integer lane's decision is a fact of a result held in the integer register (D440).
+    let integer_unread = integer_unread
+        && matches!(
+            result,
+            RecoveredFunctionResult::Register(RecoveredResult { float: false, .. })
+        );
     r2il::refusal_evidence!(
         "interface-recovery",
         "observation roots: live_out={} unresolved_blocks={} positive obligations={}",
@@ -2689,8 +2700,9 @@ fn recover_interface_inner(
         arity_floor,
         variadic: save_area.is_some(),
         tail_count,
-        closed: applied.map(|result| r2source::SourceClosedDecision {
-            result,
+        closed: (applied.is_some() || integer_unread).then_some(r2source::SourceClosedDecision {
+            result: applied,
+            integer_unread,
             through_slot,
         }),
         result_holds_input,

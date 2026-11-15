@@ -128,7 +128,10 @@ pub fn render(
         0,
         (
             unassigned.as_deref().unwrap_or_default(),
-            (input.open_second_result(), &input.body_disputed_lanes()),
+            (
+                (input.open_second_result(), input.integer_lane_unread_only()),
+                &input.body_disputed_lanes(),
+            ),
             input.inferred_aggregates().len(),
             &tags.conflicting(),
         ),

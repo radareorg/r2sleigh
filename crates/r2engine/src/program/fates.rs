@@ -1038,7 +1038,7 @@ fn read(lane: &mut JoinedLane, bytes: ByteMask, width: Option<Option<u32>>) {
 
 impl BoundaryResult {
     /// The decision from the open read's supply and the calls' forwarding (the demand): every way
-    /// in is asked only where every lane is dead.
+    /// in is asked only where every lane, or a register result's integer lane, is dead.
     fn decided<S: Source + 'static>(
         db: &Db<ProgramInputs<S>>,
         (entry, thumb): (u64, bool),
@@ -1055,6 +1055,11 @@ impl BoundaryResult {
             true => None,
             false => decided_result(supply, forwarding, &mut every_way_in),
         };
+        // The integer lane's own `Dead` below needs no other lane dead (D440); a read decides it.
+        let read = matches!(result, Some(SourceClosedResult::Read(_)));
+        if !grouped && !read && integer_dead_at_every_call(supply, forwarding) {
+            every_way_in();
+        }
         let result = result.or_else(|| declared_void(db, entry, supply, forwarding));
         let overwritten = |lane: LaneId| {
             let effect = db.get::<RegisterEffects>(&(entry, thumb));
@@ -1080,16 +1085,29 @@ impl BoundaryResult {
         }
     }
 
-    /// The decision the seal applies, with what it assumes.
-    pub const fn decision(&self) -> Option<r2source::SourceClosedDecision> {
-        match self.result {
-            Some(result) => Some(r2source::SourceClosedDecision {
-                result,
-                through_slot: self.through_slot,
-            }),
-            None => None,
-        }
+    /// The decision the seal applies, with what it assumes: the result, the integer lane, or both.
+    pub fn decision(&self) -> Option<r2source::SourceClosedDecision> {
+        let integer_unread = self.lanes[usize::from(LaneId::INTEGER.0)] == LaneDecision::Dead;
+        (self.result.is_some() || integer_unread).then_some(r2source::SourceClosedDecision {
+            result: self.result,
+            integer_unread,
+            through_slot: self.through_slot,
+        })
     }
+}
+
+/// Whether a body's own register result has its integer lane dead at each of one or more calls,
+/// which `EveryWayIn` makes every way in; the other lanes play no part (D202 per lane, D440).
+fn integer_dead_at_every_call(supply: Supply, forwarding: &Forwarding) -> bool {
+    let at = usize::from(LaneId::INTEGER.0);
+    let lane = forwarding.lanes[at];
+    let held = holds(supply, &forwarding.lanes)[at];
+    !supply.declared
+        && supply.returns == Returns::Register
+        && forwarding.calls > 0
+        && held
+        && lane.dead
+        && !(lane.read || lane.unknown || lane.cycle)
 }
 
 /// `DeclaredVoid`: every way in hands the address only into cited `void (*)(...)` slots, so
@@ -1158,8 +1176,8 @@ fn decided_result(
     // `ways` calls, of which there is one or more.
     let mut all_dead =
         |ways: u32| ways > 0 && (0..LANES).all(|at| lanes[at].dead || !holds[at]) && every_way_in();
-    // A loader call a cited row states is a call (D237); a written result's `Unread` moves no C, so
-    // only the program's own calls ask every way in for it (doc/adr-call-boundary.md, "S7 cost").
+    // A loader call a cited row states is a call (D237); a written result asks every way in over
+    // the program's own calls alone, so the loader's entries build no reference index ("S7 cost").
     let ways = match supply.handed_back && supply.returns == Returns::Unproven {
         true => calls + loader_calls,
         false => *calls,
