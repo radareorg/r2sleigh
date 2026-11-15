@@ -575,7 +575,7 @@ impl Assumed {
     /// What a read states its body writes of its caller's stack.
     fn writes_of(read: &CalleeRead) -> Option<StackWrites> {
         let facts = read.facts.as_ref().ok()?;
-        facts.summary().incoming_writes()
+        facts.summary().incoming_writes().cloned()
     }
 
     /// What a read of a member states, as far as the member's assumption tracks it.

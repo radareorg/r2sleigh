@@ -31,9 +31,11 @@ enum Kept {
     Stopped,
 }
 
-/// One body's alone bound, or how its read failed to state one.
+/// One body's alone read: its writes solved, the bound its blocking calls wait on, or how the read
+/// failed to state either.
 enum Alone {
-    Bound(Option<WritesBound>),
+    Solved(Option<StackWrites>),
+    Blocked(WritesBound),
     Unheld(Kept),
 }
 
@@ -50,7 +52,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for IncomingWrites {
         let edges = |node: Node| match held(db, node, root) {
             Some(_) => Vec::new(),
             None => match alone(db, node) {
-                Alone::Bound(Some(bound)) => blocking(&view, &bound),
+                Alone::Blocked(bound) => blocking(&view, &bound),
                 _ => Vec::new(),
             },
         };
@@ -74,10 +76,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for IncomingWrites {
             let bounds = members
                 .iter()
                 .map(|member| match alone(db, keys[member.index()]) {
-                    Alone::Bound(bound) => bound,
+                    Alone::Solved(writes) => Err(writes),
+                    Alone::Blocked(bound) => Ok(bound),
                     Alone::Unheld(why) => {
                         kept = kept.max(why);
-                        None
+                        Err(None)
                     }
                 });
             let bounds = bounds.collect::<Vec<_>>();
@@ -130,7 +133,7 @@ fn solved_component<S: Source + 'static>(
     view: &View<'_, S>,
     (keys, answers): (&[Node], &[Option<StackWrites>]),
     members: &[Dense],
-    bounds: &[Option<WritesBound>],
+    bounds: &[Result<WritesBound, Option<StackWrites>>],
     cyclic: bool,
 ) -> Vec<Option<StackWrites>> {
     let seed = StackWrites::cycle_seed();
@@ -142,7 +145,10 @@ fn solved_component<S: Source + 'static>(
             false => answers[at].as_ref()?.spans(),
         }
     };
-    let computed = bounds.iter().map(|bound| bound.as_ref()?.solve(stated));
+    let computed = bounds.iter().map(|bound| match bound {
+        Ok(bound) => bound.solve(stated),
+        Err(solved) => solved.clone(),
+    });
     let computed = computed.collect::<Vec<_>>();
     if !cyclic {
         return computed;
@@ -179,9 +185,12 @@ fn alone<S: Source + 'static>(db: &Db<ProgramInputs<S>>, node: Node) -> Alone {
         return Alone::Unheld(Kept::Transient);
     };
     match &read.0.facts {
-        Ok(facts) => Alone::Bound(facts.summary().incoming_bound().cloned()),
+        Ok(facts) => match facts.summary().incoming_bound() {
+            Some(bound) => Alone::Blocked(bound.clone()),
+            None => Alone::Solved(facts.summary().incoming_writes().cloned()),
+        },
         Err(Unreadable::Stopped) => Alone::Unheld(Kept::Stopped),
-        Err(_) => Alone::Bound(None),
+        Err(_) => Alone::Solved(None),
     }
 }
 

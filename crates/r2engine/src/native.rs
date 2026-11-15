@@ -1942,7 +1942,7 @@ impl Callees {
     fn record(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
         self.record_reads(address, facts, program);
         match facts.summary().incoming_writes() {
-            Some(writes) => _ = self.writes.insert(address, writes),
+            Some(writes) => _ = self.writes.insert(address, writes.clone()),
             None => _ = self.writes.remove(&address),
         }
     }

@@ -1051,11 +1051,22 @@ fn require_trusted_root_for_helper_scope(
     Ok(())
 }
 
-/// What a call to this body may write of its caller's stack before its blocking calls are stated
-/// (`FramePoints::incoming_bound`).
-fn incoming_bound(prepared: &SsaArtifact) -> Option<crate::call_reads::WritesBound> {
+/// What a call to this body may write of its caller's stack (`FramePoints::incoming_bound`): solved
+/// where no call blocks it, else the bound its blocking calls' statements solve (D441).
+fn incoming(prepared: &SsaArtifact) -> Option<Incoming> {
     let points = prepared.function().frame_points()?;
-    points.incoming_bound(prepared.machine_context())
+    let bound = points.incoming_bound(prepared.machine_context())?;
+    match bound.blocking().is_empty() {
+        true => bound.closed().map(Incoming::Bounded),
+        false => Some(Incoming::Blocked(bound)),
+    }
+}
+
+/// A body's incoming writes: solved, or waiting on its blocking calls.
+#[derive(Debug, Clone)]
+enum Incoming {
+    Bounded(crate::call_reads::StackWrites),
+    Blocked(crate::call_reads::WritesBound),
 }
 
 /// Solve interprocedural evidence owned by one exact prepared SSA root.
@@ -1084,7 +1095,7 @@ pub struct PreparedCalleeSummary {
     library: BTreeMap<u64, FunctionSemanticSummary>,
     /// The caller's stack a call to this body may write, from the call's pointer, before the
     /// direct calls nothing states are stated (D377, D441).
-    incoming: Option<crate::call_reads::WritesBound>,
+    incoming: Option<Incoming>,
 }
 
 impl PreparedCalleeSummary {
@@ -1123,19 +1134,25 @@ impl PreparedCalleeSummary {
                 .collect(),
             local,
             library,
-            incoming: incoming_bound(prepared),
+            incoming: incoming(prepared),
         })
     }
 
     /// The caller's stack bytes a call to this body may write, as ranges from the stack pointer
     /// before the transfer; `None` where nothing bounds them (D377).
-    pub fn incoming_writes(&self) -> Option<crate::call_reads::StackWrites> {
-        self.incoming.as_ref()?.closed()
+    pub const fn incoming_writes(&self) -> Option<&crate::call_reads::StackWrites> {
+        match &self.incoming {
+            Some(Incoming::Bounded(writes)) => Some(writes),
+            _ => None,
+        }
     }
 
     /// Those writes before the calls nothing states are stated, which r2engine composes (D441).
     pub const fn incoming_bound(&self) -> Option<&crate::call_reads::WritesBound> {
-        self.incoming.as_ref()
+        match &self.incoming {
+            Some(Incoming::Blocked(bound)) => Some(bound),
+            _ => None,
+        }
     }
 
     pub const fn id(&self) -> InterprocFunctionId {
