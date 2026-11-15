@@ -1654,11 +1654,7 @@ impl SourceMachineContext {
             let (mut origins, mut folded) = (BlockOrigins::default(), 0);
             for &(_, at, instruction) in in_block {
                 let at = at as usize;
-                for op in block.ops.get(folded..at).unwrap_or_default() {
-                    #[cfg(test)]
-                    FORMAT_FOLD_STEPS.with(|steps| steps.set(steps.get() + 1));
-                    origins.step(op);
-                }
+                fold_format_origins(&mut origins, block.ops.get(folded..at).unwrap_or_default());
                 folded = folded.max(at);
                 // A site is the one call its instruction lifts to (`collect_raw_call_site_identities`).
                 let call = block.ops.get(at).is_some_and(R2ILOp::is_call)
@@ -1845,6 +1841,15 @@ pub(crate) struct RawCallSite {
     /// Index of the block in the lifted input, and of the transfer in its operations.
     pub(crate) block: u32,
     pub(crate) op: u32,
+}
+
+/// Step a block's origins over `ops`, the operations before its next format site (D437).
+fn fold_format_origins(origins: &mut BlockOrigins, ops: &[R2ILOp]) {
+    for op in ops {
+        #[cfg(test)]
+        FORMAT_FOLD_STEPS.with(|steps| steps.set(steps.get() + 1));
+        origins.step(op);
+    }
 }
 
 #[cfg(test)]
