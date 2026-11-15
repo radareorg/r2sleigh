@@ -13,7 +13,7 @@ use crate::query::db::{Db, Hold, Query, Retention};
 type Node = (u64, bool);
 
 /// One body's incoming writes over its write-blocking calls, each component of the write-dependence
-/// graph solved once against `cycle_seed` (D441). Asked only where D376's asks run, under `aa`.
+/// graph solved once against `cycle_seed` (D441). Asked by D376's asks and the `aa` root only.
 pub(super) struct IncomingWrites;
 
 /// The composed writes, `None` where nothing bounds them, and whether the answer is held.
