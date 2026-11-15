@@ -73,8 +73,8 @@ impl StackWrites {
     }
 }
 
-/// Why a call's listed registers are all it may read (D411): a cited declaration, or a callee whose
-/// arity r2ssa holds exact. The every-location default has none.
+/// Why a call's listed registers are all it may read (D411): a cited declaration, a callee whose
+/// arity r2ssa holds exact, or a printf its format counts (D433). The every-location default has none.
 #[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ReadBound(());\n```"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadBound(Bounded);
@@ -83,6 +83,7 @@ pub struct ReadBound(Bounded);
 enum Bounded {
     Cited,
     Arity,
+    Counted,
 }
 
 impl r2source::Negative for ReadBound {
@@ -106,6 +107,29 @@ impl ReadBound {
     pub(crate) const fn arity() -> Self {
         Self(Bounded::Arity)
     }
+
+    /// A cited printf whose read-only format counts its operands (D433): ISO C17 7.21.6.1p2, "If
+    /// the format is exhausted while arguments remain, the excess arguments are ... ignored".
+    pub(crate) const fn counted() -> Self {
+        Self(Bounded::Counted)
+    }
+}
+
+/// A direct call to an import, which reads only the count register's bytes of the register holding
+/// it (D431; [`r2abi::CountRegister`] cites why). Minted by r2engine `declared`.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ImportCall(());\n```"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImportCall(());
+
+impl ImportCall {
+    /// A call to an import under the row whose count register `count` is.
+    pub const fn cited(_: &r2abi::CountRegister) -> Self {
+        Self(())
+    }
+}
+
+impl r2source::Negative for ImportCall {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::CallReadBytes];
 }
 
 /// The argument locations a call may read: an upper bound only where `bound` holds a witness.
@@ -127,6 +151,8 @@ pub struct CallReads {
     /// Each result register with the low bytes a walked callee's body may read of it before writing
     /// it, from its register effect (D372); none where no row states them.
     pub(crate) lanes: Option<crate::site_boundary::LaneReads>,
+    /// That the callee is an import, which reads only the count register's bytes of its register.
+    pub(crate) import: Option<ImportCall>,
 }
 
 impl CallReads {
@@ -144,6 +170,7 @@ impl CallReads {
             writes: None,
             bound: None,
             lanes: None,
+            import: None,
         }
     }
 
@@ -157,6 +184,23 @@ impl CallReads {
         };
         self.lanes = lanes.map(|lanes| lanes.without(argument));
         self
+    }
+
+    /// These reads as a call to an import's (D431).
+    #[must_use]
+    pub(crate) const fn importing(mut self, import: Option<ImportCall>) -> Self {
+        self.import = import;
+        self
+    }
+
+    /// The low bytes of `carrier` an import's call reads: the count register's, where it is the
+    /// carrier's low lane and no argument register overlaps the carrier (D431). O(registers).
+    pub fn count_read(&self, carrier: CanonicalStorageId) -> Option<u32> {
+        let count = self.count_register.filter(|_| self.import.is_some())?;
+        let argument = (self.registers.iter())
+            .any(|register| crate::semantic::register_storages_overlap(*register, carrier));
+        let low = count.space == carrier.space && count.offset == carrier.offset;
+        (low && !argument).then_some(count.size.min(carrier.size))
     }
 
     /// The low bytes of `carrier` the callee may read, where its register effect states a result
@@ -237,6 +281,7 @@ impl CallReads {
             stack: Some(stack),
             bound: Some(ReadBound::arity()),
             lanes: None,
+            import: None,
         }
     }
 
@@ -263,6 +308,7 @@ impl CallReads {
             writes: None,
             bound: Some(ReadBound::cited(citation)),
             lanes: None,
+            import: None,
         }
     }
 
@@ -281,13 +327,15 @@ impl CallReads {
             writes: None,
             bound: None,
             lanes: None,
+            import: None,
         }
     }
 
-    /// These reads with their stack read and written bounded by `stack` (a counted printf, D409).
+    /// These placed reads as a counted printf's, which also reads `count` (D409, D433).
     #[must_use]
-    pub(crate) fn on_stack(mut self, stack: Vec<(i64, i64)>) -> Self {
-        (self.stack, self.writes) = (Some(stack.clone()), Some(stack));
+    pub(crate) const fn counting(mut self, count: Option<CanonicalStorageId>) -> Self {
+        self.count_register = count;
+        self.bound = Some(ReadBound::counted());
         self
     }
 
@@ -327,14 +375,8 @@ impl CallReads {
         self.bound
     }
 
-    /// Whether the call reads none of `carrier`: an argument or count register of `model` this
-    /// bounded list leaves out (D283). Any other register may be read: x8, a static chain.
-    pub fn reads_none_of(&self, model: &ConventionModel, carrier: CanonicalStorageId) -> bool {
-        self.reads_none_within(&Self::every_location(model), carrier)
-    }
-
-    /// [`Self::reads_none_of`] against `every`, the model's [`Self::every_location`], built once
-    /// per call by a caller asking for several carriers.
+    /// Whether the call reads none of `carrier`: a register of `every` (a model's every location)
+    /// this bounded list leaves out (D283). Any other register may be read: x8, a static chain.
     pub fn reads_none_within(&self, every: &Self, carrier: CanonicalStorageId) -> bool {
         let overlaps = |storage: &CanonicalStorageId| {
             crate::semantic::register_storages_overlap(*storage, carrier)

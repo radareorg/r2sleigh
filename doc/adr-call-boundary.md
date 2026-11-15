@@ -1467,3 +1467,32 @@ A cited printf `...` call bounds its stack by the operands its own format counts
 - Refused, so the stack stays unbounded: a body-proven format, a format not in a register, a fold through a merge or another block, writable text, an unparsed conversion, `long double`, a positional gap, more than 64 operands, a 32-bit target, Apple arm64's stacked tail, and fixed parameters `place` does not put where the declaration does.
 - Open (D421): r2engine `fates::formatted_sites` folds the same site's format again, with the convention's call effect and a seal fallback.
 - Tests (`call_boundary`): `a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone` (aarch64 clang -O0 spill, values.c `main`) and `a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone` (x86-64 `push rax`, hashes `main`) fail on the parent. Writable text, `%Lf` and a ten-operand tail over the slot keep the reload, as does Apple's stacked tail (`apple::a_mach_o_printf_s_stacked_tail_bounds_no_stack_by_its_format`, which another rule also keeps). The late count in `boundaries.rs` debug-asserts that it agrees with the block's fold.
+
+## D431 as built (2026-11-15, rd6-reads)
+
+An import's call reads RAX at AL's width.
+
+- Citation, on r2abi's SysV row (`CountRegister`), checked against psABI 1.0 (x86-psABIs/x86-64-ABI `74b6f30f`, the "Version 1.0 is not a draft" commit): section 3.2 limits the standard calling sequence to global functions; section 3.2.3 makes `%al` the hidden argument, and its footnote says "the rest of %rax is undefined, only the contents of %al is defined"; Figure 3.4 makes `%rax` a temporary that also carries the count. The row cited the hidden-argument words to section 3.5.7, which is "Variable Argument Lists" in Coding Examples; they are 3.2.3's.
+- Premise: the container states the callee an import, a global function. No name or prototype takes part.
+- r2engine `declared::import_call` mints r2ssa `ImportCall` from the program's own convention row, for every direct import target `declare_imports` sees, declared or not. `CalleeEvidence::imports` carries it to both machine contexts and `BuildKey`.
+- `CallReads::count_read` answers the count register's bytes for a carrier whose low lane it is, where no argument register overlaps the carrier; `register_read_bytes` reads it after a walked callee's lane row.
+- Excluded: an indirect call (its target may be a local function, 3.2), a call through an import slot, a walked body (its lane row, D413). Tests (`result_lanes`): `an_import_call_reads_the_count_register_alone_of_its_register` (uncited row, unstated import, variadic), red on the parent; `an_indirect_call_reads_its_count_register_whole`.
+
+## D433 as built (2026-11-15, rd6-reads)
+
+A counted printf states its registers as D409 states its stack.
+
+- `counted_reads` (was `counted_stack`) keeps D409's one placement: the fixed parameters and one promoted pointer-wide slot per operand the read-only format counts. Its registers, the count register and its stack are the call's reads; `ReadBound::counted()` bounds them.
+- Citation, D409's (`types-posix.sdb.txt`, stdio.h): ISO C17 7.21.6.1p2, "If the format is exhausted while arguments remain, the excess arguments are evaluated (as always) but are otherwise ignored"; too few arguments is undefined behaviour. Premise and refusals are D409's.
+- The count register stays read, so D431's import witness bounds RAX at AL's byte on this path too.
+- Test (`call_boundary`): `a_counted_printf_reads_only_its_placed_registers`, `error(0, 0, "%s", x)` past an untouched entry R8, red on the parent ("the parameters are a floor: at least 4").
+
+## D436 as built (2026-11-15, rd6-reads)
+
+`CallReads` is a dense column of `SourceMachineContext` over its raw call sites.
+
+- Quantity: `CallReads` values built per context. Before, `call_reads` built one per question: once per `CallUse` in each demand pass (`call_read_bytes`), again per argument area, frame walk and tail, and `reads_none_of` built `every_location` once more per question. Bound now: C + 1 per context (C raw call sites and one row for a call at no site), each O(R) for R locations, plus `every_location` once per distinct site model.
+- Algorithm: `bind_call_reads` runs once after the last fact the rows read (callee writes, statements, lane reads, imports, site models, format tails). The two preparation sequences build with the unbound constructor and bind at their end; every other constructor binds at once. A setter of those facts after the bind is a debug assertion; a read before it answers `None`, the default-deny row.
+- Lookup: `call_reads`, `every_location_at` (the site's model, D390) and `every_location` (the calls' model) are a binary search over the sorted rows, O(log C), and hand out references; no question clones a row.
+- Equivalence: a row is `stated_call_reads(instruction)`, the old `call_reads` body unchanged, a pure function of fields that no longer change after the bind. `reads_none_of(model, carrier)` was `reads_none_within(&every_location(model), carrier)`; its readers now pass the held row.
+- Meter: in a `work-meter` build `r2ssa::call_reads_built()` counts rows built against rows the contexts made; `result_lanes::a_context_builds_each_call_sites_reads_once` asserts built ≤ made, red on the parent.

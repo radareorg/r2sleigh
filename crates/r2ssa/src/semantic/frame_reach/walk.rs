@@ -236,6 +236,7 @@ impl FramePoints {
                 .then(|| context.call_reads(Some(instruction)))
                 .flatten()?
                 .writes
+                .clone()
         };
         let spans = self.writes_bound(spent(context), stated)?;
         Some(crate::call_reads::StackWrites::within(spans, transfers))
@@ -485,7 +486,9 @@ impl<'a> Evidence<'a> {
     /// The stack a call may read and write, from its pointer; none where nothing bounds it.
     fn areas(&self, instruction: Option<u64>) -> (StackArea, StackArea) {
         let reads = self.context.call_reads(instruction);
-        reads.map_or((None, None), |reads| (reads.stack, reads.writes))
+        reads.map_or((None, None), |reads| {
+            (reads.stack.clone(), reads.writes.clone())
+        })
     }
 }
 

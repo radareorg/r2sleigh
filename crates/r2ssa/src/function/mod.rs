@@ -678,6 +678,8 @@ struct BuildKey {
     conventions: SiteConventions,
     /// What each walked callee may read of the result registers, which bounds a call's reads (D372).
     lane_reads: CalleeLaneReads,
+    /// The imports called, whose count register bounds what a call reads of its register (D431).
+    imports: CalleeImports,
     /// The argument positions through which each callee reaches only upward: all the frame walk
     /// reads of its reach, which its decision reads again where it moves (D365).
     upward: BTreeMap<u64, BTreeSet<usize>>,
@@ -732,7 +734,7 @@ impl BuildKey {
             &self.return_addresses,
             (&self.security_checks, &self.narrow_results),
             (&self.reentering, &self.unstated_imports, &self.premises),
-            (&self.conventions, &self.lane_reads),
+            (&self.conventions, &self.lane_reads, &self.imports),
         )
     }
 
@@ -788,7 +790,9 @@ impl BuildKey {
         });
         let areas = context.raw_call_sites().keys().map(|instruction| {
             let reads = context.call_reads(Some(*instruction));
-            let (stack, writes) = reads.map_or((None, None), |reads| (reads.stack, reads.writes));
+            let (stack, writes) = reads.map_or((None, None), |reads| {
+                (reads.stack.clone(), reads.writes.clone())
+            });
             (*instruction, stack, writes)
         });
         Self {
@@ -803,6 +807,7 @@ impl BuildKey {
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.sites.by_target().clone(),
             lane_reads: evidence.lane_reads.clone(),
+            imports: evidence.imports.clone(),
             upward: (evidence.reach.iter())
                 .map(|(target, reach)| {
                     let upward = reach.iter().filter(|(_, reach)| reach.is_upward());
@@ -2814,6 +2819,7 @@ impl TrustedSsaArtifact {
             reentering,
             exits,
             unstated_imports,
+            imports: callee_imports,
             conventions: site_conventions,
         } = evidence;
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
@@ -2939,7 +2945,7 @@ impl TrustedSsaArtifact {
                 // Recovery reads the decompile-normalized build the artifact
                 // seals, so a call it numbers is the call the artifact numbers.
                 let mut provisional_machine_context =
-                    SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+                    SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
                         blocks.as_slice(),
                         Some(&arch),
                         None,
@@ -2947,6 +2953,7 @@ impl TrustedSsaArtifact {
                         source.conventions().cloned(),
                         correlated_call_sites.interfaces.clone(),
                         correlated_call_sites.tail_calls.clone(),
+                        &BTreeSet::new(),
                     );
                 // The recovery proves variadic counts from the same literals
                 // the final pass reads; without them every format was unproven.
@@ -2967,9 +2974,11 @@ impl TrustedSsaArtifact {
                     .set_callee_argument_reach(callee_argument_reach.clone());
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
                 provisional_machine_context.set_callee_lane_reads(callee_lane_reads.clone());
+                provisional_machine_context.set_callee_imports(callee_imports.clone());
                 provisional_machine_context.set_site_models(Arc::clone(&sites));
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
+                provisional_machine_context.bind_call_reads();
                 // A build against callees that state the same to it is this build.
                 let key = BuildKey::of(
                     (&provisional_machine_context, &arch),
@@ -3139,6 +3148,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_writes(callee_writes.clone());
         machine_context.set_callee_lane_reads(callee_lane_reads.clone());
+        machine_context.set_callee_imports(callee_imports.clone());
         machine_context.set_site_models(sites);
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
@@ -3191,6 +3201,7 @@ impl TrustedSsaArtifact {
         machine_context.bind_read_only(source.image().read_only());
         machine_context.bind_format_tails(blocks.as_slice(), source.image().immutable_literals());
         machine_context.bind_data_structs(source.image());
+        machine_context.bind_call_reads();
         let function = match built {
             Some(built) => built,
             None => {
@@ -3550,7 +3561,10 @@ pub(crate) fn unpassed_call_reads(
 }
 
 /// What the call at `instruction` reads and every location its site's model may read.
-type SiteLists = Option<(crate::call_reads::CallReads, crate::call_reads::CallReads)>;
+type SiteLists<'a> = Option<(
+    &'a crate::call_reads::CallReads,
+    &'a crate::call_reads::CallReads,
+)>;
 
 /// [`unpassed_call_reads`] of one block's `insts`, from its end.
 fn unpassed_in(
@@ -3587,13 +3601,9 @@ fn unpassed_in(
 fn site_lists(
     machine_context: Option<&SourceMachineContext>,
     instruction: Option<u64>,
-) -> SiteLists {
+) -> SiteLists<'_> {
     let context = machine_context?;
-    let direct = (instruction)
-        .and_then(|instruction| context.raw_call_site_at(instruction))
-        .and_then(crate::semantic::direct_target_from_raw_identity);
-    let model = context.site_model(instruction, direct)?;
-    let every = crate::call_reads::CallReads::every_location(model);
+    let every = context.every_location_at(instruction)?;
     Some((context.call_reads(instruction)?, every))
 }
 
@@ -4166,6 +4176,9 @@ pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 /// Each walked callee's result registers with the low bytes its body may read of each, by entry.
 pub type CalleeLaneReads = BTreeMap<u64, crate::site_boundary::LaneReads>;
 
+/// The imports a body calls directly, by entry, each with its witness (D431).
+pub type CalleeImports = BTreeMap<u64, crate::call_reads::ImportCall>;
+
 /// What the engine knows of the functions a body calls, by entry address.
 #[derive(Debug, Clone, Default)]
 pub struct CalleeEvidence {
@@ -4187,6 +4200,8 @@ pub struct CalleeEvidence {
     pub exits: AssumedExits,
     /// The imports called whose declaration states no interface, and why.
     pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
+    /// The imports called, each a global function the convention's calling sequence binds (D431).
+    pub imports: CalleeImports,
     /// The convention a call to each callee runs under where the program states it: a bound
     /// import's default, a declaration's own (RULING 1.6, 2.6); every other call runs under `calls`.
     pub conventions: SiteConventions,

@@ -270,7 +270,6 @@ r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint8_t tmp_40126b_8_1;
     uint64_t tmp_40127f_8_1;
     uint64_t tmp_401286_8_1;
-    uint64_t rax_28;
     uint64_t tmp_401290_8_1;
     uint64_t tmp_401297_8_1;
     uint64_t rax_31;
@@ -285,7 +284,6 @@ r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t tmp_401320_8_1;
     uint64_t tmp_401324_8_1;
     uint64_t tmp_40132b_8_1;
-    uint64_t rax_45;
     uint64_t tmp_401335_8_1;
     uint64_t tmp_40133c_8_1;
     uint64_t rax_48;
@@ -296,7 +294,7 @@ r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_58;
     _Alignas(16) uint8_t frame[264];
 
-    /* r2dec proof: no individual construct is marked; 240 source obligations: 141 rendered, 59 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 37 assumed (frame extent unproven); 51 statements rendered; 4 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 240 source obligations: 141 rendered, 59 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 37 assumed (frame extent unproven); 49 statements rendered; 4 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
@@ -318,10 +316,9 @@ r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
         r2sleigh_store_u64((void*)(uint64_t)(frame + 72U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_401249_8_1 * (uint64_t)128U) + (uint64_t)((uint64_t)tmp_401249_8_1 * (uint64_t)2U)) + (uint64_t)tmp_401249_8_1) + (uint64_t)(int32_t)tmp_401260_8_1) + (uint64_t)(uint8_t)tmp_40126b_8_1));
         tmp_40127f_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
         tmp_401286_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 32U));
-        rax_28 = (uint64_t)((uint64_t)tmp_40127f_8_1 ^ (uint64_t)tmp_401286_8_1);
         tmp_401290_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 32U));
         tmp_401297_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
-        rax_31 = (uint64_t)(uint32_t)snprintf((char*)(uint64_t)(frame + 80U), 160, "%llu:%llu:%llu", tmp_401297_8_1, tmp_401290_8_1, rax_28);
+        rax_31 = (uint64_t)(uint32_t)snprintf((char*)(uint64_t)(frame + 80U), 160, "%llu:%llu:%llu", tmp_401297_8_1, tmp_401290_8_1, (uint64_t)((uint64_t)tmp_40127f_8_1 ^ (uint64_t)tmp_401286_8_1));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 64U), (uint32_t)((uint64_t)rax_31 >> 0U));
         tmp_4012cb_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 72U));
         tmp_4012e2_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 64U));
@@ -335,12 +332,11 @@ r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
         tmp_401320_8_1 = (uint64_t)((uint64_t)tmp_401312_8_1 + (uint64_t)tmp_401319_8_1);
         tmp_401324_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
         tmp_40132b_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 32U));
-        rax_45 = (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1);
         tmp_401335_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 32U));
         tmp_40133c_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)rax_42);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)tmp_401320_8_1);
-        rax_48 = (uint64_t)(uint32_t)snprintf((char*)(uint64_t)(frame + 80U), 160, "%llu-%llu-%llu-%llu-%llu", tmp_40133c_8_1, tmp_401335_8_1, rax_45, tmp_401320_8_1, rax_42);
+        rax_48 = (uint64_t)(uint32_t)snprintf((char*)(uint64_t)(frame + 80U), 160, "%llu-%llu-%llu-%llu-%llu", tmp_40133c_8_1, tmp_401335_8_1, (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1), tmp_401320_8_1, rax_42);
         r2sleigh_store_u32((void*)(uint64_t)(frame + 68U), (uint32_t)((uint64_t)rax_48 >> 0U));
         tmp_401376_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 72U));
         tmp_40138d_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 68U));

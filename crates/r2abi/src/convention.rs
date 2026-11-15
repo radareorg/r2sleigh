@@ -210,7 +210,7 @@ pub struct ConventionRow {
     /// How many bytes past the stack pointer a function may use without moving it.
     pub red_zone: u32,
     /// The register a call hands a variadic callee its count of vector arguments in (SysV `al`).
-    pub count_register: Option<RegName>,
+    pub count_register: Option<CountRegister>,
     /// Where a variadic prologue saves argument register `i`, and what its `va_list` holds of it.
     pub save_area: Option<RegisterSaveArea>,
     /// The caller-allocated area a callee may store its register arguments in (Microsoft x64).
@@ -226,6 +226,14 @@ pub struct ConventionRow {
     /// no document states the set complete, so no result of the convention is ever `void`.
     pub results: Option<ResultSet>,
     /// The documents that state these.
+    pub citation: &'static str,
+}
+
+/// A count register, with the passages stating that a global function's call reads no other byte of
+/// the register holding it (D431).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountRegister {
+    pub register: RegName,
     pub citation: &'static str,
 }
 
@@ -275,7 +283,17 @@ const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
     },
     red_zone: 128,
     frame_pointer: Some(RegName("rbp")),
-    count_register: Some(RegName("al")),
+    count_register: Some(CountRegister {
+        register: RegName("al"),
+        citation: "System V AMD64 psABI 1.0 (x86-psABIs/x86-64-ABI 74b6f30f), section 3.2, \
+                   \"Function Calling Sequence\": \"The standard calling sequence requirements \
+                   apply only to global functions\"; section 3.2.3, \"Parameter Passing\": %al \
+                   \"is used as hidden argument to specify the number of vector registers \
+                   used\", and its footnote: \"Note that the rest of %rax is undefined, only the \
+                   contents of %al is defined\"; Figure 3.4: %rax is a \"temporary register; with \
+                   variable arguments passes information about the number of vector registers \
+                   used; 1st return register\"",
+    }),
     save_area: Some(RegisterSaveArea {
         anchor: SaveAreaAnchor::Base,
         offset_field: -16,
@@ -308,8 +326,7 @@ const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
     }),
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
-               modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
-               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;} (overflow_arg_area at offset 8, reg_save_area at 16), and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
+               modified by signal or interrupt handlers\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;} (overflow_arg_area at offset 8, reg_save_area at 16), and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
 };
 
 const MICROSOFT_X64: ConventionRow = ConventionRow {

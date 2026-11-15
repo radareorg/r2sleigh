@@ -222,7 +222,7 @@ pub struct CallEffect {
 }
 
 /// The vector registers a variadic callee takes by the count its caller states in `register`
-/// (System V psABI 3.5.7: `%al` bounds the vector registers used): none, where it holds nought.
+/// (System V psABI 3.2.3: `%al` bounds the vector registers used): none, where it holds nought.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Counted {
     pub register: CanonicalStorageId,

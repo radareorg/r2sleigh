@@ -106,6 +106,15 @@ fn model_of(target: &NativeTarget<'_>) -> CDataModel {
     )))
 }
 
+/// The witness a direct call to an import carries (D431): an import runs under the program's own
+/// convention, and its row cites what the call reads of the count register's register.
+pub(crate) fn import_call(target: &NativeTarget<'_>) -> Option<r2ssa::call_reads::ImportCall> {
+    let program =
+        (target.program.as_ref()).map_or(&target.convention, |program| &program.convention);
+    let count = program.id.row().count_register.as_ref()?;
+    Some(r2ssa::call_reads::ImportCall::cited(count))
+}
+
 /// Debug information's types for data objects, as one graph and a node per object.
 pub(crate) fn object_types(
     target: &NativeTarget<'_>,

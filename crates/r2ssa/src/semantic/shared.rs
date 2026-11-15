@@ -996,7 +996,7 @@ pub(crate) fn call_read_bytes(
     };
     let (instruction, interface) = call_after(graph, read, machine_context)?;
     let reads = machine_context.call_reads(Some(instruction))?;
-    register_read_bytes(&reads, machine_context, interface, *carrier)
+    register_read_bytes(reads, machine_context, interface, *carrier)
 }
 
 /// The low bytes of `carrier` a call reads (D283): none where a stated `CallReads` leaves it out,
@@ -1007,11 +1007,17 @@ pub(crate) fn register_read_bytes(
     interface: Option<&crate::SourceCallSiteInterface>,
     carrier: CanonicalStorageId,
 ) -> Option<u32> {
-    if (machine_context.calls()).is_some_and(|model| reads.reads_none_of(model, carrier)) {
+    if (machine_context.every_location())
+        .is_some_and(|every| reads.reads_none_within(every, carrier))
+    {
         return Some(0);
     }
     // A walked callee's register effect bounds what it reads of a result register (D372).
     if let Some(bytes) = reads.lane_read(carrier) {
+        return Some(bytes);
+    }
+    // An import's call reads only the count register's bytes of the register holding it (D431).
+    if let Some(bytes) = reads.count_read(carrier) {
         return Some(bytes);
     }
     let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, carrier);

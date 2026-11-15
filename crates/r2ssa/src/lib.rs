@@ -58,6 +58,7 @@ pub(crate) mod machine;
 pub mod site_boundary;
 pub use arch::Arch;
 pub(crate) mod machine_context;
+pub use machine_context::call_reads_built;
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
@@ -118,11 +119,11 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
-    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeLaneReads, CalleePreservedCarriers,
-    DecompileInputs, DecompilePrepFacts, DefRef, DefSite, ExitSite, GenuineNativeInstructionSpan,
-    Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot,
-    RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed,
-    SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
+    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeImports, CalleeLaneReads,
+    CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite, ExitSite,
+    GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo,
+    RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
+    SSAFunction, Sealed, SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
     SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedConstruction,
     TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };

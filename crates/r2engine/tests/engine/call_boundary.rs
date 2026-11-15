@@ -1073,6 +1073,39 @@ fn a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone() {
     assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
 }
 
+/// `error(0, 0, "%s", x)` with `x` the entry RCX, the entry R8 left alone (D433).
+fn erroring_past_r8() -> String {
+    let mut code = vec![0x90u8; 0xb0];
+    code[..0x15].copy_from_slice(&[
+        0x31, 0xff, // 1000 xor edi, edi
+        0x31, 0xf6, // 1002 xor esi, esi
+        0x48, 0x8d, 0x15, 0x95, 0x00, 0x00, 0x00, // 1004 lea rdx, [rip + 0x95]: 0x10a0
+        0x31, 0xc0, // 100b xor eax, eax
+        0xe8, 0x7e, 0x00, 0x00, 0x00, // 100d call 0x1090
+        0x31, 0xc0, // 1012 xor eax, eax
+        0xc3, // 1014 ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x15)])
+        .with_data()
+        .importing("error")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%s\0");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D433: the format counts one operand, so `error` reads RDI, RSI, RDX, RCX and AL (C17
+/// 7.21.6.1p2): the entry R8 reaches no read, and the parameters are no floor.
+#[test]
+fn a_counted_printf_reads_only_its_placed_registers() {
+    let text = erroring_past_r8();
+    assert!(!text.contains("the parameters are a floor"), "{text}");
+    assert!(text.contains("error(0, 0, \"%s\""), "{text}");
+}
+
 /// A format the program may write counts nothing for the whole run: the reload stays memory.
 #[test]
 fn a_printf_whose_format_the_program_may_write_bounds_no_stack() {
