@@ -588,9 +588,8 @@ fn a_staged_table_switch_reads_its_selector() {
     );
 }
 
-/// `shape_variadic`'s last `snprintf` passes two of its eight arguments in the outgoing stack area:
-/// the staged call takes them in order, as integer bits (the xor in its operand since D433 bounds
-/// the counted call's reads).
+/// `shape_variadic`'s last `snprintf` passes two of eight arguments on the stack, in order, as
+/// integer bits; D433's counted reads put the xor in its operand.
 #[test]
 fn a_staged_call_passes_its_stack_arguments() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
