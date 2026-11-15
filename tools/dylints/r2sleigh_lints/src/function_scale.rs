@@ -258,16 +258,11 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
     (
         "r2ssa::semantic::certificates::collect_prepared_function_certificates",
         ".values()",
-        2,
+        1,
     ),
     (
         "r2ssa::semantic::certificates::collect_prepared_function_certificates",
         "dispatch_operations",
-        1,
-    ),
-    (
-        "r2ssa::semantic::certificates::returns::collect_machine_return_control_certificates",
-        ".values()",
         1,
     ),
     (

@@ -1535,12 +1535,68 @@ pub struct StructuredDataflowFacts {
     pub unstructured_cycle_blocks: BTreeSet<u64>,
     pub memory_accesses:
         crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
+    /// Each object's accesses in id order, built with `memory_accesses` (D422).
+    accesses_by_object: crate::dense::Csr<ObjectId, StructuredAccessId>,
     /// Wide constant stores written out one declared member at a time.
     pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
 }
 
+/// What a body's structured facts are built from.
+pub(crate) struct StructuredParts {
+    pub(crate) loops: BTreeMap<LoopId, StructuredLoopFact>,
+    pub(crate) inductions: crate::dense::IdMap<ValueId, InductionFact>,
+    pub(crate) unstructured_cycle_blocks: BTreeSet<u64>,
+    pub(crate) memory_accesses:
+        crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
+    pub(crate) member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
+    pub(crate) recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
+}
+
 impl StructuredDataflowFacts {
+    /// The facts with `accesses_by_object` sorted from the accesses: one counting sort, `O(A + O)`.
+    pub(crate) fn new(parts: StructuredParts) -> Self {
+        let StructuredParts {
+            loops,
+            inductions,
+            unstructured_cycle_blocks,
+            memory_accesses,
+            member_run_stores,
+            recursive_calls,
+        } = parts;
+        let objects = (memory_accesses.iter())
+            .map(|(_, access)| access.object.0 as usize + 1)
+            .max()
+            .unwrap_or(0);
+        let accesses_by_object = crate::dense::Csr::from_pairs(
+            objects,
+            (memory_accesses.iter()).map(|(id, access)| (access.object, *id)),
+        );
+        Self {
+            loops,
+            inductions,
+            unstructured_cycle_blocks,
+            memory_accesses,
+            accesses_by_object,
+            member_run_stores,
+            recursive_calls,
+        }
+    }
+
+    /// The ids of `object`'s accesses, ascending: `O(1)`.
+    pub fn access_ids_of(&self, object: ObjectId) -> &[StructuredAccessId] {
+        self.accesses_by_object.get(object)
+    }
+
+    /// `object`'s accesses, ascending by id: `O(k log A)` for its `k` accesses.
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn accesses_of(
+        &self,
+        object: ObjectId,
+    ) -> impl Iterator<Item = &StructuredMemoryAccessFact> {
+        (self.accesses_by_object.row(object)).filter_map(|id| self.memory_accesses.get(id))
+    }
+
     /// Every value a loop's header merge takes, where its loop runs a certified number of times
     /// from a constant start by a constant step without wrapping; `None` otherwise. O(log n).
     pub fn induction_range(

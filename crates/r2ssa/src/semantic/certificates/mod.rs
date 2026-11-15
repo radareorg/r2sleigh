@@ -438,6 +438,12 @@ pub struct PreparedFunctionCertificates {
     pub call_return_address_stores: crate::dense::IdSet<InstId>,
     /// The operations a stack-protector check inserted, decided under `Premise::UbFreeSource`.
     pub compiler_inserted: crate::dense::IdSet<InstId>,
+    /// The objects a return control claims (D422).
+    pub(crate) return_control_objects: crate::dense::IdSet<ObjectId>,
+    /// The objects with an access, each one a call's return-address store (D422).
+    pub(crate) call_return_address_objects: crate::dense::IdSet<ObjectId>,
+    /// The objects with an access, each one a compiler-inserted operation's (D422).
+    pub(crate) compiler_inserted_objects: crate::dense::IdSet<ObjectId>,
     /// Frame stores no code can read back, filled once the artifact is sealed
     /// (doc/adr-frame-model.md, "Dead frame stores").
     pub dead_frame_stores: crate::dense::IdSet<InstId>,
@@ -528,10 +534,8 @@ pub(crate) fn stack_array_layout(
     structured: &StructuredDataflowFacts,
     object: ObjectId,
 ) -> StackArrayLayoutDisposition {
-    let indexed_addresses = structured
-        .memory_accesses
-        .values()
-        .filter(|access| access.object == object && objects.address_is_indexed(access.address))
+    let indexed_addresses = (structured.accesses_of(object))
+        .filter(|access| objects.address_is_indexed(access.address))
         .map(|access| access.address)
         .collect::<BTreeSet<_>>();
     if indexed_addresses.is_empty() {
@@ -547,11 +551,7 @@ pub(crate) fn stack_array_layout(
     }
 
     let mut element_width = None;
-    for access in structured
-        .memory_accesses
-        .values()
-        .filter(|access| access.object == object)
-    {
+    for access in structured.accesses_of(object) {
         if !access.provenance_complete || access.width == 0 {
             return StackArrayLayoutDisposition::Refused(
                 StackArrayLayoutRefusal::IncompleteAccessProvenance,
@@ -937,10 +937,13 @@ pub(crate) fn collect_prepared_function_certificates(
             });
         !declared || stack_frame_round_trips.contains_key(object)
     });
-    let (machine_return_controls, machine_return_control_by_inst) =
-        collect_machine_return_control_certificates(
-            boundaries, graph, objects, structured, unobserved,
-        );
+    let MachineReturnControls {
+        certificates: machine_return_controls,
+        by_inst: machine_return_control_by_inst,
+        objects: return_control_objects,
+    } = collect_machine_return_control_certificates(
+        boundaries, graph, objects, structured, unobserved,
+    );
     let inserted = (function.compiler_inserted().iter())
         .filter_map(|op| graph.inst_for_op(op))
         .collect::<crate::dense::IdSet<_>>();
@@ -995,9 +998,7 @@ pub(crate) fn collect_prepared_function_certificates(
                     exact_stack_slots.contains_key(&(base, offset)),
                     callee_stack_allocations.contains_key(object),
                     structured
-                        .memory_accesses
-                        .values()
-                        .filter(|access| access.object == *object)
+                        .accesses_of(*object)
                         .map(|access| (
                             access.address,
                             access.width,
@@ -1364,6 +1365,13 @@ pub(crate) fn collect_prepared_function_certificates(
         machine_return_controls,
         machine_return_control_by_inst,
         callsites,
+        return_control_objects,
+        call_return_address_objects: objects_accessed_only_by(
+            structured,
+            &call_return_address_stores,
+            true,
+        ),
+        compiler_inserted_objects: objects_accessed_only_by(structured, &compiler_inserted, false),
         call_return_address_stores,
         compiler_inserted,
         dead_frame_stores: crate::dense::IdSet::default(),
@@ -1375,6 +1383,29 @@ pub(crate) fn collect_prepared_function_certificates(
         returns_by_inst,
         parameter_fields,
     })
+}
+
+/// The objects with an access, every access an instruction of `insts` (each a write, if asked):
+/// one pass over the accesses, `O(A)`.
+fn objects_accessed_only_by(
+    structured: &StructuredDataflowFacts,
+    insts: &crate::dense::IdSet<InstId>,
+    writes_only: bool,
+) -> crate::dense::IdSet<ObjectId> {
+    let (mut only, mut refused) = (
+        crate::dense::IdSet::default(),
+        crate::dense::IdSet::default(),
+    );
+    for access in structured.memory_accesses.values() {
+        if (access.is_write || !writes_only) && insts.contains(access.id.inst) {
+            if !refused.contains(access.object) {
+                only.insert(access.object);
+            }
+        } else if refused.insert(access.object) {
+            only.remove(access.object);
+        }
+    }
+    only
 }
 
 /// Whether a value is what a register slot holds: its storage, a root whose low lane it is, an entry lane's projection, or a lane inserted there (B3).
