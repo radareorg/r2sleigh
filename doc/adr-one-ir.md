@@ -258,7 +258,11 @@ reaches the load.
   none); a walk after the settle is a debug assertion.
 - Meter: a reloaded row (one per gated reload per decided round, one per
   settle) counts as `reloaded` in `call_reads_built`, apart from the column's
-  one build per site that D436's gate holds.
+  one build per site that D436's gate holds. `reload_bound` counts each
+  decided round's reloads and each settle's formats before their rows;
+  `a_reloaded_format_builds_one_row_per_reload_a_round_decides` asserts
+  `reloaded <= reload_bound` (16 of 16 on its fixture; a row restated at every
+  site, every round, reads 52 of 16).
 - Test: `reaching_rewrites_with_reloads_is_their_least_path_solution`, 300
   random graphs with a seed and reloads, against the path search iterated from
   no unset reload to its fixpoint.
