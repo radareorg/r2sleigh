@@ -177,7 +177,7 @@ r2sleigh_result_u64 register_tm_clones(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); no call reads the integer result register (assuming closed-world); the result is unproven (Written): 1 unproven-return carried */
     {
         rax_4 = 0;
         {

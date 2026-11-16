@@ -115,7 +115,8 @@ r2abi
 | D406 | 33 of 38 uncited noreturn rows are cited. Open, no source found: `__cxa_call_unexpected`, glibc and darwin `xalloc_die`, `__longjmp_chk`, darwin `__stack_chk_fail` | per-table uncited caps fall | open |
 | D428 | A call that may return twice keeps the frame | a red test | rejected: no failing program (rounds 6 and 7) |
 | D431 | An import's call reads RAX at AL's width where no stated bound covers it (psABI Figure 3.4) | `an_import_call_reads_the_count_register_alone_of_its_register`; D211 81 to 36 | built e3ab01f5c |
-| D448 | `__cxa_finalize` cites GCC 13 libstdc++'s `cxxabi.h` lines 134-135 and the Itanium C++ ABI 3.3.5.3: one fixed parameter, so a call reads RDI alone. Alone, 5 census records drop the stub from their floor line and keep the local callee's witness (frame_pointer_locals_clang_O0g 0x10e0, rv_O0g 0x1160, rv_O0g_stripped 0x1160, rv_O2 0x1320, two_units_O0g 0x1100); with D447 they equal master. Moves listed, not blessed | `call_boundary::a_cxa_finalize_call_reads_no_register_past_its_one_argument` | built (rd8-abi-cites) |
+| D448 | `__cxa_finalize` cites GCC 13 libstdc++'s `cxxabi.h` lines 134-135 and the Itanium C++ ABI 3.3.5.3: one fixed parameter, so a call reads RDI alone. Alone, 5 census records drop the stub from their floor line and keep the local callee's witness (frame_pointer_locals_clang_O0g 0x10e0, rv_O0g 0x1160, rv_O0g_stripped 0x1160, rv_O2 0x1320, two_units_O0g 0x1100); with D447 they equal master. Blessed at the rd8 exit as proof-line moves, C identical; they stay regressions (X) | `call_boundary::a_cxa_finalize_call_reads_no_register_past_its_one_argument` | built 4796fc1f2 |
+| D449 | The uncited rows a glibc 2.39 header states are cited: 49 rows (portable 41, glibc 8) move to `types-glibc.sdb.txt` with header and line, 30 of them the macOS SDK 27.0 states also to `types-darwin-cited.sdb.txt`; musl and bionic lose the 41 portable rows' uncited bound. D151's struct-pointer and function-pointer classes have rendered witnesses; the record-by-value class has none (`ldiv` renders `r2sleigh_word_u64` parameters and RDX as a residual), so `div`, `ldiv`, `lldiv`, `imaxdiv`, `inet_ntoa`, `setjmp`, `longjmp` stay uncited. DecBench: floors 873 to 837, loads 39,354 to 39,256, stores 24,059 to 23,950, refusals 2 to 0, `<< 32` 26/37; census 0 moved. Stopped on cost: bash `aa; pdd @ 0x2e630` +0.86% (Mac, same-tree, median of 3), over the ruling's +0.5% stop; the row opens one more callee to resolution there (`resolved` 2 to 3, `frames_built` 6 to 7, output identical); pumasim `aa` +0.45%, cause unnamed | `call_boundary::a_dcgettext_call_reads_exactly_its_three_arguments`, `audit_abi_rows.py --cc gcc` | open: stopped on cost, c8f5b45b3 on `rd8-abi-cites-d449`, not merged |
 
 r2il
 ----
@@ -165,7 +166,7 @@ r2ssa
 | D54 | A cap that keeps a partial result is an error: item **K** widens to the optimiser round budget, address provenance, the r2rewrite term budget, `COPIES = 8` and the lift's atomic `DEPTH`; the name interner is held per function; `Held` tables get a byte budget | D11's Dylints at deny with a shrinking allowlist | open |
 | D157 | `UnsupportedInstruction` prints over ordinary code with no reason (testapp 209 sites, hello_gs 212, pumasim 256): each site names the instruction and why, or decodes (hand audit 3.11) | the three counts fall to named reasons | open |
 | D171 | An indirect call through a DWARF member of function-pointer type is placed by the declaration's rule; its parameter roots by S32, the rest by D348 | `member_calls` golden | built 64a99401c |
-| D211 | `residual_u64(n) << 32` in 26 of 2,621 DecBench functions, 37 sites, on rebuild-design-7's merged head (`s2count.py`; D440 took 10 RAX return roots, 0 new hits) | at most 5 | open |
+| D211 | `residual_u64(n) << 32` in 20 of 2,621 DecBench functions, 28 sites, on rebuild-design-8's merged head (`s2count.py`; D446 added find O2 `0xeaf0`, D444 took 6, D445 took 1). Irreducible: find O2-noinline `0xf490` and find O2 `0xeaf0`, a hasher called through a heap field (psABI line 410) | at most 5 | open |
 | D226 | A cold `pdd` prepares a function once where an owner's statement moves its result; D286 to D288 built it, D289 the second recovery | `builds.rs` | built 033e1b76a |
 | D231 | A result carried across an elided `/GS` call stays a residual: `op_ends_reaching_walk` ends the return walk at any call, so the return boundary and liveout learn the exemption together | `a_call_to_a_proven_check_of_the_load_config_cookie_is_elided` returns `r2sleigh_carrier_u64(7)`; hello_gs's 11 elisions hold | open |
 | D232 | A Microsoft x64 variadic call with five or more arguments passes four (the Win64 target's 3 `ub` records, `shape_variadic` O0 to O2) | those 3 records leave `ub` | open |
@@ -234,7 +235,7 @@ r2ssa
 | D415 | `Wto` and `wto_sparse`; ValueRanges on the driver. Open: an engine-level test, a fuzz differential, the census on both arches | `an_irreducible_loops_head_is_its_least_key_whatever_the_numbering` | built f473fc95b; gates open |
 | D420 | D289 Step B: re-solve only the region of a kept build's second recovery its owners' changed sites reach. Entry: a typed read set per dynamic phase, a seed from differing site views, held facts with RSS, a measured boundary share | per RM-onerec change 8 | open |
 | D421 | A printf format is folded twice (r2engine `formatted_sites`, r2ssa `bind_format_tails`). The literal's one owner is the machine context, which fates reads; D432 adds no third folder | one folder | open |
-| D422 | A question about one frame object scans every structured access or return control (four sites, 3.9 to 4.0x per doubling at N = 512). One index by `ObjectId` built with the accesses (`accesses_by_object`, private), O(accesses + objects); the certificates own the three object sets. Open: `certificates/stack.rs:1150,1159` (`accessed_object_storage`, per object over every access) grows 3.9x per doubling on locals behind an unbounded call | `scaling.py --meter` 2.000 on 5 dimensions, `SCAN_OPEN` empty; `declarable_questions_grow_linearly_with_the_returns`; `the_return_controls_arm_states_the_objects_its_controls_claim` | built; open part |
+| D422 | A question about one frame object scans every structured access or return control (four sites, 3.9 to 4.0x per doubling at N = 512). One index by `ObjectId` built with the accesses (`accesses_by_object`, private), O(accesses + objects); the certificates own the three object sets. Open: `certificates/stack.rs:1150,1159` (`accessed_object_storage`, per object over every access) grows 3.9x per doubling on locals behind an unbounded call | `scaling.py --meter` 2.000 on 5 dimensions, `SCAN_OPEN` empty; `declarable_questions_grow_linearly_with_the_returns`; `the_return_controls_arm_states_the_objects_its_controls_claim` | built 17a7783cf; open part |
 | D423 | clang x86-64 O1 `branchy.c` `_main` reads `xorps xmm0, xmm0`'s masked entry bits as a held residual where rd3 spelled `0U`; bisected to merge 500e93b46, cause unverified | the overwritten bits stated dead at their owner | open |
 | D426 | Rescans R2 to R5 bounded; R4 virtual phis dropped (the R3 solver went with D427) | R3 against the path union on 200 random graphs; no D417 meter replay, and R3's and R4's counters pass on the parent too: gate open | built 5b39265a8 |
 | D427 | `rewritten` kills at an exact whole-width store; every non-tail call writes `(i64::MIN, base)` | `a_place_stored_again_after_an_unstated_call_folds` | built a1d1be599 |
@@ -246,7 +247,7 @@ r2ssa
 | D436 | `CallReads` is a dense column per machine context | `a_context_builds_each_call_sites_reads_once`. Open, unruled: the demand pass runs twice per body | built ac851af97; open part |
 | D437 | The format fold steps only blocks with a cited printf site | `a_body_with_no_format_site_folds_no_operation` | built 28ae1efd2 |
 | D438 | Register-walk class lookup by one direct table and one CSR | `a_register_walk_allocates_its_written_classes_once` | built 700f64c8b |
-| D443 | One seal of a body of n compare-and-return arms grows superlinearly (Scaling Bench `unproven_returns`): D422's four scans (`function/mod.rs:1824`, `:1967`, `semantic/certificates/returns.rs:131`, `semantic/certificates/mod.rs:533`) grow 4x per input doubling in `scripts/scaling.py`; callgrind at N = 64 and 128 adds `fuse_compare_chains_in_function` 3.99x, `collect_control_domain_facts` 4.21x, `FunctionLiveOut::collect_reaching` 3.79x, `recover_interface_inner` 2.99x, r2dec `CStmt::clone` 4.09x and `emit_stmt` 6.2x (an else-if chain nested n deep). Owner r2ssa optimize, control domains, liveout; r2dec render | `scaling.py` `unproven_returns` linear | open |
+| D443 | One seal of a body of n compare-and-return arms grows superlinearly (Scaling Bench `unproven_returns`): D422 (17a7783cf) made the four per-object scans linear; callgrind at N = 64 and 128 adds `fuse_compare_chains_in_function` 3.99x, `collect_control_domain_facts` 4.21x, `FunctionLiveOut::collect_reaching` 3.79x, `recover_interface_inner` 2.99x, r2dec `CStmt::clone` 4.09x and `emit_stmt` 6.2x (an else-if chain nested n deep). Owner r2ssa optimize, control domains, liveout; r2dec render | `scaling.py` `unproven_returns` linear | open |
 | D447 | The frame walk reads no call in a block a decided branch cuts off (kind X; 8 census records back to master in the round-8 stand-in). Blocked: the default-deny PIE condition needs a fact r2ssa lacks. Sleigh exports `[rip + d]` and `adr` as `*[const]`, so an `SSAFunction` constant does not say whether it slides with the image, and neither r2engine `Source` nor `SourceMachineContext` carries r2image `Posture::pic`. Entry: that fact reaches the machine context (r2image, r2engine `Source`, r2ssa), then the sparse slice evaluation on SCCP's transfer function | `a_tail_behind_a_compare_of_equal_constants_bounds_no_write` | open: blocked, not built |
 
 r2source
@@ -347,7 +348,7 @@ r2engine
 | D441 | A callee's incoming writes compose over its write-blocking calls: `WritesBound::solve` is the one composition, and the held `IncomingWrites` query solves each write-dependence component once, callee first, accepting a cycle only where every member computes its seed; `aa` only. Measured: DecBench loads 39,426 to 39,354, stores 24,107 to 24,059; pumasim `aa; pdd @ 0x23fdf0` +1.81% (81 bodies read alone to compose), outputs identical | `a_place_past_a_mutual_recursion_that_writes_nothing_folds`; `a_result_cycle_and_a_write_cycle_state_one_answer`; goldens differing from master 28 to 24, 0 away; floors 873 | built 41003ea2e |
 | D442 | A body the closed world decides seals once: `Native::resolve` asks the decision before the first seal and captures under it. Open: `resolved_alone`, the build path asking callees (`native.rs:1476`), captures with nothing asked, so `finish` still seals a decided body twice under `aa` | `result_lanes::a_body_the_closed_world_decides_seals_once`; Scaling Bench `unproven_returns` | built 94bc163ec; open part |
 | D444 | `EveryWayIn` is one query keyed by callee and lane: the integer lane asks only its own forwarders on lane 0, also for an `Unproven` supply; the all-lane ask is that query over every lane's forwarders. Open: that ask still waits on forwarders of lanes the callee holds no result in (x87 ST0, ST1, which a caller leaves untouched), and no test pins an `Unread` the per-lane ask decides alone | `result_lanes::an_integer_lane_dead_at_a_caller_whose_own_way_in_is_open_reads_no_residual`; `fates::tests::an_unproven_results_integer_lane_dead_at_every_call_is_decided_on_its_ways_in`; D211 27 to 21 functions, 38 to 29 sites; census 0 moved | built 38d9d9b43; open part |
-| D445 | A tail caller forwarding the integer lane is a way in on it: `integer_dead_at_every_call` takes one call or one lane-0 tail caller, and D440's 0-calls rule is deleted there. 7 census records move one proof line each (`register_tm_clones` behind `frame_dummy`, judged moves, kind G) | `result_lanes::a_function_only_tailed_to_by_a_dead_lane_caller_reads_no_residual`; D211 21 to 20 functions, 29 to 28 sites | built at the head of `rd8-int-lane-ways` |
+| D445 | A tail caller forwarding the integer lane is a way in on it: `integer_dead_at_every_call` takes one call or one lane-0 tail caller, and D440's 0-calls rule is deleted there. 7 census records move one proof line each (`register_tm_clones` behind `frame_dummy`, judged moves, kind G) | `result_lanes::a_function_only_tailed_to_by_a_dead_lane_caller_reads_no_residual`; D211 21 to 20 functions, 29 to 28 sites | built c14a75b3a |
 | D446 | An indirect call may read every result byte (psABI 3.2, line 410): r2engine `Effects.indirect` takes every lane byte at a caller and inside a row. Open: one owner of the indirect-call read across r2engine `Effects` and r2ssa `CallUse` | `result_lanes::a_result_left_to_an_indirect_call_keeps_the_bits_above_a_narrow_callee`; D211 26 to 27 functions, 37 to 38 sites (find O2 `0xeaf0`, a correct residual); census 0 moved | built 6e338e8f0; open part |
 
 r2dec
@@ -455,27 +456,23 @@ Order
 
 | PR | Branch | Rows | State |
 |----|--------|------|-------|
-| #398 | `rebuild-design-3` on master | round 3: D370 to D378, D408, D409 | open |
-| #399 | `rebuild-design-4` | the design-fit audit: D379 to D407 | open |
-| #400 | `rebuild-design-5` | the foundation ranking and round 5: D410 to D426 | open |
-| #401 | `rebuild-design-6` | round 6: D427, D431, D433 to D439 | open |
-| #402 | `rd7-format` | D432 | closed: superseded by #403 |
-| #403 | `rebuild-design-7` 94bc163ec | round 7: D432, D440, D441, D442, D443 | open |
-| next | `roadmap-rewrite` | this rewrite: rows by owner, standing gates, history index | open |
+| #398 to #405 | `rebuild-design-3` to `rebuild-design-7`, `roadmap-rewrite` | rounds 3 to 7, D370 to D443, and the rewrite | merged 2026-11-15 |
+| #406 | `roadmap-rewrite` on master | judged golden moves leave the regression count | open |
+| next | `rebuild-design-8` | round 8: D422, D444, D445, D446, D448; D447 blocked, D449 stopped on cost | open |
 
-Round 7's exit, on rebuild-design-7: D211 26 functions and 37 sites (gate 5); floor callees 873;
-DecBench loads 39,354 and stores 24,059 over 2,621 functions; 25 golden records differ from
-master; equivalence equal x86-64 745 and aarch64 749. The x86-64 745th is `review.c` clang-O2
-`fact`, graded by time and not blessed.
+Round 8's exit, on rebuild-design-8: D211 20 functions and 28 sites (gate 5); floor callees 873;
+DecBench loads 39,354 and stores 24,059 over 2,621 functions, 2 refused; 32 golden records differ
+from master 500216e6d, 18 of them regressions; scan growth 2.000 on the five scaling dimensions.
+Cold pumasim `pdd` falls 1.61% and cold 0pack 0.44% against rebuild-design-7 (D422).
 
 ### Next rounds, from the rulings
 
-1. D211 to its gate of at most 5. After D440, 26 functions stay; D372's stated half is the next owner.
+1. D211 to its gate of at most 5. After round 8, 20 functions stay; D372's stated half is the next owner.
 2. D413's item C2, then C3 (a tail callee that overwrites RAX). Entry: a composed fixpoint dry run over at least 2 functions and 6 sites, cold within 2%.
 3. D376's cold ask. Entry: the cold write-blocking reach on pumasim `0x23fdf0` and 0pack `0x62ecf0`, and a lift-grade write cost.
 4. D378's kinds V, I and F. V needs D429 costed; I needs a cited premise for indirect callees (psABI line 410 exempts local functions).
 5. D414 stays held until a build grade fits D23's 2%.
-6. Cost: D442's open part and D443 (with D422's index), then D367, D374, D419, D420, D344, D285's (2) and (3), D375. D424 needs a ruling before D354's gate can close.
+6. Cost: D442's open part and D443 (D422's index built), then D367, D374, D419, D420, D344, D285's (2) and (3), D375. D424 needs a ruling before D354's gate can close.
 7. Witnesses: D425, D433's citation check, D350's upstream declaration, D421's one folder.
 8. D415's gates; D418 after D413 and the build key.
 9. Then the open rows and items by owner above, the lift and container first.
@@ -497,6 +494,7 @@ These records differ from master and are correct; they are not regressions. Judg
 |---------|------|-----------------------------|--------|
 | branchy 0x401764 `main`; hashes O2 and stripped 0x401050 `main`; rv_O0g_stripped 0x1549, rv_O2 0x10c0 `main` | P | D227's closed-world decision rests on `UbFreeSource`; the proof line now names it, master's omitted it | e508c86bb |
 | syscalls_static_O2 0x401050 | G | D440's integer lane states a proven result master did not | 7d5ba5984 |
+| `register_tm_clones` in branchy 0x4010e0, frame_pointer_locals 0x10a0, hashes O2 0x4012b0, rv_O0g 0x1120, rv_O2 0x12e0, shapes 0x401100, two_units 0x10c0 | G | D445: `frame_dummy` tails to it and its only way in is the loader's `.init_array` call, whose glibc row reads no result (`dl-init.c` `call_init`, `r2abi::loader_call`); C identical, the proof line adds "no call reads the integer result register" | c14a75b3a |
 | cmd `member_calls` | G | D359 names the DWARF member call master printed bare | e508c86bb |
 
 The regression count is 18 at rebuild-design-7: 8 X, 5 X with C, 3 I, 1 V, and shapes 0x402206 `main`, whose proof line is a P move but whose C waits on V, I, E and O (D378). In each, master printed C resting on a call it could not bound, so the move is sound, but the fact that restores master's output is owed.
