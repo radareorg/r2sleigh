@@ -1496,3 +1496,16 @@ A counted printf states its registers as D409 states its stack.
 - Lookup: `call_reads`, `every_location_at` (the site's model, D390) and `every_location` (the calls' model) are a binary search over the sorted rows, O(log C), and hand out references; no question clones a row.
 - Equivalence: a row is `stated_call_reads(instruction)`, the old `call_reads` body unchanged, a pure function of fields that no longer change after the bind. `reads_none_of(model, carrier)` was `reads_none_within(&every_location(model), carrier)`; its readers now pass the held row.
 - Meter: in a `work-meter` build `r2ssa::call_reads_built()` counts rows built against rows the contexts made; `result_lanes::a_context_builds_each_call_sites_reads_once` asserts built ≤ made, red on the parent.
+
+## D446 as built (2026-11-15, rd8-int-lane-ways)
+
+An indirect call may read every result byte, in a caller's site fates and inside a register effect row.
+
+- Citation: psABI 1.0 section 3.2, line 410, "Local functions that are not reachable from other compilation units may use different conventions". An indirect target may be such a function, so no standard convention bounds what it reads (round 6 ruling, line 73; D431 excludes indirect calls on the same words).
+- Before, r2engine `Effects.indirect` took `unknown()`: the argument registers, with the count register only at a caller (`Depth::Deep`). A row (`Depth::Shallow`) took no byte of RAX at `call *%rbx`, so a caller of that row read f's RAX dead while r2ssa `CallUse` read RAX whole at the same instruction.
+- Now `Effects.indirect` takes every lane byte the convention's result registers cover, at both depths. `unknown()` stays for a callee read without its row and an unbound import, where the count register is the caller's own.
+- Measured against b30b59eef (code = 94bc163ec). DecBench 2,621 (`s2count.py`): `residual << 32` 26 to 27 functions, 37 to 38 sites; the one move is find O2 `0xeaf0`, read by hand: `fstat`'s `int` at `0xeb7f` reaches `call 0x1ae90` at `0xeb98`, whose body calls through a heap field with RAX unwritten, so `| r2sleigh_residual_u64(1) << 32` is correct there. Floors 873, loads 39,354, stores 24,059, 2,619 outputs kept, `r2dec gap` 3,672 unchanged: `fin`'s 3,673rd gap is not this row's. Census 0 of 369 records moved.
+- Cost, contabo perf `instructions:u`, median of 3, base in the same job: cold pumasim `0x23fdf0` 20.274 G (-0.00%), cold 0pack `0x62ecf0` 13.909 G (-0.00%), bash `aa; pdd @ 0x2e630` 13.616 G (+0.00%), pumasim `aa; pdd @ 0x3b6b20` 73.387 G (+0.00%); outputs identical.
+- Equivalence: contabo, time-graded: x86-64 743 equal and 2 `slow`, shapes.c clang-O1 `shape_mutual_even` and review.c clang-O2 `fact`, each rendering byte-identical C at b30b59eef and here, so 745 held; aarch64 749 equal, every baseline record held. `void_soundness`: 0 false voids, 0 externs void.
+- Open: one owner of the indirect-call read across r2engine `Effects` and r2ssa `CallUse`.
+- Test (`result_lanes`): `a_result_left_to_an_indirect_call_keeps_the_bits_above_a_narrow_callee`, `call f; call g` with `g` = `call *%rbx; ret`, red on b30b59eef ("inside a walked callee"); the direct `call f; call *%rbx` case was already green there (the count register at `Depth::Deep`).

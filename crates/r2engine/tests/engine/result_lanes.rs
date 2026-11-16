@@ -920,3 +920,183 @@ fn an_integer_lane_decision_is_no_claim_about_the_result() {
     assert!(!text.contains("unproven (Unread)"), "{text}");
     assert!(text.contains("integer result register"), "{text}");
 }
+
+/// `call f; call *%rbx; ret`: RAX as `f` left it reaches an indirect call.
+const CALLS_RBX: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xff, 0xd3, // 1025 call rbx
+    0xc3, // 1027 ret
+];
+
+/// `call f; call g; ret`, `g` at 0x1040.
+const CALLS_F_THEN_G: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xe8, 0x16, 0x00, 0x00, 0x00, // 1025 call 0x1040
+    0xc3, // 102a ret
+];
+
+/// `g`: `call *%rbx; ret`, which hands RAX on unwritten to an indirect call.
+const G_CALLS_RBX: &[u8] = &[0xff, 0xd3, 0xc3];
+
+/// An indirect target may be a local function, which the psABI does not bind (3.2, line 410), so it
+/// may read RAX whole: at the caller, and inside a walked callee's row, `f`'s residual stays (D446).
+#[test]
+fn a_result_left_to_an_indirect_call_keeps_the_bits_above_a_narrow_callee() {
+    let cases: [(&str, Bodies); 2] = [
+        ("at the caller", vec![(0x20, CALLS_RBX)]),
+        (
+            "inside a walked callee",
+            vec![(0x20, CALLS_F_THEN_G), (0x40, G_CALLS_RBX)],
+        ),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(!text.contains("integer result register"), "{case}: {text}");
+    }
+}
+
+/// `call f; mov eax, 1; ret`: RAX is written before the return, and XMM0 goes back as `f` left it.
+const OVERWRITES_RAX_FORWARDS_XMM0: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1025 mov eax, 1
+    0xc3, // 102a ret
+];
+
+/// `lea rax, [rip - 0x27] (caller); mov [rdi], rax; ret`: code names the caller's address and stores it.
+const STORES_CALLER: &[u8] = &[
+    0x48, 0x8d, 0x05, 0xd9, 0xff, 0xff, 0xff, // 1040 lea rax, [0x1020]
+    0x48, 0x89, 0x07, // 1047 mov [rdi], rax
+    0xc3, // 104a ret
+];
+
+/// `call f; ret`: the caller returns RAX as `f` left it.
+const FORWARDS_RAX: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xc3, // 1025 ret
+];
+
+/// `call caller; xor eax, eax; xor edx, edx; xorps xmm0, xmm0; xorps xmm1, xmm1; ret`.
+const CALLS_CALLER_OVERWRITES_EVERY_LANE: &[u8] = &[
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1030 call 0x1020
+    0x31, 0xc0, 0x31, 0xd2, 0x0f, 0x57, 0xc0, 0x0f, 0x57, 0xc9, 0xc3,
+];
+
+/// `call f; call *%rbx; mov eax, 1; ret`: an indirect call between the call and the overwrite.
+const CALLS_RBX_THEN_OVERWRITES_RAX: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xff, 0xd3, // 1025 call rbx
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1027 mov eax, 1
+    0xc3, // 102c ret
+];
+
+/// The integer lane's ways in are its own forwarders' (D444): the one caller overwrites RAX, so its
+/// own way in, open where code stores its address, plays no part for that lane; XMM0 stays open.
+#[test]
+fn an_integer_lane_dead_at_a_caller_whose_own_way_in_is_open_reads_no_residual() {
+    let cases: [(&str, Bodies); 2] = [
+        (
+            "the caller's way in closed",
+            vec![(0x20, OVERWRITES_RAX_FORWARDS_XMM0)],
+        ),
+        (
+            "the caller's address stored",
+            vec![(0x20, OVERWRITES_RAX_FORWARDS_XMM0), (0x40, STORES_CALLER)],
+        ),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(!text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(text.contains("(assuming closed-world)"), "{case}: {text}");
+    }
+}
+
+/// Default-deny on the integer lane's own ways in: each keeps the residual above the `int` (D444).
+#[test]
+fn an_integer_lane_forwarder_not_closed_keeps_the_bits_above_a_narrow_callee() {
+    let cases: [(&str, Bodies); 3] = [
+        (
+            "a lane-0 forwarder whose address escapes",
+            vec![
+                (0x20, FORWARDS_RAX),
+                (0x30, CALLS_CALLER_OVERWRITES_EVERY_LANE),
+                (0x40, STORES_CALLER),
+            ],
+        ),
+        ("a lane-0 forwarder cycle", FORWARDS_F_INTO_A_CYCLE.to_vec()),
+        (
+            "an indirect call before the overwrite",
+            vec![(0x20, CALLS_RBX_THEN_OVERWRITES_RAX), (0x40, STORES_CALLER)],
+        ),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(!text.contains("integer result register"), "{case}: {text}");
+    }
+}
+
+/// `t`: `jmp f`.
+const TAILS_TO_F: &[u8] = &[0xe9, 0xbb, 0xff, 0xff, 0xff];
+
+/// `call t; mov eax, 1; call rsi; ret`.
+const CALLS_T_OVERWRITES_RAX: &[u8] = &[
+    0xe8, 0x1b, 0x00, 0x00, 0x00, // 1020 call 0x1040
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1025 mov eax, 1
+    0xff, 0xd6, // 102a call rsi
+    0xc3, // 102c ret
+];
+
+/// `call t; xor eax, eax; xor edx, edx; xorps xmm0, xmm0; xorps xmm1, xmm1; ret`.
+const CALLS_T_OVERWRITES_EVERY_LANE: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 1030 call 0x1040
+    0x31, 0xc0, 0x31, 0xd2, 0x0f, 0x57, 0xc0, 0x0f, 0x57, 0xc9, 0xc3,
+];
+
+/// `lea rax, [rip - 0x17] (t); mov [rdi], rax; ret`: code names `t`'s address and stores it.
+const STORES_T: &[u8] = &[
+    0x48, 0x8d, 0x05, 0xe9, 0xff, 0xff, 0xff, // 1050 lea rax, [0x1040]
+    0x48, 0x89, 0x07, // 1057 mov [rdi], rax
+    0xc3, // 105a ret
+];
+
+/// A tail caller is a way in on the integer lane: `f` has no call, and `t`'s every call overwrites
+/// RAX, so nothing reads `f`'s RAX after its return (D445).
+#[test]
+fn a_function_only_tailed_to_by_a_dead_lane_caller_reads_no_residual() {
+    let text = narrow_result_under_aa(
+        RETURNS_A_NARROW_CALL,
+        &[
+            (0x20, CALLS_T_OVERWRITES_RAX),
+            (0x30, CALLS_T_OVERWRITES_EVERY_LANE),
+            (0x40, TAILS_TO_F),
+        ],
+    );
+    assert!(!text.contains("r2sleigh_residual_u64("), "{text}");
+    assert!(
+        text.contains("no call reads the integer result register (assuming closed-world)"),
+        "{text}"
+    );
+}
+
+/// Default-deny: no call and no tail caller, or a tail caller whose own way in is open, keeps the
+/// residual (D445).
+#[test]
+fn a_function_with_no_closed_lane_zero_way_in_keeps_the_bits_above_a_narrow_callee() {
+    let cases: [(&str, Bodies); 2] = [
+        ("no call and no tail caller", Vec::new()),
+        (
+            "a tail caller whose address escapes",
+            vec![
+                (0x20, CALLS_T_OVERWRITES_RAX),
+                (0x40, TAILS_TO_F),
+                (0x50, STORES_T),
+            ],
+        ),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(!text.contains("integer result register"), "{case}: {text}");
+    }
+}
