@@ -241,10 +241,10 @@ fn a_call_through_a_writable_noreturn_slot_comes_back_and_a_sealed_one_does_not(
     assert!(!sealed.contains('7'), "{sealed}");
 }
 
-/// A sealed slot bound to `xalloc_die`, never-returning by an uncited row only: the call stays closed,
-/// but the body is no `Composed` never and the call declares no `noreturn` (D395).
+/// A sealed slot bound to gnulib's `xalloc_die`, which no row states (D406): the call comes back,
+/// so the body returns 7 and declares no `noreturn`.
 #[test]
-fn a_call_through_a_sealed_slot_to_an_uncited_noreturn_composes_nothing() {
+fn a_call_through_a_sealed_slot_to_an_import_no_row_states_comes_back() {
     let slot = BASE + 0x20;
     let literal = Literal::of_code(
         CALL_THROUGH_A_SLOT_THEN_RETURN_SEVEN,
@@ -257,18 +257,18 @@ fn a_call_through_a_sealed_slot_to_an_uncited_noreturn_composes_nothing() {
     .sealed(slot..slot + 8);
     let mut open = OpenProgram::of(literal);
     let info = open.function_info(BASE).expect("it is described");
-    let proof = info.noreturn.map(|never| never.proof());
-    assert_eq!(
-        proof,
-        Some(r2engine::discovery::NeverProof::NoReturnReached)
-    );
+    assert!(info.noreturn.is_none(), "{:?}", info.noreturn);
     let text = open
         .rendered(BASE)
         .expect("it renders")
         .response
         .output
         .into_text();
-    assert!(text.contains("xalloc_die("), "{text}");
+    assert!(
+        text.contains("call to xalloc_die: the import has no declaration"),
+        "{text}"
+    );
+    assert!(text.contains("return r2sleigh_carrier_u32(7);"), "{text}");
     assert!(!text.contains("noreturn"), "{text}");
 }
 

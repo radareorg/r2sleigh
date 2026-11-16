@@ -68,11 +68,11 @@ fn rows(text: &str) -> Vec<(String, String, Option<String>)> {
                 .strip_prefix("func.")
                 .and_then(|rest| rest.strip_suffix(".cite"))
             && let Some(row) = rows.iter_mut().find(|row| row.0 == name && row.2.is_none())
-            && row.1.contains("musl src/")
-            && row.1.contains("no header declares it")
+            && (row.1.contains("no header declares it")
+                || row.1.contains("no installed header declares it"))
         {
-            // A musl interface no header declares cites the source file that defines it.
-            row.2 = Some(format!("musl: {}", page.trim()));
+            // An interface no installed header declares cites the source file that declares it.
+            row.2 = Some(format!("source: {}", page.trim()));
         }
     }
     rows
@@ -90,8 +90,10 @@ fn every_row_cites_its_header() {
                     // libstdc++ declares `std::terminate` in <exception>, a header with no suffix.
                     || (file == "types-cxx-cited.sdb.txt" && header == "exception")
                     || header.starts_with("LSB: LSB-Core-generic 5.0, ")
-                    || (header.starts_with("musl: src/")
-                        && comment.contains("no header declares it")),
+                    || header
+                        .strip_prefix("source: ")
+                        .and_then(|page| page.split_once(':'))
+                        .is_some_and(|(path, _)| comment.contains(path)),
                 "{file}: `{name}` includes `{header}`"
             );
             assert!(
@@ -169,21 +171,39 @@ fn every_uncited_row_names_why() {
     }
 }
 
-/// A row of an uncited table that states noreturn proves no "never": the row is not cited (D395).
+/// No uncited row states noreturn: only a cited source proves a "never" (D395, D406).
 #[test]
-fn an_uncited_noreturn_row_is_not_cited() {
-    let rows = LibraryRows::embedded(CLibrary::Glibc);
-    let uncited = rows.rows().filter(|row| row.noreturn && !row.cited());
-    let names = uncited.map(|row| &*row.linked_name).collect::<Vec<_>>();
-    assert!(names.contains(&"xalloc_die"), "{names:?}");
-    assert!(names.contains(&"__cxa_call_unexpected"), "{names:?}");
-    let cited = |name: &str| rows.rows().find(|row| &*row.linked_name == name);
-    // GCC's cxxabi.h and bits/functexcept.h state these never return (D406).
-    for name in ["exit", "__cxa_throw", "_ZSt9terminatev", "_Unwind_Resume"] {
-        assert!(
-            cited(name).is_some_and(|row| row.noreturn && row.cited()),
-            "{name}"
-        );
+fn no_uncited_row_states_noreturn() {
+    let stated = UNCITED.into_iter().flat_map(|file| {
+        let text = table(file);
+        let lines = text.lines().filter(|line| line.contains(".noreturn="));
+        lines
+            .map(|line| format!("{file}: {line}"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(stated.collect::<Vec<_>>(), Vec::<String>::new());
+    for (library, named) in [
+        (CLibrary::Glibc, ["__longjmp_chk", "__cxa_call_unexpected"]),
+        (
+            CLibrary::LibSystem,
+            ["__stack_chk_fail", "__cxa_call_unexpected"],
+        ),
+        (CLibrary::Bionic, ["__stack_chk_fail", "_Unwind_Resume"]),
+    ] {
+        let rows = LibraryRows::embedded(library);
+        let uncited = rows.rows().filter(|row| row.noreturn && !row.cited());
+        let names = uncited.map(|row| &*row.linked_name).collect::<Vec<_>>();
+        assert_eq!(names, Vec::<&str>::new(), "{library:?}");
+        let cited = |name: &str| rows.rows().find(|row| &*row.linked_name == name);
+        // glibc's bits/setjmp2.h, GCC's cxxabi.h, unwind-cxx.h and bits/functexcept.h, Apple
+        // Libc's stack_protector.c and bionic's __stack_chk_fail.cpp state these never return.
+        let always = ["exit", "__cxa_throw", "_ZSt9terminatev", "_Unwind_Resume"];
+        for name in always.into_iter().chain(named) {
+            assert!(
+                cited(name).is_some_and(|row| row.noreturn && row.cited()),
+                "{library:?} {name}"
+            );
+        }
     }
 }
 

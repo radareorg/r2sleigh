@@ -279,7 +279,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 12] = [
+pub const SOURCES: [&str; 13] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -292,6 +292,7 @@ pub const SOURCES: [&str; 12] = [
     "Microsoft",
     "Itanium C++ ABI",
     "macOS SDK",
+    "Apple Libc",
 ];
 
 /// What a row read from a mangled name cites.

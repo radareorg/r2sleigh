@@ -36,13 +36,12 @@ aligned_alloc | void * | C11 7.22.3.1
 
 # types-linux.sdb.txt, glibc's own; also types-darwin.sdb.txt, types-objc.sdb.txt and
 # types-android.sdb.txt.
-xalloc_die | void | gnulib lib/xalloc.h: _Noreturn void xalloc_die (void)
 _exit | void | POSIX.1-2017 <unistd.h> _exit (noreturn)
 _Exit | void | C11 7.22.4.5 (_Noreturn)
 abort | void | C11 7.22.4.1 (_Noreturn)
 exit | void | C11 7.22.4.4 (_Noreturn)
 __stack_chk_fail | void | LSB 5.0 Core, generic: void __stack_chk_fail(void) (noreturn)
-__longjmp_chk | void | LSB 5.0 Core, generic: void __longjmp_chk(jmp_buf, int) (noreturn)
+__longjmp_chk | void | glibc 2.39 bits/setjmp2.h lines 25-27: longjmp redirected to __longjmp_chk, void, __noreturn__
 __bzero | void | libsystem_platform's bzero under a second name (README.md); <strings.h> bzero
 objc_storeStrong | void | objc4 runtime/objc-internal.h
 objc_release | void | objc4 runtime/objc-internal.h
@@ -81,7 +80,7 @@ __cxa_free_exception | void | Itanium C++ ABI EH 2.4.2
 __cxa_throw | void | Itanium C++ ABI EH 2.4.3 (noreturn)
 __cxa_end_catch | void | Itanium C++ ABI EH 2.5.3
 __cxa_rethrow | void | Itanium C++ ABI EH 2.5.4 (noreturn)
-__cxa_call_unexpected | void | Itanium C++ ABI EH 2.5.5 (noreturn)
+__cxa_call_unexpected | void | GCC 13.2 libstdc++-v3/libsupc++/unwind-cxx.h line 169 (__noreturn__)
 _Unwind_Resume | void | Itanium C++ ABI EH 1.4.3 (noreturn)
 
 # std::terminate, [except.terminate]; libstdc++'s bits/functexcept.h, each noreturn.

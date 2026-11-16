@@ -333,3 +333,12 @@ func.wcsftime.arg.2=const wchar_t *,format
 func.wcsftime.arg.3=const struct tm *,tp
 func.wcsftime.ret=size_t
 func.wcsftime.include=wchar.h
+
+# Apple Libc sys/OpenBSD/stack_protector.c (tag Libc-1752.120.2): no header declares it. Line 49
+# declares `void __stack_chk_fail(void);`, and the definition (lines 120-132) ends in `__abort()`,
+# declared `void __abort(void) __cold __dead2;` at line 47, on its only path.
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.noreturn=true
+func.__stack_chk_fail.ret=void
+func.__stack_chk_fail.cite=sys/OpenBSD/stack_protector.c:120-132: void __stack_chk_fail(void) { ... __abort(); }

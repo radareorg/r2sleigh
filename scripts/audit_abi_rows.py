@@ -236,12 +236,16 @@ PREREQUISITES = (
 # glibc 2.38 declares `strtol` with `__asm__("__isoc23_strtol")` (<stdlib.h>, `__GLIBC_USE (C2X_STRTOL)`):
 # the linked name is no identifier, so the probe names the function the header redirects.
 REDIRECTED = "__isoc23_"
+# glibc's fortify header redirects a public name to its checked entry point (bits/setjmp2.h:25-27,
+# `longjmp` to `__longjmp_chk`): the type probe names the public function, the redirect probe reads `-E`.
+FORTIFIED = {"__longjmp_chk": "longjmp"}
 # glibc's fortify headers refuse a direct include ("Never include <bits/...> directly"): each is
 # reached through the public header that includes it.
 PUBLIC_WRAPPERS = {
     "bits/stdio2-decl.h": "stdio.h",
     "bits/fcntl2.h": "fcntl.h",
     "bits/wchar2-decl.h": "wchar.h",
+    "bits/setjmp2.h": "setjmp.h",
 }
 
 
@@ -257,8 +261,23 @@ def assertion(row: CitedRow) -> str:
     """One translation unit that compiles only where the header declares the row's prototype."""
     return (
         "".join(f"#include <{header}>\n" for header in headers_of(row)) +
-        f"_Static_assert(__builtin_types_compatible_p(__typeof__({row.name.removeprefix(REDIRECTED)}), {row.prototype()}), \"row\");\n"
+        f"_Static_assert(__builtin_types_compatible_p(__typeof__({probed(row)}), {row.prototype()}), \"row\");\n"
     )
+
+
+def probed(row: CitedRow) -> str:
+    """The name the header declares for the row's linked name."""
+    return FORTIFIED.get(row.name, row.name.removeprefix(REDIRECTED))
+
+
+def redirected(cc: str, flags: str, row: CitedRow) -> bool:
+    """Whether the preprocessed header links the public name under the row's: `__asm__ ("" "name")`."""
+    text = "".join(f"#include <{header}>\n" for header in headers_of(row))
+    result = subprocess.run(
+        [cc, *flags.split(), "-E", "-x", "c", "-"], input=text, capture_output=True, text=True, check=False,
+    )
+    label = rf'\b{probed(row)}\s*\([^;]*__asm__\s*\(\s*""\s*"{re.escape(row.name)}"\s*\)'
+    return result.returncode == 0 and re.search(label, result.stdout) is not None
 
 
 def spellings(prototype: str) -> list[str]:
@@ -281,6 +300,9 @@ def declared_as_spelled(cc: str, row: CitedRow) -> str | None:
                 [cc, *flags.split(), "-fsyntax-only", "-w", "-x", "c", "-"],
                 input=text, capture_output=True, text=True, check=False,
             )
+            if result.returncode == 0 and row.name in FORTIFIED and not redirected(cc, flags, row):
+                first = first or f"`{probed(row)}` carries no `__asm__` naming `{row.name}`"
+                continue
             if result.returncode == 0:
                 return None
             first = first or (result.stderr.strip().splitlines() or ["no diagnostic"])[0]
