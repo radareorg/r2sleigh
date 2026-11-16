@@ -112,7 +112,7 @@ impl SSAVarNameKind {
 ///
 /// In SSA form, each assignment creates a new version of the variable.
 /// For example, if `RAX` is written twice, we get `RAX_0` and `RAX_1`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "SSAVarFields", into = "SSAVarFields")]
 pub struct SSAVar {
     /// The base name of the variable (e.g., "RAX", "tmp:401334:8", "const:0x42").
@@ -121,8 +121,8 @@ pub struct SSAVar {
     /// across every operation of every function, so a variable points at the
     /// one copy (see [`crate::name`]) and cloning one copies a pointer.
     name: &'static InternedName,
-    /// Exact source bitvector for constants, zero where `is_constant` is
-    /// false so that two non-constants compare equal.
+    /// Exact source bitvector for constants, zero where `flags` holds no
+    /// `CONSTANT` so that two non-constants compare equal.
     ///
     /// This is semantic data. The `name` field is presentation-only and must
     /// not be parsed by proof-bearing consumers to recover a constant value.
@@ -139,9 +139,16 @@ pub struct SSAVar {
     /// This is identity only, not storage authority. Canonical storage remains
     /// in the source-retained graph facts.
     rename_disambiguator: u32,
-    /// Whether `constant_bits` is a constant this variable carries.
-    is_constant: bool,
+    /// `CONSTANT` where `constant_bits` is a constant this variable carries; `LANE` for a lane
+    /// temporary, a register root's projection with no storage of its own. One byte, so identity
+    /// compares and hashes it once (D477).
+    flags: u8,
 }
+
+/// `SSAVar::flags`: the variable carries a constant.
+const CONSTANT: u8 = 1;
+/// `SSAVar::flags`: the variable is a lane temporary (`SSAVar::lane_temp`).
+const LANE: u8 = 2;
 
 /// A variable as it is written down.
 ///
@@ -157,6 +164,8 @@ struct SSAVarFields {
     constant_bits: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     rename_disambiguator: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    lane: bool,
 }
 
 impl From<SSAVarFields> for SSAVar {
@@ -167,7 +176,8 @@ impl From<SSAVarFields> for SSAVar {
             version: fields.version,
             size: fields.size,
             rename_disambiguator: fields.rename_disambiguator,
-            is_constant: fields.constant_bits.is_some(),
+            flags: (u8::from(fields.constant_bits.is_some()) * CONSTANT)
+                | (u8::from(fields.lane) * LANE),
         }
     }
 }
@@ -178,9 +188,28 @@ impl From<SSAVar> for SSAVarFields {
             name: var.name.text().to_owned(),
             version: var.version,
             size: var.size,
-            constant_bits: var.is_constant.then_some(var.constant_bits),
+            constant_bits: var.constant_bits(),
             rename_disambiguator: var.rename_disambiguator,
+            lane: var.is_lane(),
         }
+    }
+}
+
+/// The derived spelling of the two fields `flags` replaced; `lane` only where set.
+impl std::fmt::Debug for SSAVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut fields = f.debug_struct("SSAVar");
+        fields
+            .field("name", &self.name)
+            .field("constant_bits", &self.constant_bits)
+            .field("version", &self.version)
+            .field("size", &self.size)
+            .field("rename_disambiguator", &self.rename_disambiguator)
+            .field("is_constant", &(self.flags & CONSTANT != 0));
+        if self.is_lane() {
+            fields.field("lane", &true);
+        }
+        fields.finish()
     }
 }
 
@@ -188,7 +217,7 @@ impl PartialEq for SSAVar {
     fn eq(&self, other: &Self) -> bool {
         self.version == other.version
             && self.size == other.size
-            && self.is_constant == other.is_constant
+            && self.flags == other.flags
             && self.constant_bits == other.constant_bits
             && self.rename_disambiguator == other.rename_disambiguator
             && std::ptr::eq(self.name, other.name)
@@ -209,7 +238,7 @@ impl Ord for SSAVar {
         names
             .then_with(|| self.version.cmp(&other.version))
             .then_with(|| self.size.cmp(&other.size))
-            .then_with(|| self.is_constant.cmp(&other.is_constant))
+            .then_with(|| self.flags.cmp(&other.flags))
             .then_with(|| self.constant_bits.cmp(&other.constant_bits))
             .then_with(|| self.rename_disambiguator.cmp(&other.rename_disambiguator))
     }
@@ -226,7 +255,7 @@ impl std::hash::Hash for SSAVar {
         self.name.id().hash(state);
         self.version.hash(state);
         self.size.hash(state);
-        self.is_constant.hash(state);
+        self.flags.hash(state);
         self.constant_bits.hash(state);
         self.rename_disambiguator.hash(state);
     }
@@ -234,6 +263,10 @@ impl std::hash::Hash for SSAVar {
 
 const fn is_zero(value: &u32) -> bool {
     *value == 0
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl SSAVar {
@@ -245,7 +278,7 @@ impl SSAVar {
             version,
             size,
             rename_disambiguator: 0,
-            is_constant: false,
+            flags: 0,
         }
     }
 
@@ -261,8 +294,26 @@ impl SSAVar {
             version,
             size,
             rename_disambiguator: 0,
-            is_constant: false,
+            flags: 0,
         }
+    }
+
+    /// The lane temporary `serial` of the operation at `op_idx` of `instruction`: version 1, and a
+    /// lane by the typed bit, never by its `tmp:lane:` spelling.
+    pub(crate) fn lane_temp(instruction: u64, op_idx: usize, serial: u32, size: u32) -> Self {
+        Self {
+            flags: LANE,
+            ..Self::new(
+                format!("tmp:lane:{instruction:x}:{op_idx:x}:{serial:x}"),
+                1,
+                size,
+            )
+        }
+    }
+
+    /// Whether this is a lane temporary (`lane_temp`).
+    pub(crate) const fn is_lane(&self) -> bool {
+        self.flags & LANE != 0
     }
 
     /// Attach the deterministic source-identity projection selected by SSA
@@ -305,7 +356,7 @@ impl SSAVar {
         for word in [
             u64::from(self.version),
             u64::from(self.size),
-            u64::from(self.is_constant),
+            u64::from(self.flags),
             self.constant_bits,
             u64::from(self.rename_disambiguator),
         ] {
@@ -338,7 +389,7 @@ impl SSAVar {
             version: 0,
             size,
             rename_disambiguator: 0,
-            is_constant: true,
+            flags: CONSTANT,
         }
     }
 
@@ -358,7 +409,7 @@ impl SSAVar {
     /// Unlike legacy helpers that parse `name`, this accessor is safe to use
     /// as semantic evidence.
     pub const fn constant_bits(&self) -> Option<u64> {
-        if self.is_constant {
+        if self.flags & CONSTANT != 0 {
             Some(self.constant_bits)
         } else {
             None
@@ -437,6 +488,30 @@ mod tests {
 
         let spoofed_name = SSAVar::new("const:100000001b3", 0, 8);
         assert_eq!(spoofed_name.constant_bits(), None);
+    }
+
+    /// A lane is a typed fact on the value (D477): its spelling proves nothing.
+    #[test]
+    fn a_lane_spelling_is_no_lane_temporary() {
+        let spelled = SSAVar::new("tmp:lane:1:2:3", 1, 4);
+        assert!(!crate::rename::is_lane_temp(&spelled));
+    }
+
+    #[test]
+    fn only_the_lane_constructor_makes_a_lane_temporary() {
+        let spelled = SSAVar::new("tmp:lane:1:2:3", 1, 4);
+        let lane = SSAVar::lane_temp(1, 2, 3, 4);
+        assert_eq!(lane.name(), spelled.name());
+        assert!(crate::rename::is_lane_temp(&lane));
+        assert_ne!(lane, spelled);
+        assert_ne!(lane.cmp(&spelled), std::cmp::Ordering::Equal);
+        assert!(lane.next_version().is_some_and(|next| next.is_lane()));
+        let json = serde_json::to_string(&lane).expect("serialize");
+        assert_eq!(serde_json::from_str::<SSAVar>(&json).expect("parse"), lane);
+        let plain = serde_json::to_string(&spelled).expect("serialize");
+        assert!(!plain.contains("\"lane\":"));
+        // The bit shares the constant flag's byte.
+        assert_eq!(std::mem::size_of::<SSAVar>(), 32);
     }
 
     #[test]

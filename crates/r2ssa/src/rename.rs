@@ -277,11 +277,7 @@ impl RenameContext {
         let (instruction, op_idx) = self.lanes.site;
         let serial = self.lanes.serial;
         self.lanes.serial += 1;
-        SSAVar::new(
-            format!("tmp:lane:{instruction:x}:{op_idx:x}:{serial:x}"),
-            1,
-            size,
-        )
+        SSAVar::lane_temp(instruction, op_idx, serial, size)
     }
 
     /// Start renaming the operation at `(block, index)`, lifted from `instruction`; a new
@@ -939,7 +935,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
 /// Whether a value is a lane temporary: a projection of a register root with
 /// no storage of its own.
 pub(crate) fn is_lane_temp(var: &SSAVar) -> bool {
-    var.name().starts_with("tmp:lane:")
+    var.is_lane()
 }
 
 /// The lane this operation writes is superseded within the instruction: a

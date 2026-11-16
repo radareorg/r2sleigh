@@ -3046,10 +3046,10 @@ mod sccp_tests {
     fn subpiece_folds_through_the_definition_of_its_source() {
         let root = SSAVar::new("RAX", 1, 8);
         let older = SSAVar::new("RAX", 0, 8);
-        let lane = SSAVar::new("tmp:lane:1000:1:0", 1, 4);
-        let byte = SSAVar::new("tmp:lane:1000:2:0", 1, 1);
+        let lane = SSAVar::lane_temp(0x1000, 1, 0, 4);
+        let byte = SSAVar::lane_temp(0x1000, 2, 0, 1);
         let read = |offset: u32, size: u32| SSAOp::Subpiece {
-            dst: SSAVar::new("tmp:lane:1000:3:0", 1, size),
+            dst: SSAVar::lane_temp(0x1000, 3, 0, size),
             src: root.clone(),
             offset,
         };
@@ -3063,7 +3063,7 @@ mod sccp_tests {
         assert_eq!(
             fold(&read(4, 4), &constant),
             Some(SSAOp::Subpiece {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 4),
                 src: SSAVar::constant(0x1122_3344_5566_7788, 8),
                 offset: 4,
             })
@@ -3080,14 +3080,14 @@ mod sccp_tests {
         assert_eq!(
             fold(&read(4, 4), &inserted),
             Some(SSAOp::Copy {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 4),
                 src: lane.clone(),
             })
         );
         assert_eq!(
             fold(&read(5, 1), &inserted),
             Some(SSAOp::Subpiece {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 1),
                 src: lane.clone(),
                 offset: 1,
             })
@@ -3095,7 +3095,7 @@ mod sccp_tests {
         assert_eq!(
             fold(&read(0, 4), &inserted),
             Some(SSAOp::Subpiece {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 4),
                 src: older.clone(),
                 offset: 0,
             })
@@ -3110,14 +3110,14 @@ mod sccp_tests {
         assert_eq!(
             fold(&read(0, 4), &widened),
             Some(SSAOp::Copy {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 4),
                 src: lane.clone(),
             })
         );
         assert_eq!(
             fold(&read(0, 1), &widened),
             Some(SSAOp::Subpiece {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 1),
                 src: lane,
                 offset: 0,
             })
@@ -3133,7 +3133,7 @@ mod sccp_tests {
         assert_eq!(
             fold(&read(2, 1), &sliced),
             Some(SSAOp::Subpiece {
-                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                dst: SSAVar::lane_temp(0x1000, 3, 0, 1),
                 src: SSAVar::new("XMM0", 1, 16),
                 offset: 10,
             })
