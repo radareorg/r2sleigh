@@ -366,6 +366,8 @@ r2dec
 | D64 | `Values` keeps interior mutability: the spelling pass as `&mut self`, `Values` immutable once spelled | no `RefCell` in `render::values` outside the pass | deferred |
 | D68 | A named value is read as a variable only where its definition dominates the read. Open: a later member of the lane's class that dominates the call is not looked for (`low_lanes`); `canonical_source` names are unchecked | `scripts/mutants_d68.py` | built 390c17289; open part |
 | D75 | The structurer respells only what a contract or the CFG licenses. Open: a literal shift count's overshift guard prints a ternary comparing two literals (480 of 2,668 DecBench functions); an exit block outside the body (GCC's `.cold` split, `noreturn_guards_gcc_x64_O2` `first_or_die`) or an arm entered past a shared join refuses as `EdgeMismatch` (r2dec `control.rs`); a role cut at seven or more arguments is tested only in r2dec's unit test; the select ADR is the maintainer's | `scripts/mutants_d75.py`; census read | open |
+| D473 | Rotates and constant multiplies are read back: a shift pair of complementary counts on one value prints as a rotate, and a shift-add chain as `x * k` (`x*13` printed as shifts in the audit) | the audit's 30 functions print no shift-add chain for a constant multiply; equivalence held | open |
+| D474 | A switch prover: an if-chain comparing one value against constants, or a bounded jump table, prints as `switch` with each case value proven | the audit's if-chain switches print as `switch`; no case value invented (AGENTS.md anti-hack list) | open |
 | D76 | A function of about 4,500 sequential checks overflows the stack (`chain4500`) where it should render or refuse by name | a generated 60,000-instruction function exits 0; `control::write` at 10,000 nested arms on a 256 KB stack | open |
 | D79 | One failing guard reverts every guard of its function, since the stage is kept or reverted whole | a unit test where one of two guards fails and the sound one stays | held: until a binary shows a revert |
 | D80 | The control certificate reads no order of plain statements, so a stage moving them across a test is held only by its own tests | the mutant dies with the guard's order tests removed | open |
@@ -489,7 +491,7 @@ The core is ready for output work on the call boundary and control flow (certifi
 2. Core: **P4** (one frame model; `frame_agree.py` reads 0 of 582) and **F2**.2 (byte-granular liveness).
 3. Output: **SD**, D471 (after its ruling), D470 (after F2.2), then **D**.
 
-The rating audit at rebuild-design-8 decides whether frames or structuring go first.
+The blind rating audit at rebuild-design-8 (30 functions against source, Ghidra 12.1.4 and kuna on 4) scored 6.3 of 10: correctness 8.8, readability 3.5, types 6.2; Ghidra and kuna 7.1 on their 4. Frame slots left as `frame + N` cost the most (10 functions), so **P4** goes before **SD**. P4, P7 with D350, D75 and **SD** reach about 6.9; D470 and D471 about 7.2. D473 and D474 lift the readability ceiling past that.
 
 ### Hack ledger
 
@@ -499,6 +501,7 @@ The rating audit at rebuild-design-8 decides whether frames or structuring go fi
 | 2 | The two-round rule in `walk.rs` accepts a self call's writes only if round 2 equals round 1 | open | D414 holds its deletion and is no-go on D23. A write cycle has three owners: `own_rounds`, D441's seed check and `Assumed::writes`; `a_result_cycle_and_a_write_cycle_state_one_answer` holds the last two equal. Proposal, no row: a self call as a one-member `IncomingWrites` component, deleting `own_rounds` |
 | 3 | 5 uncited noreturn rows stay bounds, so callers name no exit | open | D406 |
 | 4 | The six default-deny violations of the call-boundary ruling, section 2 | closed | D276, D264 (twice), D265, D240, D252, each with its test |
+| 5 | Wrong prototypes printed as fact (rating audit, rebuild-design-8): bzip2 `mainQSort3`, a `void` function, declared `double fcn_196b8(...)`; `fcn_b9a6(void)` in one function and `uint64_t fcn_b9a6(r2sleigh_word_u64)` in another; `pure_zero_guard(void)`. 8 wrong facts in 30 functions, all prototype or global types | open | P7, D350 (one declaration per callee) |
 
 ### Judged golden moves
 
@@ -683,4 +686,4 @@ Open questions
 - D211's gate of 5: the remaining functions include proven-irreducible residuals (find O2ni `0xf490` and O2 `0xeaf0`, round 8) and ones needing premises the binaries cannot state (C4, G). Proposed reading, pending the maintainer: every remaining function is a proven-irreducible residual or names its missing premise.
 - Item rows' open clauses (I, P4, P7, SD, T) and unknown-shaped clauses (D158 `elf_stripped`, D76 chain4500) are not yet checked against code.
 
-Next free row: D450 (round 9 claims from D450; D470 to D472 taken out of order on 2026-11-16). Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.
+Next free row: D450 (round 9 claims from D450; D470 to D474 taken out of order on 2026-11-16). Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.
