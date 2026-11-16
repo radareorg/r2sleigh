@@ -797,6 +797,11 @@ fn narrow_result_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> String {
 
 /// `f`'s text under `aa`, and the build recoveries its rendering read.
 fn rendered_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> (String, u64) {
+    rendered_under_aa_at(f, bodies, BASE)
+}
+
+/// The function at `at` rendered under `aa`, and the build recoveries its rendering read.
+fn rendered_under_aa_at(f: &[u8], bodies: &[(u64, &[u8])], at: u64) -> (String, u64) {
     let mut code = [0xcc_u8; 0xa0];
     code[..f.len()].copy_from_slice(f);
     let mut functions = vec![("f", BASE, f.len() as u64)];
@@ -812,7 +817,7 @@ fn rendered_under_aa(f: &[u8], bodies: &[(u64, &[u8])]) -> (String, u64) {
     let mut open = OpenProgram::of(Literal::of_code(code, &functions).importing("ferror"));
     open.analyse_program().expect("it surveys");
     let before = open.analysis_stats().static_prefixes;
-    let rendered = open.rendered(BASE).expect("it renders");
+    let rendered = open.rendered(at).expect("it renders");
     let read = open.analysis_stats().static_prefixes - before;
     (rendered.response.output.into_text(), read)
 }
@@ -841,6 +846,14 @@ fn a_body_the_closed_world_decides_seals_once() {
         decided, undecided,
         "build recoveries, decided against undecided"
     );
+    // Read as `caller`'s callee under `aa` (`Demand::Arity`), the decided `f` is read again in the
+    // closed world: built once and sealed once, two recoveries its undecided twin does not read.
+    let caller = BASE + 0x20;
+    let (_, decided) =
+        rendered_under_aa_at(RETURNS_A_NARROW_CALL, &callers(OVERWRITES_RAX_ONLY), caller);
+    let (_, undecided) =
+        rendered_under_aa_at(RETURNS_A_NARROW_CALL, &callers(LEAVES_RAX_PADDED), caller);
+    assert_eq!(decided, undecided + 2, "build recoveries as a callee");
 }
 
 /// Every way in overwrites RAX before a read, so no bit above `ferror`'s `int` is a residual; XMM0

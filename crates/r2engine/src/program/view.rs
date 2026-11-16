@@ -472,6 +472,10 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.source().container().languages.at(vaddr)
     }
 
+    fn load_base(&self) -> r2abi::statement::LoadBase {
+        self.source().container().posture.load
+    }
+
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.imports
             .stubs

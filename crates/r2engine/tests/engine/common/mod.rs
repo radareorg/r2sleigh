@@ -574,6 +574,12 @@ impl Literal {
         program
     }
 
+    /// The same bytes, the container stating where the loader places them.
+    pub fn loaded(mut self, load: r2abi::statement::LoadBase) -> Self {
+        self.container.posture.load = load;
+        self
+    }
+
     /// A little-endian ARM program: a stated ARM function that calls into
     /// Thumb code nothing states, and a stated veneer that switches to ARM.
     pub fn arm_thumb() -> Self {

@@ -1073,7 +1073,7 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
     }
     let evidence = Evidence::of(machine);
     let (mut walk_steps, mut steps) = (0, 0);
-    let arguments = StackArguments::of(func, machine, stack_pointer, entry_sp);
+    let arguments = StackArguments::of((func, defs), machine, stack_pointer, entry_sp);
     let site = WalkSite::of(func, machine, arguments);
     // No entry stack pointer value: no frame address exists, and every transfer is at entry (D381).
     let Some(entry_sp) = entry_sp else {
@@ -1250,9 +1250,10 @@ struct CallArguments {
 }
 
 impl StackArguments {
-    /// One dominator-tree walk carries the stack pointer to every call: `O(B + ops)`.
+    /// One dominator-tree walk carries the stack pointer to every call: `O(B + ops)`. A call in a
+    /// block a decided branch cuts off reads and writes nothing (D447).
     fn of(
-        func: &SSAFunction,
+        (func, defs): (&SSAFunction, &Definitions),
         machine: &SourceMachineContext,
         stack_pointer: crate::CanonicalStorageId,
         entry_sp: Option<VarId>,
@@ -1277,6 +1278,10 @@ impl StackArguments {
             let children = func.domtree().children(address);
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
+        let blocks = calls.iter().map(|call| call.at.0).collect::<Vec<_>>();
+        let mut cut =
+            crate::optimize::cut::cut(func, defs, machine.load_base(), &blocks).into_iter();
+        calls.retain(|_| !cut.next().unwrap_or(false));
         // Each operation of each block the walk reached went through `SSAOp::transfer`.
         let transfers = crate::call_reads::Transfers::classified();
         Self { calls, transfers }

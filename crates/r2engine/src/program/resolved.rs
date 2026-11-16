@@ -435,11 +435,14 @@ fn outside_resolved<S: Source + 'static>(
     if !resolved.iter().any(|(_, read)| proves(read)) {
         return closed_alone(db, &View::new(db, true), node, alone, demand);
     }
+    let decided = (demand == Demand::Arity && alone.0.interface.is_some())
+        .then(|| crate::native::Program::closed_result(&View::new(db, true), node.0));
     let stated = Stated {
         owners: &resolved,
         assumed: &[],
         world: world_of(demand),
         asks: true,
+        decided,
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -471,6 +474,7 @@ fn closed_alone<S: Source + 'static>(
         assumed: &[],
         world: super::World::Closed,
         asks: true,
+        decided: Some(decided),
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -797,11 +801,14 @@ impl<'m> Cycle<'m> {
         });
         let stated = stated.collect::<Vec<_>>();
         // A member is read in the world of the seal that consumes it, as one read alone is.
+        let decided = (self.demand == Demand::Arity && self.alone[at].0.interface.is_some())
+            .then(|| crate::native::Program::closed_result(view, self.members[at].0));
         let stated = Stated {
             owners: &self.outside[at],
             assumed: &stated,
             world: world_of(self.demand),
             asks: true,
+            decided,
         };
         let read = callee_read(db, self.members[at], stated);
         if stopped(&read) {

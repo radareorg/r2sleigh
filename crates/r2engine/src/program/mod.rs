@@ -751,6 +751,10 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
         self.view().language_at(vaddr)
     }
 
+    fn load_base(&self) -> r2abi::statement::LoadBase {
+        self.view().load_base()
+    }
+
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.view().import_at(vaddr)
     }

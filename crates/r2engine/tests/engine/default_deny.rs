@@ -344,6 +344,43 @@ fn a_frame_address_handed_to_a_tail_is_written_through() {
     hold(vec![failure]);
 }
 
+/// `TAIL_WRITES` with `f: mov eax, K; cmp rax, K; je out; jmp clear; out: ret`: the compare decides
+/// the tail away only in an image linked at its addresses, and no header states this one (D447).
+const DECIDED_TAIL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x48, 0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov qword [rsp+8], 5
+    0xe8, 0x0e, 0x00, 0x00, 0x00, // 100d call 0x1020
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1012 mov rax, [rsp+8]
+    0x48, 0x83, 0xc4, 0x18, // 1017 add rsp, 0x18
+    0xc3, // 101b ret
+    0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1020
+    0xb8, 0x78, 0x56, 0x34, 0x12, // 1020 mov eax, 0x12345678
+    0x48, 0x3d, 0x78, 0x56, 0x34, 0x12, // 1025 cmp rax, 0x12345678
+    0x74, 0x02, // 102b je 0x102f
+    0xeb, 0x01, // 102d jmp 0x1030
+    0xc3, // 102f ret
+    0x48, 0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00, // 1030 mov qword [rsp+0x10], 0
+    0xc3, // 1039 ret
+];
+
+/// An unknown load base cuts no call: the tail a compare of constants decides away still writes.
+#[test]
+fn an_unknown_load_base_cuts_no_tail() {
+    let failure = cell("unknown_load_base", NegativeFact::IncomingWrites, || {
+        let functions = [
+            ("main", BASE, 0x1c),
+            ("f", BASE + 0x20, 0x10),
+            ("clear", BASE + 0x30, 0xa),
+        ];
+        let text = rendered((Literal::of_code(DECIDED_TAIL, &functions), BASE));
+        match returns(&text).iter().any(|line| line.contains('5')) {
+            true => Err(text),
+            false => Ok(()),
+        }
+    });
+    hold(vec![failure]);
+}
+
 /// The bound of the call `before` and a call to `import` make, by the boundary fact.
 fn import_bound(import: &str, before: &[u8]) -> bool {
     let plt = common::plt_then::<0x20>(&[]);

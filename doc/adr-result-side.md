@@ -839,6 +839,11 @@ A closed-world body is sealed once. `Native::resolve` asks `CallBoundary`'s deci
 - Found by Scaling Bench on PR #403: `unproven_returns` Ir grew 2.300 (budget 2.3; rd6 2.280, D432 2.266). Callgrind on `unproven_returns-64` and `-128`: `TrustedSsaArtifact::sealed` ran 1x on rd6 and 2x on the merge, +172 M and +406 M instructions, for a proof-line clause.
 - What is left superlinear in one seal on that dimension is D443's.
 
+The open part, built 2026-11-16 (rd10-load-base): `resolved_alone` asks first too. `Stated.decided` holds the caller's closed decision, asked under the gate `finish` asks it (the demand is `Arity` and the alone read states an interface) by `outside_resolved` and the cycle member read; `closed_alone` passes the decision it already holds. `resolved_alone` builds under it (`construct_first(.., decided)`, `premises_reading(decided.is_some())` for the build and the D376 restatement) and hands `finish` `asked = decided`. `finish` keeps its re-seal where the answers differ: an alone interface does not imply an open one, so that path is the fallback and its output is the old one. The output equals the old second seal through D376's restate-equals-rebuild contract; it is byte-identical on the four timed commands, the generated binaries and the census.
+
+- Gate: the same test, `f` read as `caller`'s callee under `aa`: 3 build recoveries over the undecided twin on the parent, 2 after (one build, one seal).
+- Cost: pumasim `aa; pdd @ 0x3b6b20` 73.795 G to 72.158 G (-2.219%), bash `aa; pdd @ 0x2e630` -0.080%, cold commands 0.000% (contabo `instructions:u`, median of 3).
+
 ## Open questions
 
 1. The register effect is computed on ask or deposited by `SiteFates` ("S31b as built", ruled). pumasim `0x3b6b20` does not meet the note's gate (-0.07 G against -0.08 G, run spread 0.014 G); the next lever is D354.
