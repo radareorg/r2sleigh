@@ -74,14 +74,27 @@ pub struct Container {
 pub struct Posture {
     /// Whether the stack is non-executable: ELF's `PT_GNU_STACK` flags; none without the header.
     pub nx: Option<bool>,
-    /// Position independent: an ELF `ET_DYN`.
-    pub pic: bool,
+    /// Whether the image runs at the addresses its file states; unstated unless an ELF type says.
+    pub load: LoadBase,
     /// ELF's `PT_GNU_RELRO` and whether the dynamic section binds at load; none for other formats.
     pub relro: Option<Relro>,
     /// The dynamic linker `PT_INTERP` names (empty where the header holds no readable path).
     pub interpreter: Option<String>,
     /// No `PT_INTERP` and no `PT_DYNAMIC`: nothing relocates this image but its own start-up.
     pub statically_linked: bool,
+}
+
+/// Where the loader places an image, as its header states it (gABI chapter 5, "Base Address").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LoadBase {
+    /// ELF `ET_EXEC` with no text relocation: "the segments must reside at the virtual addresses
+    /// used to build the executable file".
+    Linked,
+    /// ELF `ET_DYN`: one base address, the same difference for every segment.
+    Slid,
+    /// Nothing the header states: `ET_REL`, a text-relocated `ET_EXEC`, Mach-O, PE.
+    #[default]
+    Unstated,
 }
 
 /// How much of the relocation table is bound and sealed before the program runs.
