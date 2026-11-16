@@ -167,21 +167,26 @@ impl DeclaredSuccessors {
 
     /// Of each source block whose last transfer the source could not follow, the one chunk `cfg`
     /// ends where it ends; `None` where a block is undeclared or no single chunk ends there.
+    /// O((B + C) log C): chunk ends are indexed once, then each source block is one range read.
     pub(crate) fn unresolved_in(&self, blocks: &[R2ILBlock], cfg: &CFG) -> Option<BTreeSet<u64>> {
+        if blocks
+            .iter()
+            .any(|block| !self.by_block.contains_key(&block.addr))
+        {
+            return None;
+        }
+        let ends: BTreeSet<(u64, u64)> = (cfg.blocks())
+            .filter_map(|chunk| Some((chunk.addr.checked_add(u64::from(chunk.size))?, chunk.addr)))
+            .collect();
         let mut chunks = BTreeSet::new();
-        for block in blocks {
-            if !self.by_block.contains_key(&block.addr) {
-                return None;
-            }
-            if !self.unresolved.contains(&block.addr) {
-                continue;
-            }
+        for block in blocks
+            .iter()
+            .filter(|block| self.unresolved.contains(&block.addr))
+        {
             let end = block.addr.checked_add(u64::from(block.size))?;
-            let mut ending = (cfg.block_addrs())
-                .filter(|addr| (block.addr..end).contains(addr))
-                .filter(|addr| {
-                    (cfg.get_block(*addr)).is_some_and(|chunk| addr + u64::from(chunk.size) == end)
-                });
+            let mut ending = ends
+                .range((end, block.addr)..(end, end))
+                .map(|&(_, addr)| addr);
             let (Some(chunk), None) = (ending.next(), ending.next()) else {
                 return None;
             };
