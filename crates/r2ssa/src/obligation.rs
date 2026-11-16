@@ -799,9 +799,7 @@ struct Owed {
 /// certified round trips, and the blocks whose conditional branch sends both arms to one block.
 pub(crate) struct SeedingFacts<'a> {
     pub(crate) private_stack_objects: &'a BTreeSet<crate::ObjectId>,
-    pub(crate) memory_round_trips: &'a crate::dense::Metered<
-        BTreeMap<crate::semantic::StructuredAccessId, crate::semantic::MemoryRoundTripCertificate>,
-    >,
+    pub(crate) memory_round_trips: &'a crate::semantic::MemoryRoundTrips,
     pub(crate) meeting_arms: &'a BTreeSet<u64>,
     /// The compiler-inserted operations, whose inputs no C statement reads through them.
     pub(crate) inserted: crate::dense::IdSet<InstId>,
@@ -810,12 +808,7 @@ pub(crate) struct SeedingFacts<'a> {
 impl<'a> SeedingFacts<'a> {
     pub(crate) const fn new(
         private_stack_objects: &'a BTreeSet<crate::ObjectId>,
-        memory_round_trips: &'a crate::dense::Metered<
-            BTreeMap<
-                crate::semantic::StructuredAccessId,
-                crate::semantic::MemoryRoundTripCertificate,
-            >,
-        >,
+        memory_round_trips: &'a crate::semantic::MemoryRoundTrips,
         meeting_arms: &'a BTreeSet<u64>,
         inserted: crate::dense::IdSet<InstId>,
     ) -> Self {
@@ -949,6 +942,8 @@ impl SemanticObligationInventory {
             }
         }
 
+        // The accesses ascend by id, so the covered ones are a merge (D452).
+        let mut round_trips = seeding.memory_round_trips.cursor();
         for access in structured.memory_accesses.values() {
             if r2il::refusal_evidence::tracing() && graph.inst(access.id.inst).is_none() {
                 r2il::refusal_evidence!(
@@ -992,12 +987,7 @@ impl SemanticObligationInventory {
             // its instruction live whether or not anything reads the value. If
             // something does read the value, that walk reaches the load and
             // annotates it then, which is the whole of what it owes.
-            let round_trip = seeding.memory_round_trips.values().any(|certificate| {
-                certificate.write == access.id
-                    || certificate.read == access.id
-                    || certificate.redundant_reads.contains(&access.id)
-            });
-            if round_trip {
+            if round_trips.covers(access.id) {
                 continue;
             }
             if private_read {
@@ -3789,7 +3779,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &crate::dense::Metered::default(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -3888,7 +3878,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &crate::dense::Metered::default(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4116,7 +4106,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &crate::dense::Metered::default(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4159,7 +4149,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &crate::dense::Metered::default(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4248,7 +4238,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &crate::dense::Metered::default(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4467,7 +4457,11 @@ mod tests {
         let artifact = rmw_round_trip_artifact(slots);
         let visits = here() - before;
         assert_eq!(
-            artifact.certificates().memory_round_trips.len() as u64,
+            artifact
+                .certificates()
+                .memory_round_trips
+                .certificates()
+                .len() as u64,
             slots,
             "one round trip per slot"
         );

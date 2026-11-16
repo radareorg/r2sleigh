@@ -429,7 +429,7 @@ pub struct PreparedFunctionCertificates {
     pub stack_frame_round_trips: BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
     pub stack_frame_round_trip_by_inst: crate::dense::IdMap<InstId, ObjectId>,
     /// Accesses that together leave the object exactly as they found it.
-    pub memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
+    pub memory_round_trips: super::MemoryRoundTrips,
     pub stack_geometry: StackGeometryCertificate,
     pub machine_return_controls: crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
     pub machine_return_control_by_inst: crate::dense::IdMap<InstId, InstId>,
@@ -780,9 +780,7 @@ pub(crate) fn collect_prepared_function_certificates(
     live_out: &crate::liveout::FunctionLiveOut,
     private_objects: &BTreeSet<ObjectId>,
     declared_slots: &DeclaredStackSlots,
-    memory_round_trips: crate::dense::Metered<
-        BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
-    >,
+    memory_round_trips: super::MemoryRoundTrips,
     addresses: &crate::AddressProvenanceFacts,
 ) -> Result<PreparedFunctionCertificates, crate::fixpoint::Exhausted> {
     let Body {
@@ -1280,6 +1278,8 @@ pub(crate) fn collect_prepared_function_certificates(
         &structured.memory_accesses,
     );
     let mut stack_slots: BTreeMap<ObjectId, StackSlotCertificate> = stack_slots;
+    // The accesses ascend by id, so the covered ones are a merge (D452).
+    let mut round_trips = memory_round_trips.cursor();
     // A full-width read of a private slot is the slot's value, whatever store
     // put it there. Requiring one reaching store as well would exclude every
     // variable a loop writes, which is most of them at -O0. A full-width
@@ -1293,11 +1293,7 @@ pub(crate) fn collect_prepared_function_certificates(
         }
         // A round trip's read is the stored value, already answered by the
         // store it reads back; it is not a read of the slot the renderer names.
-        if !access.is_write
-            && memory_round_trips.values().any(|certificate| {
-                certificate.read == access.id || certificate.redundant_reads.contains(&access.id)
-            })
-        {
+        if !access.is_write && round_trips.covers(access.id) {
             continue;
         }
         // An address the machine indexes reads an element, not the slot.
@@ -1359,7 +1355,7 @@ pub(crate) fn collect_prepared_function_certificates(
         renderable_expressions,
         memory_accesses,
         memory_accesses_by_inst,
-        memory_round_trips: memory_round_trips.into_inner(),
+        memory_round_trips,
         stack_slots,
         stack_frame_round_trips,
         stack_frame_round_trip_by_inst,
