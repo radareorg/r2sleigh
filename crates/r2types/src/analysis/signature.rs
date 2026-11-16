@@ -236,12 +236,6 @@ pub(crate) fn inferred_type_is_generic(ty: Option<&CTypeLike>, ptr_bits: u32) ->
 
 fn type_is_generic(ty: &CTypeLike) -> bool {
     let named = |ty: &CTypeLike, names: &[&str]| matches!(ty, CTypeLike::Typedef { name, .. } if names.contains(&name.trim()));
-    let opaque = |ty: &CTypeLike| match ty {
-        CTypeLike::Struct(tag) | CTypeLike::Union(tag) | CTypeLike::Enum(tag) => {
-            type_name_is_opaque_placeholder(tag)
-        }
-        _ => false,
-    };
     match ty {
         CTypeLike::BitVector(_) => true,
         CTypeLike::Pointer(pointee) => {
@@ -251,13 +245,10 @@ fn type_is_generic(ty: &CTypeLike) -> bool {
             };
             matches!(pointee, CTypeLike::Void | CTypeLike::Unknown)
                 || named(pointee, &["char", "signed char", "unsigned char"])
-                || opaque(pointee)
         }
-        ty => {
-            named(
-                ty,
-                &["int", "unsigned", "unsigned int", "long", "unsigned long"],
-            ) || opaque(ty)
-        }
+        ty => named(
+            ty,
+            &["int", "unsigned", "unsigned int", "long", "unsigned long"],
+        ),
     }
 }

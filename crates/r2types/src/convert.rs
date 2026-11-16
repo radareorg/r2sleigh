@@ -322,9 +322,8 @@ pub fn to_c_type_like(arena: &TypeArena, ty: TypeId) -> CTypeLike {
         Type::Array { elem, len, .. } => {
             CTypeLike::Array(Box::new(to_c_type_like(arena, *elem)), *len)
         }
-        Type::Struct(shape) => {
-            CTypeLike::Struct(shape.name.clone().unwrap_or_else(|| "anon".to_string()))
-        }
+        // An empty tag is no C identifier: a shape no declaration names (D482).
+        Type::Struct(shape) => CTypeLike::Struct(shape.name.clone().unwrap_or_default()),
         Type::Function { params, ret, .. } => CTypeLike::Function {
             ret: Box::new(to_c_type_like(arena, *ret)),
             params: params

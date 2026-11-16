@@ -475,9 +475,9 @@ fn transparent_same_width_source(prepared: &SsaArtifact, start: r2ssa::ValueId) 
     None
 }
 
+/// An aggregate no declaration names: its tag is empty, which no C identifier is (D482).
 fn is_unmaterialized_aggregate_name(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    lower.is_empty() || lower == "anon" || lower.starts_with("anon_")
+    name.trim().is_empty()
 }
 
 pub fn materialize_signature_type_like(ty: CTypeLike, ptr_bits: u32) -> CTypeLike {

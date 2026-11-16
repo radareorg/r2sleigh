@@ -232,21 +232,3 @@ pub(crate) fn estimate_type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Op
 pub(crate) fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
     crate::render_signature_type(ty, ptr_bits)
 }
-
-pub(crate) fn type_name_is_opaque_placeholder(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    let stripped = lower
-        .trim_start_matches("struct ")
-        .trim_start_matches("union ")
-        .trim_start_matches("enum ")
-        .trim_end_matches('*')
-        .trim_end();
-    stripped.starts_with("anon_") || stripped.starts_with("type_0x") || lower.contains(" type_0x")
-}
-
-pub(crate) fn is_generated_local_struct_name(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    lower
-        .trim_start_matches("struct ")
-        .starts_with("sla_struct_")
-}

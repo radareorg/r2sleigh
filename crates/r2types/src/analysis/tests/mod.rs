@@ -124,10 +124,6 @@ fn storage_of_every_width_is_a_type_c_spells() {
 
 #[test]
 fn type_name_policy_matches_planner_guard() {
-    assert!(type_name_is_opaque_placeholder("struct type_0x1234 *"));
-    assert!(type_name_is_opaque_placeholder("struct anon_field"));
-    assert!(!type_name_is_opaque_placeholder("struct real_type *"));
-
     let pointer = |ty: CTypeLike| CTypeLike::Pointer(Box::new(ty));
     for generic in [
         pointer(CTypeLike::Void),
@@ -176,4 +172,41 @@ fn semantic_role_summary_set(
         summaries: BTreeMap::from([(root, summary)]),
         diagnostics: Default::default(),
     }
+}
+
+/// A program may call its own structure `anon_cfg`: the spelling makes no placeholder (D482).
+#[test]
+fn a_declared_struct_spelled_like_a_placeholder_keeps_its_type() {
+    let declared = CTypeLike::Pointer(Box::new(CTypeLike::Struct("anon_cfg".to_owned())));
+    assert!(!inferred_type_is_generic(Some(&declared), 64));
+    let current_signature = FunctionSignatureSpec {
+        ret_type: Some(CTypeLike::Void),
+        params: vec![FunctionParamSpec {
+            name: "cfg".to_string(),
+            ty: Some(declared.clone()),
+        }],
+    };
+    let analysis = build_type_analysis(TypeAnalysisInput {
+        ptr_bits: 64,
+        inferred_signature: InferredSignature {
+            function_name: "configure".to_string(),
+            ret_type: Some(CTypeLike::Void),
+            params: vec![InferredSignatureParam {
+                name: "arg1".to_string(),
+                ty: parse_test_type("int64_t", 64),
+            }],
+        },
+        parsed_context: ParsedExternalContext {
+            current_signature: Some(current_signature.clone()),
+            merged_signature: Some(current_signature),
+            ..ParsedExternalContext::default()
+        },
+        local_structs: LocalStructArtifacts::default(),
+        interproc_summary_set: None,
+        diagnostics: TypeAnalysisDiagnostics::default(),
+    });
+    assert_eq!(
+        spelled(&spelled_signature(&analysis).params[0].ty),
+        "struct anon_cfg*"
+    );
 }

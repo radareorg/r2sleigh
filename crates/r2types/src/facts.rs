@@ -650,9 +650,6 @@ pub fn signature_hint_can_replace_existing(
     if crate::signature_infer::signature_types_are_equivalent(existing, hint, ptr_bits) {
         return false;
     }
-    if type_is_generated_local_struct_pointer(existing) && pointer_hint_is_authoritative(hint) {
-        return true;
-    }
     match (existing, hint) {
         (
             CTypeLike::Int {
@@ -748,18 +745,6 @@ pub fn signature_hint_can_replace_existing(
     }
 }
 
-pub fn type_is_generated_local_struct_pointer(ty: &CTypeLike) -> bool {
-    matches!(
-        ty,
-        CTypeLike::Pointer(inner)
-            if matches!(
-                inner.as_ref(),
-                CTypeLike::Struct(name) | CTypeLike::Typedef { name, .. }
-                    if crate::analysis::is_generated_local_struct_name(name)
-            )
-    )
-}
-
 pub fn is_weak_storage_scalar_type(ty: &CTypeLike, ptr_bits: u32) -> bool {
     match crate::word_free(ty) {
         CTypeLike::Int { .. } => true,
@@ -805,22 +790,6 @@ pub fn is_weak_pointer_sized_storage_typedef(name: &str, ptr_bits: u32) -> bool 
                 normalized.as_str(),
                 "int" | "unsigned" | "unsigned int" | "int32_t" | "uint32_t"
             ))
-}
-
-fn pointer_hint_is_authoritative(hint: &CTypeLike) -> bool {
-    let CTypeLike::Pointer(inner) = hint else {
-        return false;
-    };
-    match inner.as_ref() {
-        CTypeLike::Bool
-        | CTypeLike::Int { .. }
-        | CTypeLike::Struct(_)
-        | CTypeLike::Union(_)
-        | CTypeLike::Enum(_)
-        | CTypeLike::Pointer(_) => true,
-        CTypeLike::Typedef { name, ty } => crate::analysis::typedef_resolves(name, ty),
-        _ => false,
-    }
 }
 
 impl FunctionTypeFactsBuilder {
