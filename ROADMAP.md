@@ -504,8 +504,14 @@ Cold pumasim `pdd` falls 1.61% and cold 0pack 0.44% against rebuild-design-7 (D4
 The core is ready for output work on the call boundary and control flow (certification 0 invented, 0 false voids; every scaling dimension linear). Two core items gate readability:
 
 1. D211 stops at its proven-irreducible set; see Open questions.
-2. Core: **P4** (one frame model; `frame_agree.py` reads 0 of 582) and **F2**.2 (byte-granular liveness).
-3. Output: **SD**, D471 (after its ruling), D470 (after F2.2), then **D**.
+2. Names are hints (non-negotiable 6), after the radare2 root-cause audit: D475, D477 and D480 to D489 delete the name-keyed rules, and one Dylint rejects a symbol-name comparison in r2ssa, r2types, r2engine and r2dec so the class cannot return. Hack ledger rows 5 and 6.
+3. Prototypes: **P7** with D350 (one declaration per callee) and D476 (the preserved-register set cited, the cspec's `unaffected` list no longer proof).
+4. D490: the differential gate grades analysis verbs (`afl`, `afb`, `afi`, `afv`, `axt`) against radare2, so each radare2 root-cause class has a measured answer.
+5. Core: **P4** (one frame model; `frame_agree.py` reads 0 of 582) and **F2**.2 (byte-granular liveness).
+6. Output: **SD**, D471 (after its ruling), D470 (after F2.2), D473, D474, then **D**.
+7. The open radare2 classes: **LF** (lift once) and **P8** (strings).
+
+The architecture stands: the audit found no layer to rewrite, and 6 of radare2's 12 root-cause classes are removed at their owner. The order changes because the repeats are correctness defects, and correctness comes before readability.
 
 The blind rating audit at rebuild-design-8 (30 functions against source, Ghidra 12.1.4 and kuna on 4) scored 6.3 of 10: correctness 8.8, readability 3.5, types 6.2; Ghidra and kuna 7.1 on their 4. Frame slots left as `frame + N` cost the most (10 functions), so **P4** goes before **SD**. P4, P7 with D350, D75 and **SD** reach about 6.9; D470 and D471 about 7.2. D473 and D474 lift the readability ceiling past that.
 
@@ -518,6 +524,7 @@ The blind rating audit at rebuild-design-8 (30 functions against source, Ghidra 
 | 3 | 5 uncited noreturn rows stay bounds, so callers name no exit | open | D406 |
 | 4 | The six default-deny violations of the call-boundary ruling, section 2 | closed | D276, D264 (twice), D265, D240, D252, each with its test |
 | 5 | Wrong prototypes printed as fact (rating audit, rebuild-design-8): bzip2 `mainQSort3`, a `void` function, declared `double fcn_196b8(...)`; `fcn_b9a6(void)` in one function and `uint64_t fcn_b9a6(r2sleigh_word_u64)` in another; `pure_zero_guard(void)`. 8 wrong facts in 30 functions, all prototype or global types | open | P7, D350 (one declaration per callee) |
+| 6 | Names decide facts in 9 places (radare2 root-cause audit, 2026-11-16): an uncited noreturn row closes a fallthrough, syscall noreturn by `exit`, `runtime.morestack` by name, arity and type authority by `argN` spellings and word lists, placeholder types by prefix, first type binding wins, a lane read from a `tmp:lane:` prefix | open | D475, D477, D480 to D487, D489; a Dylint once they close |
 
 ### Judged golden moves
 
