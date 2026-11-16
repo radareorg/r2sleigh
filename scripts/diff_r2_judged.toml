@@ -1749,7 +1749,7 @@ r2s = ' basis=stated fde=0x[0-9a-f]+-0x[0-9a-f]+$'
 r2 = '^<missing> refs='
 verdict = "r2s-right"
 upstream = "seed function entries from .eh_frame FDE initial locations: aa analyses only sym.* flags and entry0, and no analysis command reads an FDE"
-reason = "class A: an .eh_frame FDE states a code range that starts a function. ls 0x5c10: objdump --dwarf=frames prints `FDE cie=00000000 pc=00005c10...00005c21`, r2s lists fcn.00005c10 of 17 bytes, radare2 records no reference to it; bash 0x1fa20 (FDE, called twice from main): radare2 records the calls (`refs=CALL:call`) but makes no function, as aa follows no call. 6.2.4 libr/core and libr/anal hold no eh_frame reader"
+reason = "class A: an .eh_frame FDE states a code range that starts a function. ls 0x5c10: objdump --dwarf=frames prints `FDE cie=00000000 pc=00005c10...00005c21`, r2s lists fcn.00005c10 of 17 bytes, radare2 records no reference to it; bash 0x1fa20 (FDE, called twice from main): radare2 records the calls (`refs=CALL:call`) but makes no function, as aa follows no call; bash 0x200d0 (FDE pc=200d0..20234, `55 push rbp`) is reached by get_current_user_info's tail `jmp` (`refs=CODE:jmp`); bash 0x20710 (FDE pc=20710..20756) is handed by read_command's `lea rsi, [0x20710]` (`refs=DATA:lea`); bash 0x1e1bf (FDE pc=1e1bf..1e1c9, `movzx eax, byte [0]; ud2`) is a .cold part, which GCC types STT_FUNC where it keeps the symbol (fedora_32_bin_ls sym.main.cold). 6.2.4 libr/core and libr/anal hold no eh_frame reader"
 
 [[judged]]
 command = "afl"

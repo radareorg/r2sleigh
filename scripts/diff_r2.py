@@ -731,7 +731,9 @@ def sections(lines):
         row, words = cells(header, line), line.split()
         if header and "vaddr" in row and "vsize" in row and row["vsize"] and words[-1].startswith("."):
             perm = next((word for word in words if re.fullmatch(r"[-a-z][-r][-w][-x]", word)), "")
-            found.append((row["vaddr"], row["vsize"], "{}:{}".format(words[-1], perm)))
+            # A section with no permission is not loaded: its vaddr 0 places nothing.
+            if perm != "----":
+                found.append((row["vaddr"], row["vsize"], "{}:{}".format(words[-1], perm)))
     return sorted(found)
 
 
@@ -1322,13 +1324,16 @@ def main():
         print()
 
     if args.upstream:
-        print("radare2 defects (r2s-right with an upstream line), one instance each:")
+        # One idea per line: judgments naming the same upstream line are one entry, their matches summed.
+        ideas = {}
         for judgment in judgments:
             if "upstream" in judgment and "instance" in judgment:
-                binary, command, difference = judgment["instance"]
-                print("  {} ({} matched): {}\n    {} {}".format(
-                    judgment["upstream"], judgment["matched"], judgment["reason"], binary, command))
-                print(spelled(difference))
+                ideas.setdefault(judgment["upstream"], []).append(judgment)
+        print("radare2 defects (r2s-right with an upstream line), one instance each:")
+        for idea, judged in ideas.items():
+            binary, command, difference = judged[0]["instance"]
+            print("  {} ({} matched)\n    {} {}".format(idea, sum(j["matched"] for j in judged), binary, command))
+            print(spelled(difference))
         print()
 
     stale = [judgment for judgment in judgments if judgment["matched"] == 0]
