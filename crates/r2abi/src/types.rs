@@ -563,31 +563,29 @@ impl Refinement {
         let (mut by_position, mut used) = (vec![Vec::new(); self.arity], Vec::new());
         while let Some(splitter) = waiting.pop() {
             queued[splitter as usize] = false;
-            let (from, to) = (self.start[splitter as usize], self.end[splitter as usize]);
-            let members = self.order[from as usize..to as usize].to_vec();
-            for node in members {
-                let parents =
-                    self.parents_from[node as usize]..self.parents_from[node as usize + 1];
-                for (parent, position) in
-                    &self.parents[parents.start as usize..parents.end as usize]
-                {
-                    let parents = &mut by_position[*position as usize];
-                    if parents.is_empty() {
-                        used.push(*position as usize);
-                    }
-                    parents.push(*parent);
-                }
-            }
+            self.gather(splitter, &mut by_position, &mut used);
             for position in used.drain(..) {
-                for parent in std::mem::take(&mut by_position[position]) {
-                    self.mark(parent);
-                }
+                let parents = std::mem::take(&mut by_position[position]);
+                parents.into_iter().for_each(|parent| self.mark(parent));
                 self.split(&mut waiting, &mut queued);
             }
         }
         Classes {
             class: self.class,
             count: self.start.len(),
+        }
+    }
+
+    /// The parents of `splitter`'s members, by the child position that reaches the member.
+    fn gather(&self, splitter: u32, by_position: &mut [Vec<u32>], used: &mut Vec<usize>) {
+        let (from, to) = (self.start[splitter as usize], self.end[splitter as usize]);
+        for node in &self.order[from as usize..to as usize] {
+            let range = self.parents_from[*node as usize]..self.parents_from[*node as usize + 1];
+            for (parent, position) in &self.parents[range.start as usize..range.end as usize] {
+                let parents = &mut by_position[*position as usize];
+                used.extend(parents.is_empty().then_some(*position as usize));
+                parents.push(*parent);
+            }
         }
     }
 
@@ -630,11 +628,10 @@ impl Refinement {
                 false => class as u32,
             };
             queued.push(false);
-            for queue in [smaller].into_iter().chain(queued[class].then_some(fresh)) {
-                if !queued[queue as usize] {
-                    queued[queue as usize] = true;
-                    waiting.push(queue);
-                }
+            let queues = [smaller].into_iter().chain(queued[class].then_some(fresh));
+            for queue in queues.collect::<Vec<_>>() {
+                let newly = !std::mem::replace(&mut queued[queue as usize], true);
+                waiting.extend(newly.then_some(queue));
             }
         }
     }
@@ -960,62 +957,64 @@ mod tests {
     fn the_quotient_is_the_naive_fixpoint() {
         let (mut seed, mut merged) = (0x2545_f491_4f6c_dd1d_u64, 0);
         for _ in 0..300 {
-            let mut graph = TypeGraph::new();
-            let int = int(&mut graph);
-            let size = 2 + draw(&mut seed, 40);
-            let nodes = (0..size).map(|_| graph.reserve()).collect::<Vec<_>>();
-            let pick = |seed: &mut u64| match draw(seed, 5) {
-                0 => int,
-                _ => nodes[draw(seed, size)],
-            };
-            for node in &nodes {
-                let name = ["a", "b"][draw(&mut seed, 2)].to_owned();
-                let ty = match draw(&mut seed, 5) {
-                    0 => Type::Pointer {
-                        target: pick(&mut seed),
-                    },
-                    1 => Type::Typedef {
-                        name,
-                        target: pick(&mut seed),
-                    },
-                    2 => Type::Opaque {
-                        keyword: Keyword::Struct,
-                        tag: name,
-                    },
-                    _ => {
-                        let mut members = Vec::new();
-                        for at in 0..draw(&mut seed, 3) {
-                            members.push(Member {
-                                name: Some(["x", "y"][draw(&mut seed, 2)].to_owned()),
-                                ty: pick(&mut seed),
-                                offset_bits: 64 * at as u64,
-                                bit_size: None,
-                            });
-                        }
-                        let (kind, tag) = (RecordKind::Struct, Some(name));
-                        Type::Record(Record {
-                            kind,
-                            tag,
-                            size_bytes: 24,
-                            members,
-                        })
-                    }
-                };
-                graph.define(*node, ty);
-            }
+            let graph = generated(&mut seed);
             let naive = naive_classes(&graph);
             let index = graph.clone().quotient();
             merged += naive.len() - naive.iter().collect::<BTreeSet<_>>().len();
-            for a in 0..naive.len() {
-                for b in 0..naive.len() {
-                    assert_eq!(naive[a] == naive[b], index[a] == index[b], "{graph:?}");
-                }
-            }
+            let pairs = (0..naive.len()).flat_map(|a| (0..naive.len()).map(move |b| (a, b)));
+            let agree = |(a, b): (usize, usize)| (naive[a] == naive[b]) == (index[a] == index[b]);
+            assert!(pairs.clone().all(agree), "{graph:?}");
         }
-        assert!(
-            merged > 300,
-            "{merged} nodes merged: the graphs exercise merging"
-        );
+        assert!(merged > 300, "{merged} merged: the graphs exercise merging");
+    }
+
+    /// A graph of up to 41 reserved nodes, each a pointer, typedef, opaque tag or record of up to
+    /// two members, naming `int` or any node.
+    fn generated(seed: &mut u64) -> TypeGraph {
+        let mut graph = TypeGraph::new();
+        let int = int(&mut graph);
+        let size = 2 + draw(seed, 40);
+        let nodes = (0..size).map(|_| graph.reserve()).collect::<Vec<_>>();
+        let choices = [vec![int], nodes.clone()].concat();
+        for node in &nodes {
+            let name = ["a", "b"][draw(seed, 2)].to_owned();
+            let ty = match draw(seed, 5) {
+                0 => Type::Pointer {
+                    target: pick(seed, &choices),
+                },
+                1 => Type::Typedef {
+                    name,
+                    target: pick(seed, &choices),
+                },
+                2 => Type::Opaque {
+                    keyword: Keyword::Struct,
+                    tag: name,
+                },
+                _ => Type::Record(Record {
+                    kind: RecordKind::Struct,
+                    tag: Some(name),
+                    size_bytes: 24,
+                    members: (0..draw(seed, 3))
+                        .map(|at| member(seed, at, &choices))
+                        .collect(),
+                }),
+            };
+            graph.define(*node, ty);
+        }
+        graph
+    }
+
+    fn pick(seed: &mut u64, choices: &[TypeId]) -> TypeId {
+        choices[draw(seed, choices.len())]
+    }
+
+    fn member(seed: &mut u64, at: usize, choices: &[TypeId]) -> Member {
+        Member {
+            name: Some(["x", "y"][draw(seed, 2)].to_owned()),
+            ty: pick(seed, choices),
+            offset_bits: 64 * at as u64,
+            bit_size: None,
+        }
     }
 
     /// A xorshift draw below `bound`: the generated graphs are the same on every run.
