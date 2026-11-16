@@ -152,7 +152,6 @@ _ZdaPvm | no row names the header that declares it on `.include=`
 _ZdaPvmSt11align_val_t | no row names the header that declares it on `.include=`
 _ZdaPvj | no row names the header that declares it on `.include=`
 _ZdaPvjSt11align_val_t | no row names the header that declares it on `.include=`
-__cxa_finalize | no row names the header that declares it on `.include=`
 __cxa_guard_acquire | no row names the header that declares it on `.include=`
 __cxa_guard_release | no row names the header that declares it on `.include=`
 __cxa_guard_abort | no row names the header that declares it on `.include=`
