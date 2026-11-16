@@ -333,3 +333,46 @@ func.wcsftime.arg.2=const wchar_t *,format
 func.wcsftime.arg.3=const struct tm *,tp
 func.wcsftime.ret=size_t
 func.wcsftime.include=wchar.h
+
+# setjmp.h, macOS SDK: `typedef int jmp_buf[_JBLEN];` and `typedef int sigjmp_buf[_JBLEN + 1];` on
+# every architecture it defines, and a parameter of array type is a pointer to its element (ISO C17
+# 6.7.6.3p7); `extern int setjmp(jmp_buf);`.
+setjmp=func
+func.setjmp.args=1
+func.setjmp.arg.0=int *,env
+func.setjmp.ret=int
+func.setjmp.include=setjmp.h
+
+# setjmp.h, macOS SDK: `int _setjmp(jmp_buf);`.
+_setjmp=func
+func._setjmp.args=1
+func._setjmp.arg.0=int *,env
+func._setjmp.ret=int
+func._setjmp.include=setjmp.h
+
+# setjmp.h, macOS SDK: `extern void longjmp(jmp_buf, int) __dead2;`.
+longjmp=func
+func.longjmp.args=2
+func.longjmp.arg.0=int *,env
+func.longjmp.arg.1=int,val
+func.longjmp.ret=void
+func.longjmp.include=setjmp.h
+func.longjmp.noreturn=true
+
+# setjmp.h, macOS SDK: `void _longjmp(jmp_buf, int) __dead2;`.
+_longjmp=func
+func._longjmp.args=2
+func._longjmp.arg.0=int *,env
+func._longjmp.arg.1=int,val
+func._longjmp.ret=void
+func._longjmp.include=setjmp.h
+func._longjmp.noreturn=true
+
+# setjmp.h, macOS SDK: `void siglongjmp(sigjmp_buf, int) __dead2;`.
+siglongjmp=func
+func.siglongjmp.args=2
+func.siglongjmp.arg.0=int *,env
+func.siglongjmp.arg.1=int,val
+func.siglongjmp.ret=void
+func.siglongjmp.include=setjmp.h
+func.siglongjmp.noreturn=true

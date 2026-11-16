@@ -38,3 +38,46 @@ func.__libc_start_main.arg.5=func,ldso_dummy
 func.__libc_start_main.noreturn=true
 func.__libc_start_main.ret=int
 func.__libc_start_main.cite=src/env/__libc_start_main.c: int __libc_start_main(int (*main)(int,char **,char **), int argc, char **argv, void (*init_dummy)(), void(*fini_dummy)(), void(*ldso_dummy)())
+
+# musl <setjmp.h> (v1.2.5) lines 12-16: `typedef struct __jmp_buf_tag { ... } jmp_buf[1];`, a pointer to
+# its element as a parameter (ISO C17 6.7.6.3p7); line 38: `int setjmp (jmp_buf) __setjmp_attr;`.
+setjmp=func
+func.setjmp.args=1
+func.setjmp.arg.0=struct __jmp_buf_tag *,env
+func.setjmp.ret=int
+func.setjmp.include=setjmp.h
+
+# musl <setjmp.h> (v1.2.5) line 34: `int _setjmp (jmp_buf) __setjmp_attr;`.
+_setjmp=func
+func._setjmp.args=1
+func._setjmp.arg.0=struct __jmp_buf_tag *,env
+func._setjmp.ret=int
+func._setjmp.include=setjmp.h
+
+# musl <setjmp.h> (v1.2.5) line 39: `_Noreturn void longjmp (jmp_buf, int);`.
+longjmp=func
+func.longjmp.args=2
+func.longjmp.arg.0=struct __jmp_buf_tag *,env
+func.longjmp.arg.1=int,val
+func.longjmp.ret=void
+func.longjmp.include=setjmp.h
+func.longjmp.noreturn=true
+
+# musl <setjmp.h> (v1.2.5) line 35: `_Noreturn void _longjmp (jmp_buf, int);`.
+_longjmp=func
+func._longjmp.args=2
+func._longjmp.arg.0=struct __jmp_buf_tag *,env
+func._longjmp.arg.1=int,val
+func._longjmp.ret=void
+func._longjmp.include=setjmp.h
+func._longjmp.noreturn=true
+
+# musl <setjmp.h> (v1.2.5) lines 27 and 29: `typedef jmp_buf sigjmp_buf;` and
+# `_Noreturn void siglongjmp (sigjmp_buf, int);`.
+siglongjmp=func
+func.siglongjmp.args=2
+func.siglongjmp.arg.0=struct __jmp_buf_tag *,env
+func.siglongjmp.arg.1=int,val
+func.siglongjmp.ret=void
+func.siglongjmp.include=setjmp.h
+func.siglongjmp.noreturn=true
