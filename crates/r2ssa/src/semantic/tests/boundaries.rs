@@ -70,7 +70,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
         artifact.live_out(),
         &BTreeSet::new(),
         &super::super::DeclaredStackSlots::default(),
-        BTreeMap::new(),
+        crate::dense::Metered::default(),
         &Default::default(),
     )
     .expect("settles");
@@ -126,7 +126,7 @@ fn stack_helpers_require_exact_ram_source_fact_object_and_memory_location() {
         artifact.live_out(),
         &BTreeSet::new(),
         &super::super::DeclaredStackSlots::default(),
-        BTreeMap::new(),
+        crate::dense::Metered::default(),
         &Default::default(),
     )
     .expect("settles");

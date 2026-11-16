@@ -399,7 +399,8 @@ impl PreparedFunctionFacts {
         // Before the obligations, because whether an access is a statement at
         // all depends on it: a round trip leaves the object as it found it, so
         // neither half is an observable effect.
-        let memory_round_trips = collect_memory_round_trips(graph, &structured);
+        let memory_round_trips =
+            crate::dense::Metered::from(collect_memory_round_trips(graph, &structured));
         let obligations = SemanticObligationInventory::collect(
             graph,
             &structured,

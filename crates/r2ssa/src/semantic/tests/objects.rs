@@ -561,7 +561,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         allocated.live_out(),
         &BTreeSet::new(),
         &super::super::DeclaredStackSlots::default(),
-        BTreeMap::new(),
+        crate::dense::Metered::default(),
         &Default::default(),
     )
     .expect("settles");
@@ -608,7 +608,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
         allocated.live_out(),
         &BTreeSet::new(),
         &super::super::DeclaredStackSlots::default(),
-        BTreeMap::new(),
+        crate::dense::Metered::default(),
         &Default::default(),
     )
     .expect("settles");

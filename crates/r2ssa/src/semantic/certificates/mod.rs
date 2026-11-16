@@ -780,7 +780,9 @@ pub(crate) fn collect_prepared_function_certificates(
     live_out: &crate::liveout::FunctionLiveOut,
     private_objects: &BTreeSet<ObjectId>,
     declared_slots: &DeclaredStackSlots,
-    memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
+    memory_round_trips: crate::dense::Metered<
+        BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
+    >,
     addresses: &crate::AddressProvenanceFacts,
 ) -> Result<PreparedFunctionCertificates, crate::fixpoint::Exhausted> {
     let Body {
@@ -1357,7 +1359,7 @@ pub(crate) fn collect_prepared_function_certificates(
         renderable_expressions,
         memory_accesses,
         memory_accesses_by_inst,
-        memory_round_trips,
+        memory_round_trips: memory_round_trips.into_inner(),
         stack_slots,
         stack_frame_round_trips,
         stack_frame_round_trip_by_inst,
