@@ -623,9 +623,7 @@ fn named(
         }
         _ => return None,
     };
-    let name = (identity.display_name.as_deref())
-        .or(identity.normalized_name.as_deref())
-        .or(identity.raw_name.as_deref())?;
+    let name = (identity.display_name.as_deref()).or(identity.raw_name.as_deref())?;
     Some((crate::ast::c_identifier(name), kind))
 }
 

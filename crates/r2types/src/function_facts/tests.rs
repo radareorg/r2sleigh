@@ -463,6 +463,7 @@ fn exact_source_return_type_preserves_signed_i32_with_matching_certificate() {
             signedness: crate::Signedness::Signed,
         }),
         params: Vec::new(),
+        basis: crate::SignatureBasis::Inferred,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(signature.clone()),
@@ -673,37 +674,6 @@ fn test_control_domain() -> r2ssa::ControlDomain {
         guards: Vec::new(),
         loops: Vec::new(),
         complete: true,
-    }
-}
-
-fn test_render_with_stack_slots<const N: usize>(
-    slots: [(r2ssa::ObjectId, r2ssa::StackAddressBase, i64); N],
-) -> FunctionRenderFacts {
-    FunctionRenderFacts {
-        certified_entities: slots
-            .into_iter()
-            .map(|(object, base, offset)| {
-                let id = r2ssa::SemanticId::stack_slot(object);
-                (
-                    id,
-                    CertifiedEntity::StackSlot {
-                        id,
-                        object,
-                        base,
-                        offset,
-                        size: None,
-                        array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
-                        source_slot: None,
-                        role: None.map(|slot: r2ssa::SourceStackSlotSpec| slot.role()),
-                        reload_values: BTreeSet::new(),
-                        stored_values: BTreeSet::new(),
-                        callee_allocation: None,
-                        ty: None,
-                    },
-                )
-            })
-            .collect(),
-        ..FunctionRenderFacts::default()
     }
 }
 
@@ -1699,12 +1669,13 @@ fn prepared_render_facts_certify_params_stack_memory_and_returns_by_semantic_id(
             signedness: crate::Signedness::Unsigned,
         }),
         params: vec![FunctionParamSpec {
-            name: "buffer".to_string(),
+            name: Some("buffer".to_string()),
             ty: Some(CTypeLike::Int {
                 bits: 64,
                 signedness: crate::Signedness::Unsigned,
             }),
         }],
+        basis: crate::SignatureBasis::Declared,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(signature.clone()),
@@ -2344,47 +2315,11 @@ fn memory_access_lookup_requires_exact_address_space() {
 }
 
 #[test]
-fn function_facts_authorizes_recovered_stack_owner_only_by_exact_object_offset_and_name() {
-    let object = r2ssa::ObjectId(21);
-    let facts = FunctionFacts::default().with_render(test_render_with_stack_slots([(
-        object,
-        r2ssa::StackAddressBase::FramePointer,
-        -4,
-    )]));
-
-    let authorization = facts
-        .authorized_recovered_stack_slot_owner_render(object, -4, "i")
-        .expect("a recovered loop scalar with exact object and offset should authorize");
-    assert_eq!(authorization.object, object);
-    assert_eq!(authorization.offset, -4);
-    assert_eq!(authorization.name, "i");
-    assert!(
-        facts
-            .authorized_recovered_stack_slot_owner_render(r2ssa::ObjectId(22), -4, "i")
-            .is_none(),
-        "wrong object must not authorize recovered stack owner rendering"
-    );
-    assert!(
-        facts
-            .authorized_recovered_stack_slot_owner_render(object, 4, "i")
-            .is_none(),
-        "wrong offset must not authorize recovered stack owner rendering"
-    );
-    for placeholder in ["fake_stack_slot", "local_4", "var_4h", "stack_8"] {
-        assert!(
-            facts
-                .authorized_recovered_stack_slot_owner_render(object, -4, placeholder)
-                .is_none(),
-            "placeholder name {placeholder} must not authorize recovered stack owner rendering"
-        );
-    }
-}
-
-#[test]
 fn decompile_type_override_requires_render_authorized_signature() {
     let base_signature = crate::FunctionSignatureSpec {
         ret_type: Some(crate::CTypeLike::Void),
         params: Vec::new(),
+        basis: crate::SignatureBasis::Inferred,
     };
     let override_signature = crate::FunctionSignatureSpec {
         ret_type: Some(crate::CTypeLike::Int {
@@ -2392,12 +2327,13 @@ fn decompile_type_override_requires_render_authorized_signature() {
             signedness: crate::Signedness::Unsigned,
         }),
         params: vec![crate::FunctionParamSpec {
-            name: "buf".to_string(),
+            name: Some("buf".to_string()),
             ty: Some(crate::CTypeLike::Pointer(Box::new(crate::CTypeLike::Int {
                 bits: 8,
                 signedness: crate::Signedness::Unsigned,
             }))),
         }],
+        basis: crate::SignatureBasis::Declared,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(base_signature.clone()),
@@ -2701,9 +2637,10 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
     let signature = FunctionSignatureSpec {
         ret_type: Some(CTypeLike::uint(32)),
         params: vec![FunctionParamSpec {
-            name: "arg1".to_string(),
+            name: None,
             ty: Some(CTypeLike::uint(64)),
         }],
+        basis: crate::SignatureBasis::Inferred,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(signature.clone()),

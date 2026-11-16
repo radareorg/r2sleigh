@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::ast::{CFunction, CStmt};
-use crate::codegen::sanitize_comment_text_keeping;
+use crate::codegen::escape_comment_text;
 
 /// The proof line's columns that appear only when they are not zero, in reading order.
 fn proof_columns(
@@ -241,13 +241,7 @@ pub(crate) fn note_unproven_constructs(
             "; {radare2_local_names} {noun} supplied by the source"
         );
     }
-    // The names are identifiers the body declares, so the sanitizer keeps them.
-    let text = {
-        let symbols = func.symbols.borrow();
-        sanitize_comment_text_keeping(&format!("r2dec proof: {detail}"), |token| {
-            symbols.by_name(token).is_some()
-        })
-    };
+    let text = escape_comment_text(&format!("r2dec proof: {detail}"));
     func.body.insert(0, CStmt::comment(text));
 }
 

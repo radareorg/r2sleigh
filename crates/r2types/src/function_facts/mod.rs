@@ -462,25 +462,6 @@ impl FunctionRenderFacts {
             .filter_map(CertifiedEffect::return_fact)
     }
 
-    pub fn stack_slot(
-        &self,
-        object: r2ssa::ObjectId,
-    ) -> Option<(r2ssa::StackAddressBase, i64, Option<u32>)> {
-        match self
-            .certified_entities
-            .get(&r2ssa::SemanticId::stack_slot(object))?
-        {
-            CertifiedEntity::StackSlot {
-                base, offset, size, ..
-            } => Some((*base, *offset, *size)),
-            CertifiedEntity::Parameter { .. } | CertifiedEntity::LoopCarrier { .. } => None,
-        }
-    }
-
-    pub fn stack_slot_offset(&self, object: r2ssa::ObjectId) -> Option<i64> {
-        self.stack_slot(object).map(|(_, offset, _)| offset)
-    }
-
     pub fn stack_slots(
         &self,
     ) -> impl Iterator<Item = (r2ssa::ObjectId, r2ssa::StackAddressBase, i64, Option<u32>)> + '_
@@ -1627,8 +1608,7 @@ impl FunctionFacts {
     pub fn parameter_name(&self, slot: usize) -> String {
         (self.type_facts().render_authorized_signature())
             .and_then(|signature| signature.params.get(slot))
-            .map(|parameter| parameter.name.as_str())
-            .filter(|name| !crate::is_generic_arg_name(name))
+            .and_then(|parameter| parameter.name.as_deref())
             .map_or_else(|| self.display_names.parameter_name(slot), str::to_owned)
     }
 
@@ -1647,27 +1627,6 @@ impl FunctionFacts {
             .as_ref()?
             .get(userop as usize)
             .map(String::as_str)
-    }
-
-    pub fn authorized_recovered_stack_slot_owner_render(
-        &self,
-        object: r2ssa::ObjectId,
-        offset: i64,
-        name: &str,
-    ) -> Option<StackSlotOwnerRenderAuthorization> {
-        let name = name.trim();
-        if !recovered_stack_owner_name_is_renderable(name) {
-            return None;
-        }
-        let render_offset = self.render.stack_slot_offset(object)?;
-        if render_offset != offset {
-            return None;
-        }
-        Some(StackSlotOwnerRenderAuthorization {
-            object,
-            offset,
-            name: name.to_string(),
-        })
     }
 
     fn set_decompile_route(&mut self, route: Option<DecompileRouteFacts>) {
@@ -2320,8 +2279,7 @@ impl FunctionFacts {
             let name = names
                 .as_ref()
                 .and_then(|names| names.get(index).cloned())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| r2source::positional_parameter_name(index));
+                .flatten();
             params.push(crate::FunctionParamSpec { name, ty: Some(ty) });
         }
         let ret_type = match interface.return_kind() {
@@ -2341,9 +2299,15 @@ impl FunctionFacts {
             );
             return false;
         };
+        // The interface states the arity where a declaration states its types (D480).
+        let basis = match interface.types_are_declared() && !params.is_empty() {
+            true => crate::SignatureBasis::Declared,
+            false => crate::SignatureBasis::Inferred,
+        };
         let signature = crate::FunctionSignatureSpec {
             ret_type: Some(ret_type),
             params,
+            basis,
         };
         let Some(certificate) = crate::SignatureCertificate::from_signature(
             &signature,

@@ -18,8 +18,8 @@ pub use input::RenderInput;
 
 use crate::ast::{CExpr, CFunction, CStmt, CType, RenderObservationId};
 use crate::codegen::{
-    CodeGenConfig, CodeGenerator, EmissionReadyFunction, prepare_function_for_emission,
-    sanitize_comment_text,
+    CodeGenConfig, CodeGenerator, EmissionReadyFunction, escape_comment_text,
+    prepare_function_for_emission,
 };
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
@@ -492,7 +492,7 @@ pub(crate) fn import_stub_declaration(stub: &r2types::ImportStub) -> EmissionRea
          has no body of its own."
     );
     let mut function = CFunction::new(name.clone(), signature.return_type.clone())
-        .as_declaration_only(sanitize_comment_text(&reason));
+        .as_declaration_only(escape_comment_text(&reason));
     function.externs = vec![crate::ast::CExternDecl {
         name,
         ret_type: signature.return_type.clone(),
@@ -510,7 +510,7 @@ pub(crate) fn residual_function_for_render_boundary(func_name: &str, reason: &st
         .as_declaration_only(format!(
             "r2dec refused {}: {}",
             crate::ast::c_identifier(func_name),
-            sanitize_comment_text(reason)
+            escape_comment_text(reason)
         ))
 }
 
