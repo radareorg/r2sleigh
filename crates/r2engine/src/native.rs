@@ -1437,6 +1437,9 @@ pub(crate) struct Stated<'a> {
     /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
     /// (D376); an alone read (`CalleeReads`) asks none, so a statement reads no statement.
     pub(crate) asks: bool,
+    /// The closed decision the caller asked before the build, under the gate `finish` asks it:
+    /// `None` where it was not asked (D442).
+    pub(crate) decided: Option<Option<r2source::SourceClosedDecision>>,
 }
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md):
@@ -1466,12 +1469,15 @@ fn resolved_alone(
         false => Unreadable::NotPrepared,
     };
     let declared_root = native.declaration(address);
+    // The caller's closed decision, asked before the first build, so a decided body seals once (D442).
+    let asked = stated.decided;
+    let decided = asked.flatten();
     let mut construction =
-        (native.construct_first(walked, &imports, &declared_root)).map_err(unreadable)?;
+        (native.construct_first(walked, &imports, &declared_root, decided)).map_err(unreadable)?;
     if stated.asks {
         let asked = construction.unstated_rewriting_callees();
         if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
-            let premises = premises_reading(false);
+            let premises = premises_reading(decided.is_some());
             let restated =
                 native.restate_against(&walked.root, construction, (&imports, &premises));
             construction = restated.map_err(unreadable)?;
@@ -1482,7 +1488,7 @@ fn resolved_alone(
         entry: address,
         declared_root,
         seal: seal.map_err(|why| unreadable(NativeRefusal::of_preparation(why)))?,
-        asked: None,
+        asked,
     };
     let finished = native.finish(walked, &imports, stated.world, first);
     finished
@@ -1598,7 +1604,7 @@ pub(crate) fn callee_built(
         let targets = reached(&walked.root.body, native.program);
         declare_imports(&native, target, &targets, ptr_bits, &mut imports);
         let declared_root = native.declaration(address);
-        let construction = native.construct_first(walked, &imports, &declared_root)?;
+        let construction = native.construct_first(walked, &imports, &declared_root, None)?;
         Ok(Built {
             address,
             construction,
@@ -2334,15 +2340,17 @@ impl<'a> Native<'a> {
         walk: &Walk,
         callees: &Callees,
         declared_root: &Restatement,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
-        let capture = Self::first_capture(walk, declared_root, None);
+        let closed = closed_result.is_some();
+        let capture = Self::first_capture(walk, declared_root, closed_result);
         let (lifted, evidence) = self.lifted(&walk.root, callees, capture)?;
         TrustedSsaArtifact::construct_with_callee_interfaces(
             lifted,
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(false),
+            &premises_reading(closed),
         )
         .map_err(NativeRefusal::of_preparation)
     }
