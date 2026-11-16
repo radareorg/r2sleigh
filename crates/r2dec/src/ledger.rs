@@ -244,9 +244,6 @@ pub struct ObligationLedger {
     /// Calls the body ends at where only a walk found the callee reaching no return.
     #[serde(default)]
     unproven_exits: usize,
-    /// Calls the body ends at where only an uncited row says the callee never returns (D395).
-    #[serde(default)]
-    uncited_exits: usize,
     /// What the result's closed-world decision takes for granted (`SourceClosedDecision`).
     #[serde(default)]
     result_premises: BTreeSet<r2source::Premise>,
@@ -268,9 +265,6 @@ struct LedgerColumns {
     /// Calls the body ends at where only a walk found the callee reaching no return.
     #[serde(default)]
     unproven_exits: usize,
-    /// Calls the body ends at where only an uncited row says the callee never returns (D395).
-    #[serde(default)]
-    uncited_exits: usize,
     #[serde(default)]
     result_premises: BTreeSet<r2source::Premise>,
 }
@@ -324,7 +318,6 @@ impl TryFrom<LedgerColumns> for ObligationLedger {
             exits: columns.exits,
             exit_premises: columns.exit_premises,
             unproven_exits: columns.unproven_exits,
-            uncited_exits: columns.uncited_exits,
             result_premises: columns.result_premises,
         })
     }
@@ -358,7 +351,6 @@ impl ObligationLedger {
             exits: 0,
             exit_premises: BTreeSet::new(),
             unproven_exits: 0,
-            uncited_exits: 0,
             result_premises: BTreeSet::new(),
         }
     }
@@ -399,7 +391,6 @@ impl ObligationLedger {
             exits: exits.assumed(),
             exit_premises: exits.premises(),
             unproven_exits: exits.bounded_by(r2source::NeverProof::NoReturnReached),
-            uncited_exits: exits.bounded_by(r2source::NeverProof::Uncited),
             ..self
         }
     }
@@ -412,11 +403,6 @@ impl ObligationLedger {
     /// How many calls the body ends at where only a walk found no return.
     pub const fn unproven_exits(&self) -> usize {
         self.unproven_exits
-    }
-
-    /// How many calls the body ends at where only an uncited row says the callee never returns.
-    pub const fn uncited_exits(&self) -> usize {
-        self.uncited_exits
     }
 
     /// Every obligation, spelled, in the order the spelling reads.

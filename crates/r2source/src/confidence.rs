@@ -224,8 +224,6 @@ pub enum NeverProof {
     Declared,
     /// Every end of the body is a transfer a statement or a `Composed` callee proves halts (D229).
     Composed,
-    /// Only radare2's uncited table states it: a bound, never proof (D395).
-    Uncited,
     /// No walk of the body reached a return: a lower bound on what it does, never proof.
     NoReturnReached,
 }
@@ -236,7 +234,6 @@ impl NeverProof {
         match self {
             Self::Declared => "declared",
             Self::Composed => "composed",
-            Self::Uncited => "uncited row",
             Self::NoReturnReached => "no return reached",
         }
     }
@@ -279,11 +276,6 @@ impl Never {
         })
     }
 
-    /// radare2's uncited row: a bound, never proof (D395).
-    pub const fn uncited() -> Self {
-        Self::bound(NeverProof::Uncited)
-    }
-
     /// No walk of the body reached a return: a bound, never proof.
     pub const fn unreached() -> Self {
         Self::bound(NeverProof::NoReturnReached)
@@ -308,7 +300,7 @@ impl Never {
     pub const fn proves(&self) -> Option<&BTreeSet<Premise>> {
         match self.proof {
             NeverProof::Declared | NeverProof::Composed => Some(&self.premises),
-            NeverProof::Uncited | NeverProof::NoReturnReached => None,
+            NeverProof::NoReturnReached => None,
         }
     }
 
@@ -542,7 +534,7 @@ mod never_tests {
         let go = Never::cited(Citation::runtime("runtime.gopanic").expect("the model names it"));
         assert_eq!(go.premises(), &[Premise::GoRuntime].into());
         assert_eq!(Never::composed([]), None);
-        assert_eq!(Never::composed([&go, &Never::uncited()]), None);
+        assert_eq!(Never::composed([&go, &Never::unreached()]), None);
         assert_eq!(Never::composed([&Never::unreached()]), None);
         let composed = Never::composed([&go, &go]).expect("every end proves");
         assert_eq!(composed.proof(), NeverProof::Composed);
