@@ -58,6 +58,7 @@ impl SSAFunction {
             entry_lanes: crate::dense::IdMap::default(),
             written: crate::lanes::Written::default(),
             exhausted: None,
+            unresolved_transfers: None,
         }
     }
 
@@ -191,6 +192,8 @@ impl SSAFunction {
         let abi_carriers = questions.construction_carriers();
 
         let cfg = lifted_cfg(blocks, declared_successors)?;
+        let unresolved_transfers =
+            declared_successors.and_then(|declared| declared.unresolved_in(blocks, &cfg));
         // The same phase report the semantic collector gives, for the half of
         // a decompile's bytes that are already held before the collector runs.
         // Construction is three passes over the same body and they do not cost
@@ -221,6 +224,7 @@ impl SSAFunction {
         )?;
         phase("raw", func.num_blocks());
         func.call_preserved_carriers = call_preserved_carriers;
+        func.unresolved_transfers = unresolved_transfers;
         func.callee_passes = Arc::new(callees.preserved().clone());
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
@@ -621,6 +625,7 @@ impl SSAFunction {
             entry_lanes: crate::dense::IdMap::default(),
             written: crate::lanes::Written::default(),
             exhausted: None,
+            unresolved_transfers: None,
         };
         function.zero_scratch_insert_roots(abi_carriers);
         // The validator answers with a typed integrity error naming the block

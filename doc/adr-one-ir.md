@@ -266,3 +266,55 @@ reaches the load.
 - Test: `reaching_rewrites_with_reloads_is_their_least_path_solution`, 300
   random graphs with a seed and reloads, against the path search iterated from
   no unset reload to its fixpoint.
+
+## D447 as built: a call a decided branch cuts off (2026-11-16)
+
+Fact: a call or tail in a block that a branch over constants cuts off reads and
+writes nothing. Owner: r2ssa `StackArguments::of`, which drops each such call
+before the frame walk reads its areas; the evaluator is
+`crate::optimize::cut`, a child of the SCCP module so it calls SCCP's own
+transfer (`eval_const_op`).
+
+- Quantity: the blocks of the walk's calls.
+- `cut(b) = cut(idom b) or edge_cut(idom b, b)`, one answer per block, by its
+  position in `SSAFunction::blocks`, evaluated up the dominator chain from each
+  call block. `edge_cut(d, b)`: `d` ends in a two-way branch with distinct
+  arms, `b` is one arm, `d` is `b`'s only predecessor, and `d`'s condition is
+  a constant choosing the other arm.
+- Values: backward over `frame_address::Definitions` (the walk's own
+  definitions index, dense by `VarId`), each variable expanded once on an
+  explicit stack (unseen, busy, known). A merge is a constant only when every
+  input is the same constant, pessimistic where SCCP is optimistic, so every
+  cut is an SCCP cut. A load, call, `CallOther`, `CpuId`, `New`, a busy
+  variable (a cycle) and a version-0 input have no value. The value vector is
+  allocated at the first condition evaluated.
+- Bound: `O(calls + blocks on the call blocks' dominator chains + slice
+  operations)`; each block and each variable is visited once. No depth guard,
+  no cap.
+- Default-deny, each refusing every cut of the body:
+  1. `SourceMachineContext::load_base()` other than `LoadBase::Linked` (D451).
+     Under `Linked` the slide is 0, so a constant is the address it names
+     (gABI chapter 5, "Base Address", quoted on `LoadBase::Linked`). Under
+     `Slid` an image-relative constant compared with an absolute one is no
+     constant; `Unstated` states nothing.
+  2. A `CallOther` without output or an `Unimplemented` anywhere (SCCP's
+     `after_unmodelled_effects`): an unstated effect may write what a
+     condition read.
+  3. No declaration of every block (`SSAFunction::unresolved_transfers` is
+     `None`), or a kept block whose last transfer the source could not
+     follow (`DeclaredSuccessors::unresolved_in`: the one chunk ending where
+     each unresolved source block ends): an edge the graph lacks may enter a
+     cut block.
+- Tests: `load_base::a_tail_behind_a_compare_of_equal_constants_bounds_no_write`
+  (red on e3ee40d1b), five stays-a-write tests (`Slid`, `Unstated`, a loaded
+  condition, a kept unresolved transfer, `syscall`), `default_deny`'s row
+  "unknown load base", and `optimize::cut::tests` for each refusal. With
+  guard 1 removed three engine tests go red, with guard 2 one; guard 3 is
+  bitten only by the r2ssa test, since a kept unresolved transfer in a
+  rendered callee already writes the caller's slot.
+- Records: 8 census goldens return to master 500216e6d, proof-line obligation
+  counts only. On x86-64 the cut is in the callee `deregister_tm_clones`
+  (`mov eax, __TMC_END__; cmp rax, __TMC_END__; je; ...; jmp rax`), so
+  `__do_global_dtors_aux` reads one obligation fewer; on aarch64 zig's
+  `__libc_csu_init` compares two `adr` of one address (`subs; b.eq`) and the
+  `blr` loop is cut. DecBench's 17 binaries are `ET_DYN`, so none moves.

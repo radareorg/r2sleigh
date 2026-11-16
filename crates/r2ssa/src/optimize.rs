@@ -15,6 +15,8 @@ use crate::{
     SourceCarrierKind, SourceFunctionInterface, SourceFunctionReturn, SourceSite, SourceTypeKind,
 };
 
+pub(crate) mod cut;
+
 /// How far sparse conditional constants reach into the function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SccpMode {

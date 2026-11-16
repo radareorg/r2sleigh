@@ -3453,6 +3453,9 @@ pub struct SSAFunction {
     written: crate::lanes::Written,
     /// The first pass over it that moved a state past its stated height: the function refuses.
     exhausted: Option<crate::fixpoint::Exhausted>,
+    /// The blocks whose last transfer the source could not follow; `None` where no declaration
+    /// states every block's transfer (`DeclaredSuccessors::unresolved_in`).
+    unresolved_transfers: Option<BTreeSet<u64>>,
 }
 
 /// Reads that see one content: loads of the same bytes of one object -- the
@@ -3832,6 +3835,7 @@ impl Clone for SSAFunction {
             entry_lanes: self.entry_lanes.clone(),
             written: self.written.clone(),
             exhausted: self.exhausted,
+            unresolved_transfers: self.unresolved_transfers.clone(),
         }
     }
 }
@@ -4650,6 +4654,11 @@ impl SSAFunction {
         self.blocks.get(*self.block_index.get(&addr)? as usize)
     }
 
+    /// Where the block at `addr` sits in [`Self::blocks`]: a dense block index.
+    pub(crate) fn block_position(&self, addr: u64) -> Option<usize> {
+        self.block_index.get(&addr).map(|index| *index as usize)
+    }
+
     /// All blocks in reverse postorder.
     pub fn blocks(&self) -> &[SSABlock<VarId>] {
         &self.blocks
@@ -4739,6 +4748,18 @@ impl SSAFunction {
     /// Get the dominator tree.
     pub fn domtree(&self) -> &DomTree {
         &self.domtree
+    }
+
+    /// The blocks whose last transfer the source could not follow; `None` where no declaration
+    /// states every block's transfer.
+    pub(crate) const fn unresolved_transfers(&self) -> Option<&BTreeSet<u64>> {
+        self.unresolved_transfers.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_unresolved_transfers(mut self, unresolved: Option<BTreeSet<u64>>) -> Self {
+        self.unresolved_transfers = unresolved;
+        self
     }
 
     /// The natural loops of the control graph.
