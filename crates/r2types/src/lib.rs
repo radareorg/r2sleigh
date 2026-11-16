@@ -28,7 +28,6 @@ pub(crate) use facts::{
 pub use callee::{
     CalleeClass, CalleeIdentity, CalleeIdentityContext, CalleeIdentityKey, CalleeResolutionFacts,
     CalleeTargetIdentityRequest, CalleeTargetResolutionRequest, ResolvedCalleeTarget,
-    normalize_callee_name,
 };
 pub use constraint::{Constraint, ConstraintSource, SolverNode};
 pub(crate) use signature_infer::{infer_signature_from_prepared_ssa, render_signature_type};
