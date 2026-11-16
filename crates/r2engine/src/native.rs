@@ -3564,7 +3564,8 @@ pub fn convention_model(
     let at = Resolver { arch, id: row.id };
     let (sections, hidden_return) = sections(&at, prototype, row)?;
     let link = profile.return_address.as_deref().and_then(|n| at.placed(n));
-    let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
+    let (preserved, reserved) = duties(&at, row.preserved, bits, kernel);
+    let dropped = dropped_unaffected(&at, prototype, link, &preserved, &reserved);
     let owned = owned(prototype, row.home, &sections, profile.return_address_slot);
     let results = results(&at, prototype, row, &sections)?;
     let parts = ConventionParts {
@@ -3575,8 +3576,9 @@ pub fn convention_model(
         results,
         owned,
         preserved,
-        killed: at.lanes(&prototype.killed_by_call),
-        likely_trash: at.lanes(&prototype.likely_trash),
+        killed: [&at.lanes(&prototype.killed_by_call)[..], &dropped]
+            .concat()
+            .into(),
         reserved,
         link,
         forms: forms(&at, prototype, row, bits, (library, guards)),
@@ -3866,17 +3868,27 @@ fn owned(
         .collect()
 }
 
-/// What a call preserves (`unaffected` less the return address, and the ABI's callee-saved
-/// rows) and what the platform reserves.
+/// What a call preserves (the row's cited set and the platform's callee-saved rows) and what the
+/// platform reserves; the specification's `unaffected` list proves no survival (D476).
 fn duties(
     at: &Resolver<'_>,
-    prototype: &r2sleigh_lift::profile::ProtoModel,
-    link: Option<CanonicalStorageId>,
+    cited: Option<r2abi::convention::PreservedSet>,
     bits: u32,
     kernel: r2abi::Kernel,
 ) -> (Box<[LaneSet]>, Box<[LaneSet]>) {
-    let mut preserved = at.lanes(&prototype.unaffected).into_vec();
-    preserved.retain(|lanes| Some(lanes.storage) != link);
+    let mut preserved = Vec::new();
+    let held = cited
+        .iter()
+        .flat_map(|set| set.registers.iter().map(move |held| (set, held)));
+    for (set, held) in held {
+        let Some(storage) = at.placed(held.register.0) else {
+            continue;
+        };
+        match held.bits {
+            None => preserved.push(at.in_root(storage)),
+            Some(_) => preserved.extend(covered_runs(storage, &set.row(held))),
+        }
+    }
     let mut reserved = Vec::new();
     let rows = r2abi::architecture_registers(&at.arch.name)
         .iter()
@@ -3896,6 +3908,31 @@ fn duties(
     preserved.sort_unstable();
     preserved.dedup();
     (preserved.into(), reserved.into())
+}
+
+/// Each `unaffected` lane no cited row keeps, which a call may write, with one `convention-model`
+/// evidence line each (D476).
+fn dropped_unaffected(
+    at: &Resolver<'_>,
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    link: Option<CanonicalStorageId>,
+    preserved: &[LaneSet],
+    reserved: &[LaneSet],
+) -> Vec<LaneSet> {
+    let kept = |lanes: &LaneSet| covered_by(preserved, lanes) || covered_by(reserved, lanes);
+    let stated = at.lanes(&prototype.unaffected).into_vec();
+    let dropped = (stated.into_iter())
+        .filter(|lanes| Some(lanes.storage) != link && !kept(lanes))
+        .collect::<Vec<_>>();
+    for lanes in &dropped {
+        r2il::refusal_evidence!(
+            "convention-model",
+            "{:?}: the specification's unaffected {:?} is in no cited preserved set",
+            at.id,
+            lanes.narrowed()
+        );
+    }
+    dropped
 }
 
 /// Whether `runs` cover every byte of `lanes`. `O(n log n)` in the runs.
