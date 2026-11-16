@@ -108,19 +108,21 @@ impl SSAFunction {
         // spells for every other wide value.
         let mut minted = Vec::new();
         let mut zeros = IdMap::<VarId, VarId>::new(self.values.len());
+        // The highest disambiguator each wide root's name carries among the stored variables, in
+        // one pass; 0 where none carries one, so the next is always one past it.
+        let mut highest = (scratch.iter().filter(|var| var.size > 16))
+            .map(|var| (var.name().to_string(), 0))
+            .collect::<BTreeMap<_, _>>();
+        for (_, other, _) in self.values.stored() {
+            if let Some(held) = highest.get_mut(other.name()) {
+                *held = (*held).max(other.rename_disambiguator());
+            }
+        }
         for var in &scratch {
             let zero = if var.size <= 16 {
                 SSAVar::constant(0, var.size)
             } else {
-                let disambiguator = self
-                    .values
-                    .storage_by_var()
-                    .into_iter()
-                    .map(|(other, _)| other)
-                    .filter(|other| other.name() == var.name())
-                    .map(SSAVar::rename_disambiguator)
-                    .max()
-                    .map_or(1, |max| max + 1);
+                let disambiguator = highest.get(var.name()).map_or(1, |max| max + 1);
                 // Version one: it is a definition, and version zero is
                 // reserved for the value a block was entered with.
                 let zero =
@@ -131,6 +133,7 @@ impl SSAFunction {
                 });
                 if let Some(storage) = self.canonical_storage_for_var(var) {
                     self.values.intern_with_storage(&zero, storage);
+                    highest.insert(var.name().to_string(), disambiguator);
                 }
                 zero
             };
@@ -167,26 +170,21 @@ impl SSAFunction {
 
     /// Replace each tracked register's entry value with the constant the
     /// processor specification states; past a call it holds what the call effect leaves.
-    #[cfg_attr(
-        dylint_lib = "r2sleigh_lints",
-        allow(
-            entity_keyed_map,
-            reason = "ordered by variable on purpose: the first match must not depend on interning order (doc/adr-one-ir.md, 5c)"
-        )
-    )]
     pub(crate) fn apply_boundary_constants(&mut self, machine_context: &SourceMachineContext) {
         let entry_constants = machine_context
             .tracked_entry_values()
             .iter()
             .copied()
             .collect::<BTreeMap<_, _>>();
-        let boundary_values = self
-            .values
-            .storage_by_var()
-            .into_iter()
-            .filter(|(var, _)| var.version == 0)
-            .filter_map(|(var, storage)| Some((var.clone(), *entry_constants.get(&storage)?)))
-            .collect::<BTreeMap<_, _>>();
+        // The k entry values with a stated constant, interned in variable order. O(n + k log k).
+        let mut boundary_values = (self.values.stored())
+            .filter(|(_, var, _)| var.version == 0)
+            .filter_map(|(id, var, storage)| Some((var, id, *entry_constants.get(&storage)?)))
+            .collect::<Vec<_>>();
+        boundary_values.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let boundary_values = (boundary_values.into_iter())
+            .map(|(var, id, value)| (id, value, var.size))
+            .collect::<Vec<_>>();
         if boundary_values.is_empty() {
             return;
         }
@@ -196,13 +194,8 @@ impl SSAFunction {
             boundary_values.len()
         );
         let mut substitutes = IdMap::<VarId, VarId>::new(self.values.len());
-        for (var, value) in &boundary_values {
-            if let Some(held) = self.values.id_of(var) {
-                substitutes.insert(
-                    held,
-                    self.values.intern(&SSAVar::constant(*value, var.size)),
-                );
-            }
+        for (held, value, size) in boundary_values {
+            substitutes.insert(held, self.values.intern(&SSAVar::constant(value, size)));
         }
         let substitute = |id: &VarId| substitutes.get(*id).copied().unwrap_or(*id);
         for block in self.blocks.edit().iter_mut() {
@@ -243,15 +236,17 @@ impl SSAFunction {
         // The entry registers the renamer read whole: a formal inside one of
         // them is a lane of that root, whatever width the convention names
         // it at -- `d1` is a lane of `z1` as much as `edi` is one of `rdi`.
-        let entry_roots = self
-            .values
-            .storage_by_var()
-            .into_iter()
-            .filter(|(var, storage)| {
+        // In variable order, which picks the first root holding a lane. O(n + k log k).
+        let mut entry_roots = (self.values.stored())
+            .filter(|(_, var, storage)| {
                 var.version == 0
                     && storage.space == CanonicalStorageSpace::Register
                     && storage.size == var.size
             })
+            .map(|(_, var, storage)| (var, storage))
+            .collect::<Vec<_>>();
+        entry_roots.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let entry_roots = (entry_roots.into_iter())
             .map(|(_, storage)| storage)
             .collect::<Vec<_>>();
         for projection in crate::semantic::source_formal_parameter_projections(machine_context) {
@@ -339,22 +334,27 @@ impl SSAFunction {
                 lane.1.push((addr, op_index, inside));
             }
         }
+        // The least version-0 variable stored at each storage, kept live below: the first match in
+        // variable order. O(n + k log k), k the version-0 rows.
+        let mut root_vars = BTreeMap::<CanonicalStorageId, VarId>::new();
+        for (id, var, storage) in self.values.stored() {
+            if var.version == 0
+                && root_vars
+                    .get(&storage)
+                    .is_none_or(|held| var < self.var(*held))
+            {
+                root_vars.insert(storage, id);
+            }
+        }
         let mut minted = Vec::new();
         // Each root's declared lanes, to rebuild the root from them below.
         let mut lanes_by_root = BTreeMap::<SSAVar, (CanonicalStorageId, Vec<(SSAVar, u32)>)>::new();
         for ((root, offset, width), (root_var, reads)) in lanes {
             // The root's entry value is the renamer's, when it named one; a
             // fresh name would enter the family a second time.
+            // Live, not a snapshot: a root an earlier lane named is the one this lane must name too.
             let root_var = root_var
-                .or_else(|| {
-                    // Live, not a snapshot: a root an earlier lane named is
-                    // the one this lane must name too.
-                    self.values
-                        .storage_by_var()
-                        .into_iter()
-                        .find(|(var, storage)| var.version == 0 && *storage == root)
-                        .map(|(var, _)| var.clone())
-                })
+                .or_else(|| (root_vars.get(&root)).map(|held| self.var(*held).clone()))
                 .unwrap_or_else(|| {
                     let name = machine_context
                         .register_name(root)
@@ -378,6 +378,13 @@ impl SSAFunction {
             let held = self.values.intern(&root_var);
             if self.values.storage(held).is_none() {
                 self.values.set_storage(held, root);
+                if root_var.version == 0
+                    && root_vars
+                        .get(&root)
+                        .is_none_or(|least| root_var < *self.var(*least))
+                {
+                    root_vars.insert(root, held);
+                }
             }
             let projection_id = self.values.intern(&projection);
             self.formal_projections.insert(projection_id, lane_storage);
@@ -434,12 +441,14 @@ impl SSAFunction {
                 }
             }
         }
-        let mut highest_disambiguator = BTreeMap::<String, u32>::new();
-        for (var, _) in self.values.storage_by_var() {
-            let entry = highest_disambiguator
-                .entry(var.name().to_string())
-                .or_insert(0);
-            *entry = (*entry).max(var.rename_disambiguator());
+        // Asked only of the roots' names; 0 where no stored variable carries one. One pass.
+        let mut highest_disambiguator = (lanes_by_root.keys())
+            .map(|root| (root.name().to_string(), 0))
+            .collect::<BTreeMap<_, u32>>();
+        for (_, var, _) in self.values.stored() {
+            if let Some(held) = highest_disambiguator.get_mut(var.name()) {
+                *held = (*held).max(var.rename_disambiguator());
+            }
         }
         let mut substitutions = IdMap::<VarId, VarId>::new(self.values.len());
         for (root_var, (root, lanes)) in lanes_by_root {

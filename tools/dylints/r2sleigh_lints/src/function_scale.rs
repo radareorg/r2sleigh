@@ -118,16 +118,6 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
         1,
     ),
     (
-        "r2ssa::function::rewrite::<impl function::SSAFunction>::mint_entry_lane_projections",
-        ".into_iter()",
-        1,
-    ),
-    (
-        "r2ssa::function::rewrite::<impl function::SSAFunction>::zero_scratch_insert_roots",
-        ".into_iter()",
-        1,
-    ),
-    (
         "r2ssa::graph::SsaGraph::from_function_with_storage",
         ".iter()",
         2,
