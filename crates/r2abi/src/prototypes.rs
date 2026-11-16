@@ -34,6 +34,16 @@ pub struct Prototype {
     pub locals: Vec<Local>,
 }
 
+impl Prototype {
+    /// The same prototype naming `classes[id]` for each node `id`: its graph's quotient (D491).
+    pub fn retype(&mut self, classes: &[TypeId]) {
+        let class = |id: TypeId| classes[id.index()];
+        self.return_type = class(self.return_type);
+        (self.parameters.iter_mut()).for_each(|parameter| parameter.ty = class(parameter.ty));
+        (self.locals.iter_mut()).for_each(|local| local.ty = class(local.ty));
+    }
+}
+
 /// A subprogram's `DW_AT_calling_convention` as its producer writes it (DWARF 5 3.3.1.1; LLVM's
 /// vendor codes are `llvm/BinaryFormat/Dwarf.def`'s `HANDLE_DW_CC`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

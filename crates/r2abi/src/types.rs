@@ -392,6 +392,254 @@ impl TypeGraph {
     }
 }
 
+/// Record identity across units (D491, C17 6.2.7p1): nodes with equal labelled unfoldings are one.
+impl TypeGraph {
+    /// The quotient: each class at its lowest id, in first-occurrence order; each old node's new id.
+    /// Hopcroft refinement, O((N + E) log N); each split raises the class count, which N bounds.
+    pub fn quotient(&mut self) -> Vec<TypeId> {
+        let classes = Refinement::of(&self.types).coarsest();
+        let mut renumbered = vec![u32::MAX; classes.count];
+        let mut kept = Vec::new();
+        let mut index = Vec::with_capacity(self.types.len());
+        for (node, class) in classes.class.iter().enumerate() {
+            let slot = &mut renumbered[*class as usize];
+            if *slot == u32::MAX {
+                *slot = u32::try_from(kept.len()).unwrap_or(u32::MAX);
+                kept.push(node);
+            }
+            index.push(TypeId(*slot));
+        }
+        let types = kept.iter().map(|node| {
+            let mut ty = self.types[*node].clone();
+            map_children(&mut ty, |child| index[child.index()]);
+            ty
+        });
+        self.types = types.collect();
+        self.leaves = (self.iter())
+            .filter(|(_, ty)| matches!(ty, Type::Void | Type::Scalar(_)))
+            .map(|(id, ty)| (ty.clone(), id))
+            .collect();
+        index
+    }
+}
+
+/// Each child a node names, in declared order: its edges, by position.
+fn each_child(ty: &Type, mut child: impl FnMut(TypeId)) {
+    match ty {
+        Type::Pointer { target }
+        | Type::Array {
+            element: target, ..
+        }
+        | Type::Enum {
+            underlying: target, ..
+        }
+        | Type::Qualified { target, .. }
+        | Type::Typedef { target, .. } => child(*target),
+        Type::Record(record) => record.members.iter().for_each(|member| child(member.ty)),
+        Type::Code(signature) => {
+            child(signature.returns);
+            signature.parameters.iter().copied().for_each(child);
+        }
+        Type::Void | Type::Scalar(_) | Type::Opaque { .. } | Type::Refused(_) => {}
+    }
+}
+
+/// The same node naming `map(child)` for each child.
+fn map_children(ty: &mut Type, mut map: impl FnMut(TypeId) -> TypeId) {
+    match ty {
+        Type::Pointer { target }
+        | Type::Array {
+            element: target, ..
+        }
+        | Type::Enum {
+            underlying: target, ..
+        }
+        | Type::Qualified { target, .. }
+        | Type::Typedef { target, .. } => *target = map(*target),
+        Type::Record(record) => (record.members.iter_mut()).for_each(|m| m.ty = map(m.ty)),
+        Type::Code(signature) => {
+            signature.returns = map(signature.returns);
+            (signature.parameters.iter_mut()).for_each(|p| *p = map(*p));
+        }
+        Type::Void | Type::Scalar(_) | Type::Opaque { .. } | Type::Refused(_) => {}
+    }
+}
+
+/// A node's label: the node with every child `void`; variant, tags, names, sizes, offsets,
+/// qualifiers, counts and signature flags compare.
+fn label(ty: &Type) -> Type {
+    let mut label = ty.clone();
+    map_children(&mut label, |_| TypeId::VOID);
+    label
+}
+
+/// The coarsest partition where one class has one label and, per child position, children of one
+/// class (Valmari and Lehtinen's refinable partition).
+struct Refinement {
+    /// Nodes grouped by class: each class is one range of it.
+    order: Vec<u32>,
+    /// Each node's index in `order`.
+    at: Vec<u32>,
+    class: Vec<u32>,
+    start: Vec<u32>,
+    end: Vec<u32>,
+    /// One past each class's marked prefix.
+    marked: Vec<u32>,
+    touched: Vec<u32>,
+    /// Each node's parents, as `(parent, position)`, from `parents_from[node]` to the next node's.
+    parents_from: Vec<u32>,
+    parents: Vec<(u32, u32)>,
+    arity: usize,
+}
+
+/// The finished partition: each node's class, and how many classes there are.
+struct Classes {
+    class: Vec<u32>,
+    count: usize,
+}
+
+impl Refinement {
+    /// Classes by label, in label order, and every node's parents.
+    fn of(types: &[Type]) -> Self {
+        let labels = types.iter().map(label).collect::<Vec<_>>();
+        let mut order = (0..types.len() as u32).collect::<Vec<_>>();
+        order.sort_by(|a, b| labels[*a as usize].cmp(&labels[*b as usize]).then(a.cmp(b)));
+        let (mut class, mut at) = (vec![0; types.len()], vec![0; types.len()]);
+        let (mut start, mut end) = (Vec::new(), Vec::new());
+        for (index, node) in order.iter().enumerate() {
+            let fresh = index == 0 || labels[order[index - 1] as usize] != labels[*node as usize];
+            if fresh {
+                start.push(index as u32);
+                end.push(index as u32);
+            }
+            let last = start.len() - 1;
+            end[last] += 1;
+            class[*node as usize] = last as u32;
+            at[*node as usize] = index as u32;
+        }
+        let mut counts = vec![0u32; types.len() + 1];
+        let mut arity = 0;
+        for ty in types {
+            let mut position = 0;
+            each_child(ty, |child| {
+                counts[child.index() + 1] += 1;
+                position += 1;
+            });
+            arity = arity.max(position);
+        }
+        for node in 0..types.len() {
+            counts[node + 1] += counts[node];
+        }
+        let mut filled = counts.clone();
+        let mut parents = vec![(0, 0); counts[types.len()] as usize];
+        for (parent, ty) in types.iter().enumerate() {
+            let mut position = 0;
+            each_child(ty, |child| {
+                let slot = &mut filled[child.index()];
+                parents[*slot as usize] = (parent as u32, position);
+                *slot += 1;
+                position += 1;
+            });
+        }
+        Self {
+            order,
+            at,
+            class,
+            marked: start.clone(),
+            start,
+            end,
+            touched: Vec::new(),
+            parents_from: counts,
+            parents,
+            arity,
+        }
+    }
+
+    /// Refine until every class is stable against every class. A class split after its turn queues
+    /// its smaller half; the other half is then stable, since a node has one child per position.
+    fn coarsest(mut self) -> Classes {
+        let mut waiting = (0..self.start.len() as u32).collect::<Vec<_>>();
+        let mut queued = vec![true; self.start.len()];
+        let (mut by_position, mut used) = (vec![Vec::new(); self.arity], Vec::new());
+        while let Some(splitter) = waiting.pop() {
+            queued[splitter as usize] = false;
+            let (from, to) = (self.start[splitter as usize], self.end[splitter as usize]);
+            let members = self.order[from as usize..to as usize].to_vec();
+            for node in members {
+                let parents =
+                    self.parents_from[node as usize]..self.parents_from[node as usize + 1];
+                for (parent, position) in
+                    &self.parents[parents.start as usize..parents.end as usize]
+                {
+                    let parents = &mut by_position[*position as usize];
+                    if parents.is_empty() {
+                        used.push(*position as usize);
+                    }
+                    parents.push(*parent);
+                }
+            }
+            for position in used.drain(..) {
+                for parent in std::mem::take(&mut by_position[position]) {
+                    self.mark(parent);
+                }
+                self.split(&mut waiting, &mut queued);
+            }
+        }
+        Classes {
+            class: self.class,
+            count: self.start.len(),
+        }
+    }
+
+    fn mark(&mut self, node: u32) {
+        let class = self.class[node as usize] as usize;
+        let (index, boundary) = (self.at[node as usize], self.marked[class]);
+        if index < boundary {
+            return;
+        }
+        let other = self.order[boundary as usize];
+        self.order.swap(index as usize, boundary as usize);
+        self.at[other as usize] = index;
+        self.at[node as usize] = boundary;
+        if boundary == self.start[class] {
+            self.touched.push(class as u32);
+        }
+        self.marked[class] = boundary + 1;
+    }
+
+    /// Split each touched class into its marked prefix, a new class, and the rest.
+    fn split(&mut self, waiting: &mut Vec<u32>, queued: &mut Vec<bool>) {
+        for class in std::mem::take(&mut self.touched) {
+            let class = class as usize;
+            let (from, middle, to) = (self.start[class], self.marked[class], self.end[class]);
+            self.marked[class] = from;
+            if middle == to {
+                continue;
+            }
+            let fresh = self.start.len() as u32;
+            for index in from..middle {
+                self.class[self.order[index as usize] as usize] = fresh;
+            }
+            self.start.push(from);
+            self.end.push(middle);
+            self.marked.push(from);
+            self.start[class] = middle;
+            self.marked[class] = middle;
+            let smaller = match queued[class] || middle - from <= to - middle {
+                true => fresh,
+                false => class as u32,
+            };
+            queued.push(false);
+            for queue in [smaller].into_iter().chain(queued[class].then_some(fresh)) {
+                if !queued[queue as usize] {
+                    queued[queue as usize] = true;
+                    waiting.push(queue);
+                }
+            }
+        }
+    }
+}
+
 /// Whether a spelling keeps a typedef's name or writes what it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Names {
@@ -650,6 +898,164 @@ mod tests {
             graph.spelled(pointer).map(|s| s.declared),
             Some("FILE *".to_owned())
         );
+    }
+
+    /// One unit's `typedef struct _IO_FILE { int _flags; struct _IO_FILE *_chain; } FILE`, with
+    /// `chain` naming the second member.
+    fn io_file(graph: &mut TypeGraph, chain: &str) -> (TypeId, TypeId, TypeId) {
+        let int = int(graph);
+        let record = graph.reserve();
+        let pointer = graph.add(Type::Pointer { target: record });
+        let member = |name: &str, ty, offset_bits| Member {
+            name: Some(name.to_owned()),
+            ty,
+            offset_bits,
+            bit_size: None,
+        };
+        let members = vec![member("_flags", int, 0), member(chain, pointer, 64)];
+        let tag = Some("_IO_FILE".to_owned());
+        let (kind, size_bytes) = (RecordKind::Struct, 16);
+        graph.define(
+            record,
+            Type::Record(Record {
+                kind,
+                tag,
+                size_bytes,
+                members,
+            }),
+        );
+        let name = "FILE".to_owned();
+        let file = graph.add(Type::Typedef {
+            name,
+            target: record,
+        });
+        (record, pointer, file)
+    }
+
+    /// Two units' `FILE` over `struct _IO_FILE`, reaching itself through `_chain`, is one node; a
+    /// record differing in one member name stays its own (D491, C17 6.2.7p1).
+    #[test]
+    fn equal_unfoldings_of_two_units_are_one_node() {
+        let mut graph = TypeGraph::new();
+        let first = io_file(&mut graph, "_chain");
+        let second = io_file(&mut graph, "_chain");
+        let other = io_file(&mut graph, "_next");
+        let before = graph.len();
+        let index = graph.quotient();
+        let class = |id: TypeId| index[id.index()];
+        assert_eq!(class(first.0), class(second.0));
+        assert_eq!(class(first.1), class(second.1));
+        assert_eq!(class(first.2), class(second.2));
+        assert_ne!(class(first.0), class(other.0));
+        assert_ne!(class(first.2), class(other.2));
+        assert_eq!(graph.len(), before - 3);
+        assert_eq!(class(TypeId::VOID), TypeId::VOID);
+        let spelled = graph.spelled(class(first.1)).map(|s| s.declared);
+        assert_eq!(spelled.as_deref(), Some("struct _IO_FILE *"));
+    }
+
+    /// The refinement equals the naive fixpoint (relabel by children's classes until the count
+    /// holds) on generated graphs with cycles and records of mixed arity.
+    #[test]
+    fn the_quotient_is_the_naive_fixpoint() {
+        let (mut seed, mut merged) = (0x2545_f491_4f6c_dd1d_u64, 0);
+        for _ in 0..300 {
+            let mut graph = TypeGraph::new();
+            let int = int(&mut graph);
+            let size = 2 + draw(&mut seed, 40);
+            let nodes = (0..size).map(|_| graph.reserve()).collect::<Vec<_>>();
+            let pick = |seed: &mut u64| match draw(seed, 5) {
+                0 => int,
+                _ => nodes[draw(seed, size)],
+            };
+            for node in &nodes {
+                let name = ["a", "b"][draw(&mut seed, 2)].to_owned();
+                let ty = match draw(&mut seed, 5) {
+                    0 => Type::Pointer {
+                        target: pick(&mut seed),
+                    },
+                    1 => Type::Typedef {
+                        name,
+                        target: pick(&mut seed),
+                    },
+                    2 => Type::Opaque {
+                        keyword: Keyword::Struct,
+                        tag: name,
+                    },
+                    _ => {
+                        let mut members = Vec::new();
+                        for at in 0..draw(&mut seed, 3) {
+                            members.push(Member {
+                                name: Some(["x", "y"][draw(&mut seed, 2)].to_owned()),
+                                ty: pick(&mut seed),
+                                offset_bits: 64 * at as u64,
+                                bit_size: None,
+                            });
+                        }
+                        let (kind, tag) = (RecordKind::Struct, Some(name));
+                        Type::Record(Record {
+                            kind,
+                            tag,
+                            size_bytes: 24,
+                            members,
+                        })
+                    }
+                };
+                graph.define(*node, ty);
+            }
+            let naive = naive_classes(&graph);
+            let index = graph.clone().quotient();
+            merged += naive.len() - naive.iter().collect::<BTreeSet<_>>().len();
+            for a in 0..naive.len() {
+                for b in 0..naive.len() {
+                    assert_eq!(naive[a] == naive[b], index[a] == index[b], "{graph:?}");
+                }
+            }
+        }
+        assert!(
+            merged > 300,
+            "{merged} nodes merged: the graphs exercise merging"
+        );
+    }
+
+    /// A xorshift draw below `bound`: the generated graphs are the same on every run.
+    fn draw(seed: &mut u64, bound: usize) -> usize {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        (*seed % bound as u64) as usize
+    }
+
+    /// Classes by label, then by label and children's classes, until the count holds.
+    fn naive_classes(graph: &TypeGraph) -> Vec<usize> {
+        let rank = |keys: Vec<(Type, Vec<usize>)>| {
+            let sorted = keys.iter().cloned().collect::<BTreeSet<_>>();
+            let order = sorted.into_iter().collect::<Vec<_>>();
+            (keys.iter())
+                .map(|key| order.binary_search(key).unwrap_or(0))
+                .collect::<Vec<_>>()
+        };
+        let labels = graph
+            .types
+            .iter()
+            .map(|ty| (label(ty), Vec::new()))
+            .collect();
+        let mut classes = rank(labels);
+        loop {
+            let keys = (graph.types.iter().enumerate())
+                .map(|(node, ty)| {
+                    let mut children = vec![classes[node]];
+                    each_child(ty, |child| children.push(classes[child.index()]));
+                    (label(ty), children)
+                })
+                .collect();
+            let refined = rank(keys);
+            let count = |c: &[usize]| c.iter().collect::<BTreeSet<_>>().len();
+            if count(&refined) == count(&classes) {
+                return refined;
+            }
+            classes = refined;
+        }
     }
 
     #[test]

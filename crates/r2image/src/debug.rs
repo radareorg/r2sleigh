@@ -245,11 +245,15 @@ impl<'u, 'd, 'a> Reader<'u, 'd, 'a> {
         for unit in 0..self.units.units.len() {
             self.read_unit(unit, &mut found);
         }
+        // Equal declarations of separate units are one type (D491, C17 6.2.7p1).
+        let classes = self.graph.quotient();
         let mut declarations = Declarations::new(self.graph);
-        for (entry, prototype) in found.functions {
+        for (entry, mut prototype) in found.functions {
+            prototype.retype(&classes);
             declarations.declare_function(entry, prototype);
         }
-        for (address, object) in found.objects {
+        for (address, mut object) in found.objects {
+            object.ty = classes[object.ty.index()];
             declarations.declare_object(address, object);
         }
         declarations
@@ -986,3 +990,187 @@ fn register_of(expression: gimli::Expression<Slice<'_>>) -> Option<u16> {
 
 #[cfg(test)]
 mod tests;
+
+/// Three units each declaring `typedef struct _IO_FILE FILE` and a function taking `FILE *`, in an
+/// ELF assembled here; the third names its second member `_next` (D491).
+#[cfg(test)]
+mod units {
+    use super::read;
+
+    /// One DIE item: an abbreviation code with its attribute bytes, a reference, or a label.
+    enum Item {
+        Bytes(Vec<u8>),
+        Ref(&'static str),
+        Label(&'static str),
+    }
+
+    fn text(value: &str) -> Item {
+        Item::Bytes([value.as_bytes(), &[0]].concat())
+    }
+
+    /// One DWARF 4 unit: `int`, the record with `chain` as its second member, a pointer to it, the
+    /// typedef, a pointer to that, and `name` at `entry` taking it.
+    fn unit(name: &str, entry: u64, chain: &str) -> Vec<u8> {
+        use Item::{Bytes, Label, Ref};
+        let items = vec![
+            Bytes(vec![1]),
+            text("unit.c"),
+            Label("int"),
+            Bytes(vec![7]),
+            text("int"),
+            Bytes(vec![5, 4]),
+            Label("record"),
+            Bytes(vec![4]),
+            text("_IO_FILE"),
+            Bytes(vec![16, 5]),
+            text("_flags"),
+            Ref("int"),
+            Bytes(vec![0, 5]),
+            text(chain),
+            Ref("pointer"),
+            Bytes(vec![8, 0]),
+            Label("pointer"),
+            Bytes(vec![6, 8]),
+            Ref("record"),
+            Label("file"),
+            Bytes(vec![8]),
+            text("FILE"),
+            Ref("record"),
+            Label("file_pointer"),
+            Bytes(vec![6, 8]),
+            Ref("file"),
+            Bytes(vec![2]),
+            text(name),
+            Bytes([&entry.to_le_bytes()[..], &[0x10]].concat()),
+            Bytes(vec![3]),
+            text("stream"),
+            Ref("file_pointer"),
+            Bytes(vec![0, 0]),
+        ];
+        let header = 11;
+        let mut labels = std::collections::BTreeMap::new();
+        let mut at = header;
+        for item in &items {
+            match item {
+                Bytes(bytes) => at += bytes.len(),
+                Ref(_) => at += 4,
+                Label(label) => {
+                    labels.insert(*label, at as u32);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        out.extend(((at - 4) as u32).to_le_bytes());
+        out.extend([4, 0, 0, 0, 0, 0, 8]);
+        for item in items {
+            match item {
+                Bytes(bytes) => out.extend(bytes),
+                Ref(label) => out.extend(labels[label].to_le_bytes()),
+                Label(_) => {}
+            }
+        }
+        out
+    }
+
+    /// The abbreviations every unit uses (DWARF 4 7.5.3), `DW_FORM_string` names, `ref4` types.
+    fn abbreviations() -> Vec<u8> {
+        let mut out = Vec::new();
+        const STRING: u8 = 0x08;
+        const REF4: u8 = 0x13;
+        const DATA1: u8 = 0x0b;
+        type Abbreviation = (u8, u8, bool, &'static [(u8, u8)]);
+        let table: [Abbreviation; 8] = [
+            (1, 0x11, true, &[(0x03, STRING)]),
+            (
+                2,
+                0x2e,
+                true,
+                &[(0x03, STRING), (0x11, 0x01), (0x12, DATA1)],
+            ),
+            (3, 0x05, false, &[(0x03, STRING), (0x49, REF4)]),
+            (4, 0x13, true, &[(0x03, STRING), (0x0b, DATA1)]),
+            (
+                5,
+                0x0d,
+                false,
+                &[(0x03, STRING), (0x49, REF4), (0x38, DATA1)],
+            ),
+            (6, 0x0f, false, &[(0x0b, DATA1), (0x49, REF4)]),
+            (
+                7,
+                0x24,
+                false,
+                &[(0x03, STRING), (0x3e, DATA1), (0x0b, DATA1)],
+            ),
+            (8, 0x16, false, &[(0x03, STRING), (0x49, REF4)]),
+        ];
+        for (code, tag, children, attributes) in table {
+            out.extend([code, tag, u8::from(children)]);
+            attributes
+                .iter()
+                .for_each(|(at, form)| out.extend([*at, *form]));
+            out.extend([0, 0]);
+        }
+        out.push(0);
+        out
+    }
+
+    /// An x86-64 ELF holding only `.debug_abbrev`, `.debug_info` and `.shstrtab`.
+    fn elf(info: &[u8], abbrev: &[u8]) -> Vec<u8> {
+        let names = b"\0.debug_abbrev\0.debug_info\0.shstrtab\0";
+        let sections = [(1u32, 1u32, abbrev), (15, 1, info), (27, 3, &names[..])];
+        let mut data = Vec::new();
+        let mut placed = Vec::new();
+        for (name, kind, bytes) in sections {
+            placed.push((name, kind, 64 + data.len(), bytes.len()));
+            data.extend_from_slice(bytes);
+        }
+        let shoff = 64 + data.len();
+        let mut out = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        out.extend(2u16.to_le_bytes());
+        out.extend(62u16.to_le_bytes());
+        out.extend(1u32.to_le_bytes());
+        out.extend([0u8; 16]);
+        out.extend((shoff as u64).to_le_bytes());
+        out.extend(0u32.to_le_bytes());
+        for half in [64u16, 0, 0, 64, 4, 3] {
+            out.extend(half.to_le_bytes());
+        }
+        out.extend(data);
+        out.extend([0u8; 64]);
+        for (name, kind, offset, size) in placed {
+            out.extend(name.to_le_bytes());
+            out.extend(kind.to_le_bytes());
+            out.extend([0u8; 16]);
+            out.extend((offset as u64).to_le_bytes());
+            out.extend((size as u64).to_le_bytes());
+            out.extend([0u8; 8]);
+            out.extend(1u64.to_le_bytes());
+            out.extend([0u8; 8]);
+        }
+        out
+    }
+
+    /// Equal declarations of two units are one type, so both functions take one `FILE *` node;
+    /// the third unit's record differs in a member name and stays its own (C17 6.2.7p1).
+    #[test]
+    fn a_record_two_units_declare_alike_is_one_node() {
+        let info = [
+            unit("from_a", 0x1000, "_chain"),
+            unit("from_b", 0x2000, "_chain"),
+            unit("from_c", 0x3000, "_next"),
+        ]
+        .concat();
+        let bytes = elf(&info, &abbreviations());
+        let file = object::File::parse(&*bytes).expect("the assembled ELF parses");
+        let declarations = read(&file);
+        let taken = |entry| {
+            let prototype = declarations.function_at(entry).expect("declared");
+            prototype.parameters[0].ty
+        };
+        assert_eq!(taken(0x1000), taken(0x2000));
+        assert_ne!(taken(0x1000), taken(0x3000));
+        let spelled = declarations.graph().spelled(taken(0x1000));
+        assert_eq!(spelled.map(|s| s.declared).as_deref(), Some("FILE *"));
+    }
+}
