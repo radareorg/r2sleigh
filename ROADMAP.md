@@ -90,6 +90,7 @@ r2image
 | D152 | A call with a C++ landing pad carries a residual mark until pads are recovered: `safe_div`'s catch changes the result and the C shows none; 2,712 of 8,430 FDEs in 0pack carry an LSDA (hand audit 3.3). r2image states the pad, r2dec marks the call | an engine test where a catch changes the result; no LSDA function renders without the mark | open |
 | D158 | `elf_stripped`, whose section header table lies past the file end, does not open; radare2 opens it (hand audit 3.9) | a golden `i` and `afl` | open |
 | D259 | A static `__stack_chk_guard` guard row (gap G5) | canary elided only with a binding | open |
+| D450 | `Posture.pic: bool` is `load: LoadBase { Linked, Slid, Unstated }`, default `Unstated`: `pic: false` on Mach-O, PE and `ET_REL` was a negative with no witness. `Linked` is an ELF `ET_EXEC` whose readable dynamic section states neither `DT_TEXTREL` nor `DF_TEXTREL` (gABI chapter 5, "Base Address": "the segments must reside at the virtual addresses used to build the executable file"; `DT_TEXTREL`: "If this member is present, one or more relocation entries might request modifications to a non-writable segment"). `Slid` is `ET_DYN`. `Unstated` is everything else, and an `ET_EXEC` whose `PT_DYNAMIC` cannot be read. `i` prints `pic` as `load == Slid` for ELF; `tests/db/cmd` moved 0 lines | `each_header_states_where_the_loader_places_the_image`, `an_executable_stating_text_relocations_states_no_load_base`, `an_executable_whose_dynamic_section_is_unreadable_states_no_load_base` | built on `rd9-load-base` |
 
 r2abi
 -----
@@ -249,7 +250,7 @@ r2ssa
 | D437 | The format fold steps only blocks with a cited printf site | `a_body_with_no_format_site_folds_no_operation` | built 28ae1efd2 |
 | D438 | Register-walk class lookup by one direct table and one CSR | `a_register_walk_allocates_its_written_classes_once` | built 700f64c8b |
 | D443 | One seal of a body of n compare-and-return arms grows superlinearly (Scaling Bench `unproven_returns`): D422 (17a7783cf) made the four per-object scans linear; callgrind at N = 64 and 128 adds `fuse_compare_chains_in_function` 3.99x, `collect_control_domain_facts` 4.21x, `FunctionLiveOut::collect_reaching` 3.79x, `recover_interface_inner` 2.99x, r2dec `CStmt::clone` 4.09x and `emit_stmt` 6.2x (an else-if chain nested n deep). Owner r2ssa optimize, control domains, liveout; r2dec render | `scaling.py` `unproven_returns` linear | open |
-| D447 | The frame walk reads no call in a block a decided branch cuts off (kind X; 8 census records back to master in the round-8 stand-in). Blocked: the default-deny PIE condition needs a fact r2ssa lacks. Sleigh exports `[rip + d]` and `adr` as `*[const]`, so an `SSAFunction` constant does not say whether it slides with the image, and neither r2engine `Source` nor `SourceMachineContext` carries r2image `Posture::pic`. Entry: that fact reaches the machine context (r2image, r2engine `Source`, r2ssa), then the sparse slice evaluation on SCCP's transfer function | `a_tail_behind_a_compare_of_equal_constants_bounds_no_write` | open: blocked, not built |
+| D447 | The frame walk reads no call in a block a decided branch cuts off (kind X; 8 census records back to master in the round-8 stand-in). Round 9 rules it for `LoadBase::Linked` images only: D450 states the load base, D451 carries it to `SourceMachineContext`, then the sparse slice evaluation on SCCP's transfer function. Waits on D451 | `a_tail_behind_a_compare_of_equal_constants_bounds_no_write` | open: waits on D451 |
 
 r2source
 --------
@@ -291,6 +292,7 @@ r2types
 | D388 | `EvidenceTypes.slot_types` deleted | build | built af0a9854c |
 | D391 | Handle tags (FILE, DIR) come from rows | r2abi data tests | built b908db75d |
 | D396 | `apply_main_signature_override` deleted | `main_name_keeps_its_stated_signature`; engine test passes on the parent: gate open | built cd3c0874c |
+| D451 | The load base reaches `SourceMachineContext` the way `read_only` does: r2engine `snapshot` sets it on `NativeFunction` from `Source::container().posture`, r2source carries it, r2ssa binds it and answers `load_base()`; every other constructor states `Unstated`. Stopped: `Native::snapshot` reaches only `NativeTarget`, `Program` and `NativeMachine`, none of which reads the container. The one link is a `load` field on `NativeTarget`, set at `crates/r2engine/src/program/view.rs:229`, whose literal at `crates/r2engine/tests/engine/native.rs:172` must state it too; both files are outside the chain's list | `a_tail_behind_a_compare_of_equal_constants_bounds_no_write` (D447) | open: stopped, needs `program/view.rs` and `tests/engine/native.rs` |
 
 r2rewrite
 ---------

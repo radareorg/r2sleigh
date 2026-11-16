@@ -571,7 +571,7 @@ fn posture(out: &mut String, container: &r2image::Container) {
         row("nx", nx.to_string());
     }
     if stated {
-        row("pic", posture.pic.to_string());
+        row("pic", (posture.load == r2image::LoadBase::Slid).to_string());
     }
     if let Some(relro) = posture.relro {
         row("relro", relro.spelled().to_owned());
