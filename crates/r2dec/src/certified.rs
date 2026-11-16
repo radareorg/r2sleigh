@@ -259,13 +259,8 @@ pub(crate) struct Elisions {
 
 impl Elisions {
     pub(crate) fn of(prepared: &r2ssa::SsaArtifact) -> Self {
-        let round_trips = (prepared.certificates().memory_round_trips.values())
-            .flat_map(|certificate| {
-                [certificate.write, certificate.read]
-                    .into_iter()
-                    .chain(certificate.redundant_reads.iter().copied())
-                    .map(|access| access.inst)
-            })
+        let round_trips = (prepared.certificates().memory_round_trips.covered())
+            .map(|access| access.inst)
             .collect();
         Self {
             return_control: certified_return_control_insts(prepared),

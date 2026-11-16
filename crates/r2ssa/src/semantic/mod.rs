@@ -42,6 +42,7 @@ pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;
 pub(crate) use prefix::*;
+pub use private_objects::MemoryRoundTrips;
 pub(crate) use private_objects::*;
 pub(crate) use reaching::ReachingStorage;
 pub(crate) use shared::*;
