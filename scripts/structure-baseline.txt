@@ -3,8 +3,8 @@ too_many_lines 239
 cognitive_complexity 18
 excessive_nesting 438
 redundant_clone 0
-assigning_clones 3
+assigning_clones 2
 needless_pass_by_ref_mut 0
 clone_on_ref_ptr 2
 mut_mut 0
-long_comments 2398
+long_comments 2393

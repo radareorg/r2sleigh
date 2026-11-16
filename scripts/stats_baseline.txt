@@ -141,7 +141,7 @@ pumasim aa; pdd @ 0x3b6b20 | analysed.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | analysed.reused | 1
 pumasim aa; pdd @ 0x3b6b20 | call_boundaries.computed | 37
 pumasim aa; pdd @ 0x3b6b20 | call_boundaries.recomputed | 0
-pumasim aa; pdd @ 0x3b6b20 | call_boundaries.reused | 309
+pumasim aa; pdd @ 0x3b6b20 | call_boundaries.reused | 303
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.computed | 13
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.reused | 33
