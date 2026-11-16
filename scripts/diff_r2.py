@@ -46,7 +46,9 @@ on the corpora ANALYSED_CORPORA names and the architectures GRADED_ARCHES names 
               import slots `is` states. r2s-only is a disagreement; radare2-only is unfilled.
 
 The sample is `aoj`'s: each entry point `ie` states and SAMPLED_FUNCTIONS of the entries both
-tools list, evenly spaced by address. A file either session times out on is skipped and counted.
+tools list, evenly spaced by address. A session may run ANALYSIS_TIMEOUT seconds (or --timeout, if longer):
+pumasim's takes 32 s on an M-series Mac and about 90 s on a 4-core x86-64 host. A file either session
+times out on is skipped and counted.
 
 Every disagreement is either judged in `diff_r2_judged.toml` (who is right,
 and why) or fails the run; a judgment nothing matches any more is reported, so
@@ -84,6 +86,7 @@ VERDICTS = ("r2s-right", "r2-right", "unfilled", "deliberate")
 # The analysis verbs, each with its mode; the corpora and architectures they grade.
 ANALYSIS = [("afl", "entries"), ("afb", "blocks"), ("afi", "noreturn"), ("afv", "frame"), ("axt", "references")]
 ANALYSED_CORPORA = ("elf",)
+ANALYSIS_TIMEOUT = 300
 GRADED_ARCHES = ("x86-64", "AArch64")
 # Frame facts no tool states an entry offset for: r2s's `fp-` and `realigned.sp-` bases, and a
 # radare2 bp var whose delta two bp offsets explain. Counted, not compared (ROADMAP D490's open part).
@@ -592,7 +595,7 @@ def answers(binary, commands, r2, r2s, timeout, corpus=None):
     said = {}
     arch = next((line.split()[1] for line in opened.splitlines() if line.split()[:1] == ["arch"]), "")
     if corpus in ANALYSED_CORPORA and arch in GRADED_ARCHES and any(m in ANALYSIS_MODES for _, m in commands):
-        both, ended = analysed(binary, r2, r2s, timeout)
+        both, ended = analysed(binary, r2, r2s, max(timeout, ANALYSIS_TIMEOUT))
         said["aa"] = ended
         if both is not None:
             both[0][("arch", 0)] = [arch]
