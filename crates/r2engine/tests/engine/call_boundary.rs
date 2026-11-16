@@ -2168,3 +2168,35 @@ fn a_three_member_forwarding_cycle_a_slot_stating_no_return_takes_stays_unproven
         assert!(!text.contains("reads the result"), "{text}");
     }
 }
+
+/// `caller` at 0x1000 calls `import` through the stub at 0x1090 after `code`, then returns 0; a
+/// glibc program, so the import binds the glibc, C++ runtime and portable rows.
+fn calling_import(code: &[u8], import: &str) -> String {
+    let mut text = vec![0x90u8; 0xb0];
+    text[..code.len()].copy_from_slice(code);
+    text[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    let text = Box::leak(text.into_boxed_slice());
+    let program = Literal::of_code(text, &[("caller", BASE, code.len() as u64)])
+        .importing(import)
+        .running_on(common::GLIBC);
+    let rendered = OpenProgram::of(program).rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D448: libstdc++'s cxxabi.h states `void __cxa_finalize(void*);`, so the call reads RDI alone and
+/// no entry register past it reaches the call: the caller's parameters are exact, never a floor.
+#[test]
+fn a_cxa_finalize_call_reads_no_register_past_its_one_argument() {
+    let text = calling_import(
+        &[
+            0x31, 0xff, // 1000 xor edi, edi
+            0xe8, 0x89, 0x00, 0x00, 0x00, // 1002 call 0x1090
+            0x31, 0xc0, // 1007 xor eax, eax
+            0xc3, // 1009 ret
+        ],
+        "__cxa_finalize",
+    );
+    assert!(!text.contains("the parameters are a floor"), "{text}");
+    assert!(!text.contains("a register past them reaches"), "{text}");
+    assert!(text.contains("__cxa_finalize("), "{text}");
+}

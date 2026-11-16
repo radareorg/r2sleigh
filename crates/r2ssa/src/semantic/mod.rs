@@ -384,14 +384,14 @@ impl PreparedFunctionFacts {
             &storage_spans,
         );
         phase!("loops", loops.len());
-        let structured = StructuredDataflowFacts {
+        let structured = StructuredDataflowFacts::new(StructuredParts {
             unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
             inductions,
             loops,
             memory_accesses,
             member_run_stores,
             recursive_calls: collect_structured_recursive_call_facts(function, &call_sites),
-        };
+        });
         phase!("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured)?;
         phase!("control_domains", 0);
@@ -451,17 +451,18 @@ impl PreparedFunctionFacts {
                 &addresses,
             )?,
             Certified::ReturnControls => {
-                let (machine_return_controls, machine_return_control_by_inst) =
-                    collect_machine_return_control_certificates(
-                        &boundaries,
-                        graph,
-                        &objects,
-                        &structured,
-                        &unobserved,
-                    );
+                // No call or compiler-inserted set is collected here, so their object sets stay empty.
+                let controls = collect_machine_return_control_certificates(
+                    &boundaries,
+                    graph,
+                    &objects,
+                    &structured,
+                    &unobserved,
+                );
                 PreparedFunctionCertificates {
-                    machine_return_controls,
-                    machine_return_control_by_inst,
+                    machine_return_controls: controls.certificates,
+                    machine_return_control_by_inst: controls.by_inst,
+                    return_control_objects: controls.objects,
                     ..PreparedFunctionCertificates::default()
                 }
             }

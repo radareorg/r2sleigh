@@ -21,6 +21,7 @@ BOUNDARY = "cargo test -p r2engine --test engine call_boundary"
 READS = "cargo test -p r2engine --test engine result_reads"
 UNIT = "cargo test -p r2engine --lib program::fates"
 SITES = "cargo test -p r2ssa --lib site_boundary"
+LANES = "cargo test -p r2engine --test engine result_lanes"
 
 FATES = "crates/r2engine/src/program/fates.rs"
 ESCAPES = "crates/r2engine/src/program/reads.rs"
@@ -41,10 +42,17 @@ MUTANTS = [
     ("unheld-lanes-must-die", [(FATES, "lanes[at].held\n            && !(undefined", "true\n            && !(undefined")],
      [BOUNDARY, READS]),
     # Whether the calls are every way in.
-    ("every-way-in-assumed", [(FATES, "!forwarding.unread && super::reads::only_called(db, callee, forwarding.calls);",
-                               "true;")], [BOUNDARY, READS]),
-    ("forwarders-assumed", [(FATES, "for caller in forwarding.forwarders.iter() {",
-                             "for caller in forwarding.forwarders.iter().take(0) {")], [READS]),
+    ("every-way-in-assumed", [(FATES, "!forwarding.unread\n        && super::reads::only_called(db, callee, forwarding.calls)\n        && (forwarders",
+                               "true\n        && (forwarders")], [BOUNDARY, READS]),
+    ("forwarders-assumed", [(FATES, "&& (forwarders.iter()).all(|forwarder| {",
+                             "&& (forwarders.iter().take(0)).all(|forwarder| {")], [READS]),
+    # D444: one lane's ways in are its own forwarders'; D445: a lane-0 tail caller is a way in.
+    ("a-lane-asks-every-forwarder", [(FATES, "ways_in(db, callee, forwarding, forwarding.forwarders_of(at))",
+                                      "ways_in(db, callee, forwarding, &forwarding.forwarders)")], [LANES]),
+    ("a-tail-caller-is-no-way-in", [(FATES, "&& (forwarding.calls > 0 || !forwarding.forwarders_of(at).is_empty())",
+                                     "&& forwarding.calls > 0")], [LANES]),
+    ("no-way-in-is-decided", [(FATES, "&& (forwarding.calls > 0 || !forwarding.forwarders_of(at).is_empty())",
+                               "&& true")], [LANES]),
     ("a-dead-forwarder-is-unknown", [(FATES, "lane if lane.dead => Forwarded::DeadIfEveryWayIn,",
                                       "lane if lane.dead => Forwarded::Fate(LaneFate::Unknown),")], [BOUNDARY]),
     # The one-call minimum (doc/adr-result-side.md, section 3): a function nothing calls keeps its open result.

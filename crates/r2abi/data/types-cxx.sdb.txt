@@ -213,12 +213,8 @@ func._ZdaPvjSt11align_val_t.ret=void
 # `__cxa_atexit` and `__cxa_finalize`, which glibc, bionic and libSystem export
 # alike; 3.3.3 the one-time construction guards, through `void *` since the
 # guard's width is the ABI's (64 bits generic, 32 on ARM EABI); 2.9.7 `__dynamic_cast`;
-# 3.4 `__cxa_demangle`. The noreturn routines cite cxxabi.h in types-cxx-cited.sdb.txt.
-
-__cxa_finalize=func
-func.__cxa_finalize.args=1
-func.__cxa_finalize.arg.0=void *,dso_handle
-func.__cxa_finalize.ret=void
+# 3.4 `__cxa_demangle`. `__cxa_finalize` and the noreturn routines cite cxxabi.h in
+# types-cxx-cited.sdb.txt.
 
 __cxa_guard_acquire=func
 func.__cxa_guard_acquire.args=1
