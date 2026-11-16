@@ -6,13 +6,10 @@ pub use r2source::{CanonicalStorageId, CanonicalStorageSpace};
 
 use crate::name::{InternedName, intern};
 
-/// Canonical classification for SSA variable names.
-///
-/// Raw SSA names still carry prefixes because they originate at the IL/lift
-/// seam. Consumers should ask this type for the meaning of those names instead
-/// of re-parsing prefix strings in downstream crates.
+/// The prefix a spelling carries, for display only: no fold or class reads it (D459); the
+/// lifted storage and the `CONSTANT` flag are the typed facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum SSAVarNameKind {
+pub(crate) enum SSAVarNameKind {
     RegisterAlias,
     Temporary,
     Constant,
@@ -38,7 +35,7 @@ impl SSAVarNameKind {
     /// Compared prefix by prefix rather than by lowercasing the name first:
     /// this is asked of every variable on every operation, and the copy the
     /// lowercase made was an allocation for a question about five characters.
-    pub fn classify(name: &str) -> Self {
+    pub(crate) fn classify(name: &str) -> Self {
         if starts_with_ignore_ascii_case(name, "reg:") {
             Self::RegisterAlias
         } else if starts_with_ignore_ascii_case(name, "tmp:")
@@ -66,7 +63,7 @@ impl SSAVarNameKind {
         }
     }
 
-    pub fn is_prefixed_display_name(self) -> bool {
+    fn is_prefixed_display_name(self) -> bool {
         matches!(
             self,
             Self::RegisterAlias
@@ -77,35 +74,11 @@ impl SSAVarNameKind {
                 | Self::Frame
         )
     }
+}
 
-    pub fn is_constant(self) -> bool {
-        matches!(self, Self::Constant)
-    }
-
-    pub fn is_temporary(self) -> bool {
-        matches!(self, Self::Temporary)
-    }
-
-    pub fn is_memory(self) -> bool {
-        matches!(self, Self::Memory)
-    }
-
-    pub fn is_address_space(self) -> bool {
-        matches!(self, Self::AddressSpace)
-    }
-
-    pub fn is_global_symbol(self) -> bool {
-        matches!(self, Self::Symbol | Self::Object | Self::Data | Self::Got)
-    }
-
-    pub fn strip_constant_prefix(name: &str) -> Option<&str> {
-        name.strip_prefix("const:")
-    }
-
-    pub fn strip_temporary_prefix(name: &str) -> Option<&str> {
-        name.strip_prefix("tmp:")
-            .or_else(|| name.strip_prefix("unique:"))
-    }
+/// Whether `var` is a lifted temporary: its storage is the unique space, or it is a lane (D459).
+pub(crate) fn is_lifted_temporary(var: &SSAVar, storage: Option<CanonicalStorageId>) -> bool {
+    var.is_lane() || storage.is_some_and(|storage| storage.space == CanonicalStorageSpace::Unique)
 }
 
 /// An SSA variable: a named location with a version number.
@@ -430,34 +403,13 @@ impl SSAVar {
         format!("{}_{}", self.name().to_uppercase(), self.version)
     }
 
-    pub fn name_kind(&self) -> SSAVarNameKind {
+    fn name_kind(&self) -> SSAVarNameKind {
         self.name.kind()
     }
 
-    /// Check if this is a constant SSA value.
-    ///
-    /// This classifies the presentation form only. Proof-bearing consumers
-    /// must use [`Self::constant_bits`] instead.
-    pub fn is_const(&self) -> bool {
-        self.name_kind().is_constant()
-    }
-
-    /// Check if this is a temporary SSA value.
-    pub fn is_temp(&self) -> bool {
-        self.name_kind().is_temporary()
-    }
-
-    /// Check if this is a memory-backed SSA name (name starts with "ram:").
-    pub fn is_memory(&self) -> bool {
-        self.name_kind().is_memory()
-    }
-
-    /// Check if this is a register (not const or temp).
-    ///
-    /// This is a presentation classifier only. Proof-bearing consumers must
-    /// use the graph value's canonical storage identity instead.
-    pub fn is_register(&self) -> bool {
-        !self.is_const() && !self.is_temp()
+    /// Whether this value carries a constant: the `CONSTANT` flag, never the spelling (D459).
+    pub const fn is_const(&self) -> bool {
+        self.constant_bits().is_some()
     }
 }
 
@@ -487,6 +439,13 @@ mod tests {
 
         let spoofed_name = SSAVar::new("const:100000001b3", 0, 8);
         assert_eq!(spoofed_name.constant_bits(), None);
+    }
+
+    /// A constant is the `CONSTANT` flag (D459): a `const:` spelling proves nothing.
+    #[test]
+    fn a_constant_spelling_is_no_constant() {
+        assert!(!SSAVar::new("const:2a", 0, 4).is_const());
+        assert!(SSAVar::constant(0x2a, 4).is_const());
     }
 
     /// A lane is a typed fact on the value (D477): its spelling proves nothing.
@@ -555,77 +514,6 @@ mod tests {
     }
 
     #[test]
-    fn test_name_kind_predicates_and_prefix_stripping() {
-        let prefixed_display = [
-            SSAVarNameKind::RegisterAlias,
-            SSAVarNameKind::Temporary,
-            SSAVarNameKind::Constant,
-            SSAVarNameKind::Memory,
-            SSAVarNameKind::AddressSpace,
-        ];
-        let non_prefixed_display = [
-            SSAVarNameKind::Symbol,
-            SSAVarNameKind::Object,
-            SSAVarNameKind::Data,
-            SSAVarNameKind::Got,
-            SSAVarNameKind::Ordinary,
-        ];
-
-        for kind in prefixed_display {
-            assert!(kind.is_prefixed_display_name());
-        }
-        for kind in non_prefixed_display {
-            assert!(!kind.is_prefixed_display_name());
-        }
-
-        for kind in [
-            SSAVarNameKind::RegisterAlias,
-            SSAVarNameKind::Temporary,
-            SSAVarNameKind::Constant,
-            SSAVarNameKind::Memory,
-            SSAVarNameKind::AddressSpace,
-            SSAVarNameKind::Symbol,
-            SSAVarNameKind::Object,
-            SSAVarNameKind::Data,
-            SSAVarNameKind::Got,
-            SSAVarNameKind::Ordinary,
-        ] {
-            assert_eq!(kind.is_constant(), kind == SSAVarNameKind::Constant);
-            assert_eq!(kind.is_temporary(), kind == SSAVarNameKind::Temporary);
-            assert_eq!(kind.is_memory(), kind == SSAVarNameKind::Memory);
-            assert_eq!(
-                kind.is_address_space(),
-                kind == SSAVarNameKind::AddressSpace
-            );
-            assert_eq!(
-                kind.is_global_symbol(),
-                matches!(
-                    kind,
-                    SSAVarNameKind::Symbol
-                        | SSAVarNameKind::Object
-                        | SSAVarNameKind::Data
-                        | SSAVarNameKind::Got
-                )
-            );
-        }
-
-        assert_eq!(
-            SSAVarNameKind::strip_constant_prefix("const:0x42"),
-            Some("0x42")
-        );
-        assert_eq!(SSAVarNameKind::strip_constant_prefix("tmp:0x42"), None);
-        assert_eq!(
-            SSAVarNameKind::strip_temporary_prefix("tmp:0x1000"),
-            Some("0x1000")
-        );
-        assert_eq!(
-            SSAVarNameKind::strip_temporary_prefix("unique:0x1000"),
-            Some("0x1000")
-        );
-        assert_eq!(SSAVarNameKind::strip_temporary_prefix("const:0x1000"), None);
-    }
-
-    #[test]
     fn test_next_version() {
         let v0 = SSAVar::initial("RSP", 8);
         let v1 = v0.next_version().expect("version 0 has a successor");
@@ -643,37 +531,13 @@ mod tests {
         assert_eq!(max.next_version(), None);
     }
 
+    /// A spelling's prefix is a display kind; only the constant flag makes a constant (D459).
     #[test]
     fn test_var_classification() {
-        let reg = SSAVar::new("RAX", 0, 8);
-        let tmp = SSAVar::new("tmp:0x1000", 0, 4);
-        let unique = SSAVar::new("unique:0x1000", 0, 4);
-        let cst = SSAVar::new("const:0x42", 0, 4);
-
-        assert!(reg.is_register());
-        assert!(!reg.is_temp());
-        assert!(!reg.is_const());
-        assert!(!reg.is_memory());
-
-        assert!(tmp.is_temp());
-        assert!(!tmp.is_const());
-        assert!(!tmp.is_register());
-        assert!(!tmp.is_memory());
-
-        assert!(unique.is_temp());
-        assert!(!unique.is_const());
-        assert!(!unique.is_register());
-        assert!(!unique.is_memory());
-
-        assert!(cst.is_const());
-        assert!(!cst.is_temp());
-        assert!(!cst.is_register());
-        assert!(!cst.is_memory());
-
-        let mem = SSAVar::new("ram:0x1000", 0, 8);
-        assert!(mem.is_memory());
-        assert!(!mem.is_const());
-        assert!(!mem.is_temp());
+        assert!(!SSAVar::new("RAX", 0, 8).is_const());
+        assert!(!SSAVar::new("tmp:0x1000", 0, 4).is_const());
+        assert!(!SSAVar::new("const:0x42", 0, 4).is_const());
+        assert!(SSAVar::constant(0x42, 4).is_const());
     }
 }
 

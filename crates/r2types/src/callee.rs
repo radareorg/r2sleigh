@@ -1,8 +1,8 @@
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
+use r2ssa::InstId;
 use r2ssa::dense::IdMap;
-use r2ssa::{InstId, SSAVarNameKind};
 
 use crate::{CalleeFact, CalleeLinkage, FunctionType, SignatureCertificateSource};
 
@@ -25,8 +25,6 @@ pub enum CalleeClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CalleeIdentityEvidence {
     DirectTarget,
-    RawMemoryName,
-    RawConstantName,
     ImportLinkage,
     InternalLinkage,
     CalleeFactName,
@@ -308,27 +306,19 @@ impl CalleeResolutionFacts {
 }
 
 impl CalleeIdentity {
+    /// A callee known only by its spelling: no class, no address and no evidence, since a name
+    /// decides neither (D459); the spelling is kept as written, case and all.
     pub fn from_name(name: &str) -> Self {
-        let lower = name.trim().to_ascii_lowercase();
-        let storage_kind = SSAVarNameKind::classify(&lower);
-        let target_addr = parse_raw_address_name(name);
-        // Linkage is a typed fact on the callee, never read off the spelling.
-        let (class, classification_evidence) = classify_callee_name(storage_kind);
-        let mut evidence = BTreeSet::new();
-        if let Some(classification_evidence) = classification_evidence {
-            evidence.insert(classification_evidence);
-        }
         let raw_name = name.trim().to_string();
-
         Self {
-            target_addr,
+            target_addr: None,
             raw_name: Some(raw_name.clone()),
             display_name: Some(raw_name),
-            class,
+            class: CalleeClass::Unknown,
             is_recursive: false,
             signature: None,
             signature_source: None,
-            evidence,
+            evidence: BTreeSet::new(),
         }
     }
 
@@ -416,16 +406,6 @@ impl CalleeIdentity {
         self.class
     }
 
-    pub fn is_raw_storage_target(&self) -> bool {
-        self.class == CalleeClass::RawAddress
-            && self.evidence.iter().any(|evidence| {
-                matches!(
-                    evidence,
-                    CalleeIdentityEvidence::RawMemoryName | CalleeIdentityEvidence::RawConstantName
-                )
-            })
-    }
-
     pub fn is_import_policy_authorized(&self) -> bool {
         import_policy_authorized_from_evidence(
             self.class,
@@ -486,44 +466,6 @@ impl CalleeIdentity {
         }
         None
     }
-}
-
-fn classify_callee_name(
-    storage_kind: SSAVarNameKind,
-) -> (CalleeClass, Option<CalleeIdentityEvidence>) {
-    match storage_kind {
-        SSAVarNameKind::Memory => (
-            CalleeClass::RawAddress,
-            Some(CalleeIdentityEvidence::RawMemoryName),
-        ),
-        SSAVarNameKind::Constant => (
-            CalleeClass::RawAddress,
-            Some(CalleeIdentityEvidence::RawConstantName),
-        ),
-        _ => (CalleeClass::Unknown, None),
-    }
-}
-
-fn parse_raw_address_name(name: &str) -> Option<u64> {
-    let lower = name.trim().to_ascii_lowercase();
-    let kind = SSAVarNameKind::classify(&lower);
-    let payload = match kind {
-        SSAVarNameKind::Memory => lower.strip_prefix("ram:")?,
-        SSAVarNameKind::Constant => lower.strip_prefix("const:")?,
-        _ => return None,
-    };
-    parse_address_payload(payload)
-}
-
-fn parse_address_payload(payload: &str) -> Option<u64> {
-    let value = payload.split('_').next().unwrap_or(payload);
-    if let Some(hex) = value.strip_prefix("0x") {
-        return u64::from_str_radix(hex, 16).ok();
-    }
-    if value.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return u64::from_str_radix(value, 16).ok();
-    }
-    value.parse().ok()
 }
 
 #[cfg(test)]
@@ -607,29 +549,27 @@ mod tests {
         }
     }
 
+    /// No spelling decides a callee's class or address, and the name keeps its case (D459).
     #[test]
     fn callee_identity_class_is_never_read_off_a_namespace_spelling() {
-        let cases = [
-            ("ram:401000_0", CalleeClass::RawAddress),
-            ("const:0x401000", CalleeClass::RawAddress),
-            ("sym.imp.printf", CalleeClass::Unknown),
-            ("imp.printf", CalleeClass::Unknown),
-            ("reloc.memcpy", CalleeClass::Unknown),
-            ("sym.helper", CalleeClass::Unknown),
-            ("fcn.401000", CalleeClass::Unknown),
-            ("helper", CalleeClass::Unknown),
+        let names = [
+            "ram:401000_0",
+            "const:0x401000",
+            "RAM:401000",
+            "sym.imp.printf",
+            "imp.printf",
+            "reloc.memcpy",
+            "sym.helper",
+            "fcn.401000",
+            "Helper",
         ];
-
-        for (name, class) in cases {
+        for name in names {
             let identity = CalleeIdentity::from_name(name);
             assert_eq!(identity.raw_name(), name);
             assert_eq!(identity.display_name.as_deref(), Some(name));
-            assert_eq!(identity.class(), class, "{name}");
-            assert_eq!(
-                identity.is_raw_storage_target(),
-                class == CalleeClass::RawAddress,
-                "{name}",
-            );
+            assert_eq!(identity.class(), CalleeClass::Unknown, "{name}");
+            assert_eq!(identity.target_addr, None, "{name}");
+            assert!(identity.evidence.is_empty(), "{name}");
             assert!(!identity.is_import_policy_authorized(), "{name}");
         }
     }
@@ -1289,17 +1229,9 @@ mod tests {
             evidence: BTreeSet::new(),
         };
 
-        assert!(!base.is_raw_storage_target());
-
-        let mut imported_without_evidence = base.clone();
+        let mut imported_without_evidence = base;
         imported_without_evidence.class = CalleeClass::Imported;
         assert!(!imported_without_evidence.is_import_policy_authorized());
-
-        let mut raw_with_evidence = base;
-        raw_with_evidence
-            .evidence
-            .insert(CalleeIdentityEvidence::RawMemoryName);
-        assert!(raw_with_evidence.is_raw_storage_target());
 
         let import_policy_authorized = imported_without_evidence.with_import_linkage_evidence();
         assert!(import_policy_authorized.is_import_policy_authorized());
@@ -1309,22 +1241,6 @@ mod tests {
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
-
-    fn pick_name_kind(tag: u8) -> SSAVarNameKind {
-        match tag % 11 {
-            0 => SSAVarNameKind::RegisterAlias,
-            1 => SSAVarNameKind::Temporary,
-            2 => SSAVarNameKind::Constant,
-            3 => SSAVarNameKind::Memory,
-            4 => SSAVarNameKind::AddressSpace,
-            5 => SSAVarNameKind::Symbol,
-            6 => SSAVarNameKind::Object,
-            7 => SSAVarNameKind::Data,
-            8 => SSAVarNameKind::Got,
-            9 => SSAVarNameKind::Frame,
-            _ => SSAVarNameKind::Ordinary,
-        }
-    }
 
     fn pick_callee_class(tag: u8) -> CalleeClass {
         match tag % 6 {
@@ -1345,26 +1261,16 @@ mod kani_proofs {
         }
     }
 
+    /// No spelling decides a callee's class or address (D459), which replaces the proof that the
+    /// class read only the spelling's storage kind: no class is read off a spelling at all.
     #[kani::proof]
-    fn callee_name_classification_reads_only_storage_kind() {
-        let storage_kind = pick_name_kind(kani::any());
-
-        let (class, evidence) = classify_callee_name(storage_kind);
-
-        match storage_kind {
-            SSAVarNameKind::Memory => {
-                assert_eq!(class, CalleeClass::RawAddress);
-                assert_eq!(evidence, Some(CalleeIdentityEvidence::RawMemoryName));
-            }
-            SSAVarNameKind::Constant => {
-                assert_eq!(class, CalleeClass::RawAddress);
-                assert_eq!(evidence, Some(CalleeIdentityEvidence::RawConstantName));
-            }
-            _ => {
-                assert_eq!(class, CalleeClass::Unknown);
-                assert_eq!(evidence, None);
-            }
-        }
+    #[kani::unwind(20)]
+    fn callee_identity_from_a_name_states_no_class_and_no_address() {
+        let names = ["ram:401000_0", "const:0x401000", "sym.imp.printf", "helper"];
+        let name = names[usize::from(kani::any::<u8>()) % names.len()];
+        let identity = CalleeIdentity::from_name(name);
+        assert_eq!(identity.class(), CalleeClass::Unknown);
+        assert_eq!(identity.target_addr, None);
     }
 
     #[kani::proof]
