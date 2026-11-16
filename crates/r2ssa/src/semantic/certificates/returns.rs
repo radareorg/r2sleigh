@@ -30,10 +30,7 @@ pub(crate) fn collect_machine_return_control_certificates(
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
     unobserved: &crate::deadphi::DeadPhis,
-) -> (
-    crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
-    crate::dense::IdMap<InstId, InstId>,
-) {
+) -> MachineReturnControls {
     let mut certificates = crate::dense::IdMap::default();
     let mut by_inst = crate::dense::IdMap::default();
     for (at, boundary) in &boundaries.returns {
@@ -118,28 +115,22 @@ pub(crate) fn collect_machine_return_control_certificates(
                         break;
                     }
                     reload_object = Some(access.object);
-                    // The slot this reload came from holds the return address
-                    // and nothing else. Its one write is the prologue's save,
-                    // and the value it saves is the return address the function
-                    // was entered with. Save and reload are one fact about
-                    // control, so the certificate that answers for the reload
-                    // answers for the save too; leaving the save to another
-                    // collector is what renders it as a store to a variable no
-                    // one reads, assigned from an entry value nothing wrote.
-                    let object_accesses = structured
-                        .memory_accesses
-                        .values()
-                        .filter(|other| other.object == access.object)
-                        .collect::<Vec<_>>();
-                    let writes = object_accesses
-                        .iter()
-                        .filter(|other| other.is_write)
-                        .collect::<Vec<_>>();
-                    let reads = object_accesses
-                        .iter()
-                        .filter(|other| !other.is_write)
-                        .collect::<Vec<_>>();
-                    if let ([store], [only_read]) = (writes.as_slice(), reads.as_slice())
+                    // The slot's one write saves the entry return address and its one read is this
+                    // reload: one fact about control, so this certificate claims the save too.
+                    let pair = match structured.access_ids_of(access.object) {
+                        [first, second] => structured
+                            .memory_accesses
+                            .get(first)
+                            .zip(structured.memory_accesses.get(second)),
+                        _ => None,
+                    };
+                    let save =
+                        pair.and_then(|(first, second)| match (first.is_write, second.is_write) {
+                            (true, false) => Some((first, second)),
+                            (false, true) => Some((second, first)),
+                            _ => None,
+                        });
+                    if let Some((store, only_read)) = save
                         && only_read.id == access.id
                         && store.provenance_complete
                         && store.space == SpaceId::Ram
@@ -223,7 +214,21 @@ pub(crate) fn collect_machine_return_control_certificates(
         }
         certificates.insert(at, certificate);
     }
-    (certificates, by_inst)
+    let objects = (certificates.values())
+        .filter_map(MachineReturnControlCertificate::claimed_stack_object)
+        .collect();
+    MachineReturnControls {
+        certificates,
+        by_inst,
+        objects,
+    }
+}
+
+/// The body's return controls, the instructions each claims, and the stack objects they claim.
+pub(crate) struct MachineReturnControls {
+    pub(crate) certificates: crate::dense::IdMap<InstId, MachineReturnControlCertificate>,
+    pub(crate) by_inst: crate::dense::IdMap<InstId, InstId>,
+    pub(crate) objects: crate::dense::IdSet<ObjectId>,
 }
 
 pub(crate) fn collect_return_value_certificates(
@@ -620,5 +625,210 @@ pub(crate) fn return_carrier_for_boundary_value(
                 memory_access: Some(reload.load_access),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MachineReturnControlCertificate;
+    use crate::{CanonicalStorageId, CanonicalStorageSpace, SourceMachineRoles, SsaArtifact};
+    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+
+    const RA: u64 = 16;
+    const SP: u64 = 32;
+
+    fn arch() -> crate::Arch {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("rax", 0, 8));
+        arch.add_register(RegisterDef::new("rdi", 8, 8));
+        arch.add_register(RegisterDef::new("rip", RA, 8));
+        arch.add_register(RegisterDef::new("rsp", SP, 8));
+        crate::Arch::from(arch)
+    }
+
+    fn register(offset: u64) -> CanonicalStorageId {
+        CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        }
+    }
+
+    fn roles() -> SourceMachineRoles {
+        SourceMachineRoles::new(Some(register(RA)), Some(register(SP))).expect("machine roles")
+    }
+
+    /// Calls keep the stack pointer and return in `rax`.
+    fn conventions() -> r2source::Conventions {
+        r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+            .result(r2source::convention::SlotClass::Integer, register(0))
+            .preserved([register(SP)])
+            .conventions()
+    }
+
+    /// `[sp + offset] = value`, the address in a temporary of this block.
+    fn store(block: &mut R2ILBlock, offset: u64, value: Varnode) {
+        let address = Varnode::unique(0x100 + offset, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: Varnode::register(SP, 8),
+            b: Varnode::constant(offset, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: address,
+            val: value,
+        });
+    }
+
+    /// A body that saves the return address at `[sp + 8]` and one local per return, calls a
+    /// function nothing bounds, and has `returns` returns: each loads its local into `rax` and
+    /// reloads the return address from the save.
+    fn saved_return_body(returns: u64) -> Vec<R2ILBlock> {
+        let frame = 16 + 8 * returns;
+        let test_at = |index: u64| 0x2000 + 0x10 * index;
+        let return_at = |index: u64| 0x8000 + 0x10 * index;
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::IntSub {
+            dst: Varnode::register(SP, 8),
+            a: Varnode::register(SP, 8),
+            b: Varnode::constant(frame, 8),
+        });
+        store(&mut entry, 8, Varnode::register(RA, 8));
+        for index in 0..returns {
+            store(&mut entry, 16 + 8 * index, Varnode::constant(index, 8));
+        }
+        // The call may write the frame, so every store stays one.
+        entry.push(R2ILOp::Call {
+            target: Varnode::constant(0x5000, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::constant(test_at(0), 8),
+        });
+        let mut blocks = vec![entry];
+        // Each test falls through to the next, the last to the first return.
+        for index in 0..returns {
+            let mut test = R2ILBlock::new(test_at(index), 0x10);
+            let taken = Varnode::unique(0x50, 1);
+            test.push(R2ILOp::IntEqual {
+                dst: taken.clone(),
+                a: Varnode::register(8, 8),
+                b: Varnode::constant(index, 8),
+            });
+            test.push(R2ILOp::CBranch {
+                target: Varnode::constant(return_at(index), 8),
+                cond: taken,
+            });
+            blocks.push(test);
+        }
+        let mut last = R2ILBlock::new(test_at(returns), 4);
+        last.push(R2ILOp::Branch {
+            target: Varnode::constant(return_at(0), 8),
+        });
+        blocks.push(last);
+        for index in 0..returns {
+            let mut leave = R2ILBlock::new(return_at(index), 4);
+            load(&mut leave, 16 + 8 * index, Varnode::register(0, 8));
+            load(&mut leave, 8, Varnode::register(RA, 8));
+            leave.push(R2ILOp::IntAdd {
+                dst: Varnode::register(SP, 8),
+                a: Varnode::register(SP, 8),
+                b: Varnode::constant(frame, 8),
+            });
+            leave.push(R2ILOp::Return {
+                target: Varnode::register(RA, 8),
+            });
+            blocks.push(leave);
+        }
+        blocks
+    }
+
+    /// `dst = [sp + offset]`, the address in a temporary of this block.
+    fn load(block: &mut R2ILBlock, offset: u64, dst: Varnode) {
+        let address = Varnode::unique(0x100 + offset, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: Varnode::register(SP, 8),
+            b: Varnode::constant(offset, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst,
+            space: SpaceId::Ram,
+            addr: address,
+        });
+    }
+
+    fn artifact(blocks: &[R2ILBlock]) -> SsaArtifact {
+        SsaArtifact::for_decompile_with(
+            blocks,
+            crate::function::DecompileInputs {
+                arch: Some(&arch()),
+                machine_roles: roles(),
+                conventions: Some(conventions()),
+                ..Default::default()
+            },
+        )
+        .expect("artifact")
+    }
+
+    /// Recovery collects the return controls alone; over the same body the objects they claim are
+    /// the set the whole collection states, and the save answers as frame management (D422).
+    #[test]
+    fn the_return_controls_arm_states_the_objects_its_controls_claim() {
+        let whole = artifact(&saved_return_body(1));
+        let claimed = |controls: &crate::dense::IdMap<_, MachineReturnControlCertificate>| {
+            (controls.values())
+                .filter_map(MachineReturnControlCertificate::claimed_stack_object)
+                .collect::<Vec<_>>()
+        };
+        let stated = claimed(&whole.certificates().machine_return_controls);
+        assert_eq!(stated.len(), 1, "the save is claimed");
+        let recovery = crate::semantic::PreparedFunctionFacts::collect_for_recovery(
+            whole.function(),
+            (Some(whole.decompile_prep_facts()), whole.graph()),
+            whole.machine_context(),
+            None,
+        )
+        .expect("an unchecked control never stops");
+        let certificates = &recovery.certificates;
+        assert_eq!(claimed(&certificates.machine_return_controls), stated);
+        assert_eq!(
+            certificates
+                .return_control_objects
+                .iter()
+                .collect::<Vec<_>>(),
+            stated
+        );
+        assert!(whole.frame_managed_stack_object(stated[0]));
+        assert!(!whole.declarable_stack_object(stated[0]));
+    }
+
+    /// The element visits of asking, of a body with `returns` returns, whether each of its
+    /// objects is declarable.
+    #[cfg(feature = "work-meter")]
+    fn declarable_visits(returns: u64) -> u64 {
+        let artifact = artifact(&saved_return_body(returns));
+        let objects = artifact.objects().objects.keys();
+        assert!(objects.len() as u64 > returns, "one question per local");
+        let here = || crate::dense::element_visits_on_this_thread().expect("a work-meter build");
+        let before = here();
+        let declarable =
+            (objects.filter(|object| artifact.declarable_stack_object(**object))).count();
+        let visits = here() - before;
+        assert!(declarable as u64 >= returns, "each local is declarable");
+        visits
+    }
+
+    /// A question about one object reads that object's facts: doubling the returns and locals
+    /// at most doubles the visits the questions make (D422).
+    #[cfg(feature = "work-meter")]
+    #[test]
+    fn declarable_questions_grow_linearly_with_the_returns() {
+        let (once, twice) = (declarable_visits(64), declarable_visits(128));
+        assert!(
+            twice as f64 <= 2.05 * once as f64,
+            "{once} visits at 64 returns, {twice} at 128"
+        );
     }
 }

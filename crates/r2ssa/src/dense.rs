@@ -36,6 +36,7 @@ dense_id!(crate::graph::ValueId);
 dense_id!(crate::graph::InstId);
 dense_id!(crate::graph::BlockId);
 dense_id!(crate::semantic::CallSiteId);
+dense_id!(crate::semantic::ObjectId);
 
 /// A value for every id below a bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,6 +593,12 @@ impl<I: DenseId, T> Csr<I, T> {
         self.items.shrink_to_fit();
     }
 
+    /// `id`'s items as a counted iteration (D417).
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn row(&self, id: I) -> Visits<std::slice::Iter<'_, T>> {
+        visits(self.get(id).iter())
+    }
+
     /// `id`'s items; empty for an id at or past the bound.
     #[inline]
     pub fn get(&self, id: I) -> &[T] {
@@ -608,6 +615,17 @@ impl<I: DenseId, T> Csr<I, T> {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// No rows: every id reads an empty slice.
+impl<I, T> Default for Csr<I, T> {
+    fn default() -> Self {
+        Self {
+            starts: vec![0],
+            items: Vec::new(),
+            ids: PhantomData,
+        }
     }
 }
 
@@ -1148,6 +1166,15 @@ pub fn element_visits() -> Option<u64> {
     None
 }
 
+/// The element visits this thread counted, in a `work-meter` build: a test's own work, whatever
+/// other tests run beside it.
+pub fn element_visits_on_this_thread() -> Option<u64> {
+    #[cfg(feature = "work-meter")]
+    return Some(meter::THREAD_VISITS.with(std::cell::Cell::get));
+    #[cfg(not(feature = "work-meter"))]
+    None
+}
+
 /// An iterator over a function-scale table: itself unless the build meters work.
 #[cfg(not(feature = "work-meter"))]
 pub type Visits<I> = I;
@@ -1197,6 +1224,13 @@ mod meter {
     pub(super) static VISITS: AtomicU64 = AtomicU64::new(0);
     thread_local! {
         pub(super) static PAUSED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        pub(super) static THREAD_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// One visit, to the process count and this thread's.
+    fn count_one() {
+        VISITS.fetch_add(1, Ordering::Relaxed);
+        THREAD_VISITS.with(|visits| visits.set(visits.get() + 1));
     }
 
     /// Holds this thread's meter paused until dropped, a panic included.
@@ -1270,7 +1304,7 @@ mod meter {
             let item = self.iter.next()?;
             if self.metered {
                 self.count += 1;
-                VISITS.fetch_add(1, Ordering::Relaxed);
+                count_one();
             }
             Some(item)
         }
@@ -1285,7 +1319,7 @@ mod meter {
             let item = self.iter.next_back()?;
             if self.metered {
                 self.count += 1;
-                VISITS.fetch_add(1, Ordering::Relaxed);
+                count_one();
             }
             Some(item)
         }

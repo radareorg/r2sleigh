@@ -30,14 +30,10 @@ METER_N = 512
 SITE_GROWTH = 3.0
 # A dimension that fails today, by the row that owns its cost; held exactly both ways.
 OPEN = {}
-# D422: a question about one frame object scans every structured access or return control.
-SCAN_OPEN = {name: "D422" for name in ("calls_in_one_block", "unproven_returns",
-                                         "struct_parameter_accesses", "halting_calls",
-                                         "escaped_locals")}
+# A meter dimension that fails today, by the row that owns its cost; held exactly both ways.
+SCAN_OPEN = {}
 # The files whose superlinear sites each open row owns; a site elsewhere fails in any dimension.
-OPEN_SITES = {"D422": ("crates/r2ssa/src/function/mod.rs",
-                       "crates/r2ssa/src/semantic/certificates/mod.rs",
-                       "crates/r2ssa/src/semantic/certificates/returns.rs")}
+OPEN_SITES = {}
 START = "_start:\n    call f\n    mov $60, %eax\n    xor %edi, %edi\n    syscall\n"
 
 

@@ -1819,10 +1819,7 @@ impl SsaArtifact {
     pub fn frame_managed_stack_object(&self, object: crate::ObjectId) -> bool {
         let certificates = self.certificates();
         certificates.stack_frame_round_trips.contains_key(&object)
-            || certificates
-                .machine_return_controls
-                .values()
-                .any(|certificate| certificate.claimed_stack_object() == Some(object))
+            || certificates.return_control_objects.contains(object)
     }
 
     /// Whether this stack object is one the rendering can declare and name.
@@ -1900,7 +1897,6 @@ impl SsaArtifact {
                 .escaped(object)
                 .then_some(crate::ExtentAssumption::EscapedAddress),
         }?;
-        // Asked last: declarability scans the function's accesses.
         (self.declarable_stack_object(object) && self.proved_parameter_home(object).is_none())
             .then_some(assumption)
     }
@@ -1941,37 +1937,12 @@ impl SsaArtifact {
 
     /// Whether every access to this object is a call pushing its return address: the callee's frame, not a local.
     pub fn call_return_address_object(&self, object: crate::ObjectId) -> bool {
-        self.object_accessed_only_by(
-            object,
-            &self.certificates().call_return_address_stores,
-            true,
-        )
+        (self.certificates().call_return_address_objects).contains(object)
     }
 
     /// Whether every access to this object is one a decided compiler-inserted check made: the canary.
     pub fn compiler_inserted_stack_object(&self, object: crate::ObjectId) -> bool {
-        self.object_accessed_only_by(object, &self.certificates().compiler_inserted, false)
-    }
-
-    /// Whether the object has an access and every access is an instruction of `insts` (each a write, if asked).
-    fn object_accessed_only_by(
-        &self,
-        object: crate::ObjectId,
-        insts: &crate::dense::IdSet<crate::graph::InstId>,
-        writes_only: bool,
-    ) -> bool {
-        let stores = insts;
-        let mut accesses = self
-            .structured()
-            .memory_accesses
-            .values()
-            .filter(|access| access.object == object);
-        let mut any = false;
-        let pushed = accesses.all(|access| {
-            any = true;
-            (access.is_write || !writes_only) && stores.contains(access.id.inst)
-        });
-        any && pushed
+        (self.certificates().compiler_inserted_objects).contains(object)
     }
 
     /// The entry-relative offset of a stack object addressed from the entry stack pointer.
