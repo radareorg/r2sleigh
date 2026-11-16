@@ -682,9 +682,8 @@ mod tests {
         });
     }
 
-    /// A body that saves the return address at `[sp + 8]` and one local per return, calls a
-    /// function nothing bounds, and has `returns` returns: each loads its local into `rax` and
-    /// reloads the return address from the save.
+    /// Saves the return address at `[sp + 8]` and one local per return, calls an unbounded
+    /// function; each of `returns` returns loads its local into `rax` and reloads the save.
     fn saved_return_body(returns: u64) -> Vec<R2ILBlock> {
         let frame = 16 + 8 * returns;
         let test_at = |index: u64| 0x2000 + 0x10 * index;
