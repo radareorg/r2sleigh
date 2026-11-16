@@ -108,36 +108,6 @@ fn storage_of_every_width_is_a_type_c_spells() {
         assert_eq!(render_signature_type(&ty, 64), spelling);
         assert_eq!(crate::convert::parse_c_type_like(spelling, 64), Some(ty));
     }
-    // A carrier states a width and nothing else, so any type outranks it. A
-    // 128-bit integer is an integer, like the narrower ones.
-    assert!(inferred_type_is_generic(
-        Some(&CTypeLike::BitVector(256)),
-        64
-    ));
-    assert!(!inferred_type_is_generic(
-        Some(&CTypeLike::machine_storage(128, Signedness::Signed)),
-        64
-    ));
-}
-
-#[test]
-fn type_name_policy_matches_planner_guard() {
-    let pointer = |ty: CTypeLike| CTypeLike::Pointer(Box::new(ty));
-    for generic in [
-        pointer(CTypeLike::Void),
-        pointer(CTypeLike::Const(Box::new(CTypeLike::typedef("char")))),
-        pointer(CTypeLike::typedef("unsigned char")),
-        CTypeLike::typedef("unsigned long"),
-    ] {
-        assert!(
-            inferred_type_is_generic(Some(&generic), 64),
-            "{generic:?} should stay a weak planner type"
-        );
-    }
-    assert!(!inferred_type_is_generic(
-        Some(&parse_test_type("struct real_type *", 64)),
-        64
-    ));
 }
 
 #[test]
@@ -176,7 +146,6 @@ fn semantic_role_summary_set(
 #[test]
 fn a_declared_struct_spelled_like_a_placeholder_keeps_its_type() {
     let declared = CTypeLike::Pointer(Box::new(CTypeLike::Struct("anon_cfg".to_owned())));
-    assert!(!inferred_type_is_generic(Some(&declared), 64));
     let current_signature = FunctionSignatureSpec {
         ret_type: Some(CTypeLike::Void),
         params: vec![FunctionParamSpec {

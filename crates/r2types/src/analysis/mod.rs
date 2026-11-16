@@ -562,7 +562,7 @@ fn merged_context_and_summary_callee_facts(
 }
 
 fn build_type_analysis_inner(
-    mut input: DerivedTypeAnalysisInput,
+    input: DerivedTypeAnalysisInput,
     callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
@@ -629,11 +629,6 @@ fn build_type_analysis_inner(
     );
     let out_param_certificates = out_param_certificates_from_projection(
         &semantic_projection,
-        merged_signature.as_ref(),
-        input.ptr_bits,
-    );
-    apply_signature_context_overrides(
-        &mut input.inferred_signature,
         merged_signature.as_ref(),
         input.ptr_bits,
     );

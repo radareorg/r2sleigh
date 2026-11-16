@@ -2,23 +2,6 @@
 
 use super::*;
 
-/// A typed C name that is no plain word: `bool`, an enum, a typedef that resolves.
-fn type_is_authoritative_named_scalar_role(ty: &CTypeLike) -> bool {
-    match ty {
-        CTypeLike::Bool | CTypeLike::Enum(_) => true,
-        CTypeLike::Typedef { name, ty } => typedef_resolves(name, ty),
-        _ => false,
-    }
-}
-
-pub(crate) fn param_has_authoritative_named_scalar_role(param: &FunctionParamSpec) -> bool {
-    !crate::signature_param_name_is_weak(param.name.as_deref())
-        && param
-            .ty
-            .as_ref()
-            .is_some_and(type_is_authoritative_named_scalar_role)
-}
-
 pub(crate) fn merge_local_signature_into_merged_signature(
     external: Option<FunctionSignatureSpec>,
     local: Option<FunctionSignatureSpec>,
@@ -69,12 +52,14 @@ pub(crate) fn merge_local_signature_into_merged_signature(
                 if target.name.is_none() {
                     target.name = local_param.name.clone();
                 }
-                if local_param_should_override_external(
+                // A declared parameter's stated type stands; inference fills what it leaves (D481).
+                if external_param_count_is_authoritative && target.ty.is_some() {
+                    continue;
+                }
+                if local_signature_should_override_external(
                     local_param.ty.as_ref(),
                     target.ty.as_ref(),
-                    target.name.as_deref(),
                 ) || (!external_param_count_is_authoritative
-                    && target.name.is_none()
                     && scalar_signedness_conflicts(local_param.ty.as_ref(), target.ty.as_ref()))
                 {
                     target.ty = local_param.ty;
@@ -100,17 +85,6 @@ pub(crate) fn local_signature_should_override_external(
         Some(external) if is_generic_signature_type(Some(external)) => true,
         Some(external) => local_scalar_override_should_apply(local, external),
     }
-}
-
-pub(crate) fn local_param_should_override_external(
-    local: Option<&CTypeLike>,
-    external: Option<&CTypeLike>,
-    external_name: Option<&str>,
-) -> bool {
-    if external.is_some() && external_name.is_some() {
-        return false;
-    }
-    local_signature_should_override_external(local, external)
 }
 
 pub(crate) fn local_scalar_override_should_apply(local: &CTypeLike, external: &CTypeLike) -> bool {
@@ -163,84 +137,4 @@ pub(crate) fn scalar_signedness_conflicts(
             && !matches!(external_signedness, Signedness::Unknown)
             && local_signedness != external_signedness
     )
-}
-
-pub(crate) fn apply_signature_context_overrides(
-    signature_out: &mut InferredSignature,
-    signature: Option<&FunctionSignatureSpec>,
-    ptr_bits: u32,
-) {
-    let Some(signature) = signature else {
-        return;
-    };
-
-    if signature.basis == SignatureBasis::Declared
-        && signature_out.params.len() > signature.params.len()
-    {
-        signature_out.params.truncate(signature.params.len());
-    }
-
-    while signature_out.params.len() < signature.params.len() {
-        let idx = signature_out.params.len();
-        let ty = signature
-            .params
-            .get(idx)
-            .and_then(|param| param.ty.clone())
-            .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void)));
-        signature_out.params.push(InferredSignatureParam {
-            name: r2source::positional_parameter_name(idx),
-            ty,
-        });
-    }
-
-    if let Some(ret_ty) = signature.ret_type.as_ref()
-        && !is_generic_signature_type(signature.ret_type.as_ref())
-    {
-        signature_out.ret_type = Some(ret_ty.clone());
-    }
-
-    for (idx, param) in signature.params.iter().enumerate() {
-        if let Some(ty) = param.ty.as_ref()
-            && (!inferred_type_is_generic(Some(ty), ptr_bits)
-                || param_has_authoritative_named_scalar_role(param))
-            && let Some(inferred_param) = signature_out.params.get_mut(idx)
-        {
-            inferred_param.ty = ty.clone();
-        }
-        if let Some(name) = &param.name
-            && let Some(inferred_param) = signature_out.params.get_mut(idx)
-        {
-            inferred_param.name = name.clone();
-        }
-    }
-}
-
-/// Whether an inferred type says nothing a weaker hint may not replace: none, a carrier of a width
-/// C has no integer for, an opaque or `void`/`char` pointer, or a C integer name (D268).
-pub(crate) fn inferred_type_is_generic(ty: Option<&CTypeLike>, ptr_bits: u32) -> bool {
-    ty.is_none_or(|ty| {
-        type_is_generic(&crate::signature_infer::materialize_signature_type_like(
-            ty.clone(),
-            ptr_bits,
-        ))
-    })
-}
-
-fn type_is_generic(ty: &CTypeLike) -> bool {
-    let named = |ty: &CTypeLike, names: &[&str]| matches!(ty, CTypeLike::Typedef { name, .. } if names.contains(&name.trim()));
-    match ty {
-        CTypeLike::BitVector(_) => true,
-        CTypeLike::Pointer(pointee) => {
-            let pointee = match pointee.as_ref() {
-                CTypeLike::Const(inner) => inner.as_ref(),
-                pointee => pointee,
-            };
-            matches!(pointee, CTypeLike::Void | CTypeLike::Unknown)
-                || named(pointee, &["char", "signed char", "unsigned char"])
-        }
-        ty => named(
-            ty,
-            &["int", "unsigned", "unsigned int", "long", "unsigned long"],
-        ),
-    }
 }

@@ -583,33 +583,6 @@ impl FunctionTypeFacts {
     }
 }
 
-pub fn signature_param_name_is_weak(name: Option<&str>) -> bool {
-    let Some(name) = name else {
-        return true;
-    };
-    let normalized = name.trim().to_ascii_lowercase();
-    normalized.is_empty()
-        || matches!(
-            normalized.as_str(),
-            "status"
-                | "err"
-                | "errno"
-                | "input"
-                | "output"
-                | "stream"
-                | "value"
-                | "val"
-                | "slot"
-                | "tmp"
-                | "a"
-                | "b"
-                | "c"
-                | "d"
-                | "e"
-                | "f"
-        )
-}
-
 /// The signature states a type, or names a parameter.
 pub fn signature_is_specific(signature: &FunctionSignatureSpec) -> bool {
     signature.ret_type.is_some()

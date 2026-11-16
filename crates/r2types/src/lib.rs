@@ -20,9 +20,7 @@ pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
 
-pub(crate) use facts::{
-    SignatureCertificate, is_generic_signature_type, signature_param_name_is_weak,
-};
+pub(crate) use facts::{SignatureCertificate, is_generic_signature_type};
 
 pub use callee::{
     CalleeClass, CalleeIdentity, CalleeIdentityContext, CalleeIdentityKey, CalleeResolutionFacts,

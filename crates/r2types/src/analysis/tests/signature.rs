@@ -1502,3 +1502,54 @@ fn a_declared_signature_with_unnamed_parameters_keeps_its_arity() {
         assert_eq!(merged.params.len(), 2, "{read} read");
     }
 }
+
+/// A declared parameter's stated type stands against a narrower local reading, named or not (D481).
+#[test]
+fn a_declared_parameter_type_is_never_replaced_by_local_inference() {
+    let size = CTypeLike::Typedef {
+        name: "size_t".to_owned(),
+        ty: Box::new(CTypeLike::Int {
+            bits: 64,
+            signedness: Signedness::Unsigned,
+        }),
+    };
+    let unsigned_long = CTypeLike::Int {
+        bits: 64,
+        signedness: Signedness::Unsigned,
+    };
+    let declared = FunctionSignatureSpec {
+        ret_type: Some(CTypeLike::Void),
+        params: vec![
+            FunctionParamSpec {
+                name: Some("value".to_string()),
+                ty: Some(CTypeLike::Bool),
+            },
+            FunctionParamSpec {
+                name: None,
+                ty: Some(size.clone()),
+            },
+            FunctionParamSpec {
+                name: None,
+                ty: Some(unsigned_long.clone()),
+            },
+        ],
+        basis: SignatureBasis::Declared,
+    };
+    let local = FunctionSignatureSpec {
+        ret_type: Some(CTypeLike::Void),
+        params: [8, 32, 32]
+            .map(|bits| FunctionParamSpec {
+                name: None,
+                ty: Some(signed_int_type(bits)),
+            })
+            .to_vec(),
+        basis: SignatureBasis::Inferred,
+    };
+    let merged = merge_local_signature_into_merged_signature(Some(declared), Some(local))
+        .expect("merged signature");
+    let types = merged.params.iter().map(|param| param.ty.clone());
+    assert_eq!(
+        types.collect::<Vec<_>>(),
+        [Some(CTypeLike::Bool), Some(size), Some(unsigned_long)]
+    );
+}
