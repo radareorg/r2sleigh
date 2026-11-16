@@ -150,7 +150,7 @@ fn a_declared_struct_spelled_like_a_placeholder_keeps_its_type() {
         ret_type: Some(CTypeLike::Void),
         params: vec![FunctionParamSpec {
             name: Some("cfg".to_string()),
-            ty: Some(declared.clone()),
+            ty: Some(declared),
         }],
         basis: SignatureBasis::Declared,
     };

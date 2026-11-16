@@ -139,9 +139,8 @@ pub struct SSAVar {
     /// This is identity only, not storage authority. Canonical storage remains
     /// in the source-retained graph facts.
     rename_disambiguator: u32,
-    /// `CONSTANT` where `constant_bits` is a constant this variable carries; `LANE` for a lane
-    /// temporary, a register root's projection with no storage of its own. One byte, so identity
-    /// compares and hashes it once (D477).
+    /// `CONSTANT`: `constant_bits` is a carried constant; `LANE`: a lane temporary, a register
+    /// root's projection with no storage of its own (D477).
     flags: u8,
 }
 

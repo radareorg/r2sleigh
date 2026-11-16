@@ -664,7 +664,7 @@ fn build_type_analysis_inner(
     .build();
     DerivedTypeAnalysis {
         function_facts: FunctionFacts::new(type_facts.clone())
-            .with_assumptions(input.parsed_context.assumptions.clone())
+            .with_assumptions(input.parsed_context.assumptions)
             .with_summary_view(summary_view)
             .with_diagnostics(type_facts.diagnostics.clone()),
         type_facts,
