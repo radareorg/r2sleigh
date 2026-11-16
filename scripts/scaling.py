@@ -29,9 +29,8 @@ METER_N = 512
 # A site whose own visits more than triple from N to 2N grows faster than n^1.58.
 SITE_GROWTH = 3.0
 # A dimension that fails today, by the row that owns its cost; held exactly both ways.
-# rmw_round_trips: memory SSA's transfer asks every held location per access (`build_memory_ssa`,
-# `memory_locations_may_alias` 3.95x), Ir 2.367 at N = 64; D452's open part, until a row owns it.
-OPEN = {"rmw_round_trips": "D452"}
+# rmw_round_trips: memory SSA asks every held location per access, Ir 2.367 at N = 64 (D457).
+OPEN = {"rmw_round_trips": "D457"}
 # A meter dimension that fails today, by the row that owns its cost; held exactly both ways.
 SCAN_OPEN = {}
 # The files whose superlinear sites each open row owns; a site elsewhere fails in any dimension.
