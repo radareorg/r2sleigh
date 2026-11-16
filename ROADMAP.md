@@ -222,6 +222,7 @@ r2ssa
 | D374 | Every dispatch-table read pays a whole convention seal (`read_tables` about 11.0 of 74.7 G on pumasim `aa; pdd @ 0x3b6b20`); a read that needs only values pays none | that case falls, every table read identical over the D367 sweep | open |
 | D377 | A stated callee's incoming stack writes are `CallReads::writes`, apart from its reads | `native::a_place_a_stated_callee_writes_above_its_arguments_stays_a_load` | built dc96ad6a8, 88d232c19 |
 | D378 | A callee whose frame address escapes, or that indexes a frame object it may store through, bounds no incoming write (default-deny). D441 recovers `shape_recurse_mutual` and the three zig `main`s; shapes `main`, `shape_variadic_local` and aarch64 shapes `main` stay (kinds V, I, F). Kinds E and O were rejected in round 7 | those three records leave their cause | open |
+| D471 | Frame isolation as a stated premise: a callee writes the caller's frame only through a frame address it was handed, so memory the caller never exposes stays promoted, and the proof line names the premise the way D234 names the closed world. It covers D378's kinds E and O | a ruling accepts the citation (round 7 found none in the tree; C11 6.5.6 bounds pointer arithmetic to its object, and the psABI stack-frame figure is uncited) and resolves the contradiction with gates `native.rs:6708` and `:6770`; then golden regressions fall with certification held | held: needs a ruling |
 | D381 | A tail transfer's writes count in its body's incoming writes | `default_deny.rs` | built 207460def |
 | D389 | A promoted stack argument is found by entry offset in O(log n) | no test red on the parent: gate open | built 37bd70411 |
 | D390 | One `SiteModels` for rename, the frame walk, `callee_write_spans` and `call_reads` | the `SiteModels` unit test; no engine test red on the parent: gate open | built af3b87473 |
@@ -356,7 +357,9 @@ r2dec
 
 | Row | Fact or invariant | Gate | Status |
 |-----|-------------------|------|--------|
-| **D** Decompiler rewrite | `uncompress2` and `deflateInit2_` read by hand; the rendered function named by its entry, not its loop header's `root()` (audit W44) | none stated | open |
+| **D** Decompiler rewrite | `uncompress2` and `deflateInit2_` read by hand; the rendered function named by its entry, not its loop header's `root()` (audit W44) | readability on DecBench (2,621 functions, rebuild-design-8): 7,465 residual lines, 3,672 `r2dec gap` lines, 133 tail gotos and 588 unclosed jumps (SD), register-named temporaries (D470); each falls with equivalence and certification held | open |
+| D470 | Variable merging: SSA values that share one storage location and do not interfere join into one named local, so `rax_19`-style temporaries leave. r2ssa owns the interference over dense ids (needs F2.2's byte liveness); r2dec only names the merged local | register-named temporaries on DecBench fall; equivalence and certification held | open: after F2.2 |
+| D472 | The debugger ([debugger](doc/debugger.md)): its first two phases only, as one deferred row | the second phase's exit criteria in the doc | held: behind D, F2, Q, P4 and M |
 | **SD** Structuring and readability ([structure-dominator-tree](doc/adr-structure-dominator-tree.md)) | Inverted empty thens, merges spliced into the parent, dead reloads proved; the exit edge's copies after a latch-only loop; irreducible entries; the assignment before a joined return folded; tails of 5 to 16 statements (133 gotos); jumps over a block no rule closes (588) | no more labels or nesting than today on the census, each moved line judged | open |
 | D61 | A copy's place and text are read, and a copy may carry a residual. Next: bash `0x65bf0` and `0x48140` goldens read without the goto, and one engine test per guard; the rest waits for a producer | `structure/certify.rs` tests | open |
 | D63 | A merge with one gapped and one rendered forward copy reads residual; relaxing it is sound only while the emitted trap and the certificate agree (426 `gapped-forward-copy` edges) | bash `0x2dd90` and `0x48140` read first | held: conditional |
@@ -477,6 +480,16 @@ Cold pumasim `pdd` falls 1.61% and cold 0pack 0.44% against rebuild-design-7 (D4
 7. Witnesses: D425, D433's citation check, D350's upstream declaration, D421's one folder.
 8. D415's gates; D418 after D413 and the build key.
 9. Then the open rows and items by owner above, the lift and container first.
+
+### Order after round 9 (2026-11-16)
+
+The core is ready for output work on the call boundary and control flow (certification 0 invented, 0 false voids; every scaling dimension linear). Two core items gate readability:
+
+1. D211 stops at its proven-irreducible set; see Open questions.
+2. Core: **P4** (one frame model; `frame_agree.py` reads 0 of 582) and **F2**.2 (byte-granular liveness).
+3. Output: **SD**, D471 (after its ruling), D470 (after F2.2), then **D**.
+
+The rating audit at rebuild-design-8 decides whether frames or structuring go first.
 
 ### Hack ledger
 
@@ -667,6 +680,7 @@ Open questions
 --------------
 
 - AGENTS.md's Validation Bar still names the `rebuild` exemption (D27), which ended when `rebuild` merged as #142.
+- D211's gate of 5: the remaining functions include proven-irreducible residuals (find O2ni `0xf490` and O2 `0xeaf0`, round 8) and ones needing premises the binaries cannot state (C4, G). Proposed reading, pending the maintainer: every remaining function is a proven-irreducible residual or names its missing premise.
 - Item rows' open clauses (I, P4, P7, SD, T) and unknown-shaped clauses (D158 `elf_stripped`, D76 chain4500) are not yet checked against code.
 
-Next free row: D444. Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.
+Next free row: D450 (round 9 claims from D450; D470 to D472 taken out of order on 2026-11-16). Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.
