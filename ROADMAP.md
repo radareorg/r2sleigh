@@ -462,7 +462,8 @@ Order
 
 Round 8's exit, on rebuild-design-8: D211 20 functions and 28 sites (gate 5); floor callees 873;
 DecBench loads 39,354 and stores 24,059 over 2,621 functions, 2 refused; 32 golden records differ
-from master 500216e6d, 18 of them regressions; scan growth 2.000 on the five scaling dimensions.
+from master 500216e6d, 18 of them regressions; scan growth 2.000 on the five scaling dimensions;
+equivalence held, x86-64 744 equal and aarch64 749, `review.c` clang-O2 `fact` `slow` on both as in the baseline.
 Cold pumasim `pdd` falls 1.61% and cold 0pack 0.44% against rebuild-design-7 (D422).
 
 ### Next rounds, from the rulings
@@ -497,7 +498,7 @@ These records differ from master and are correct; they are not regressions. Judg
 | `register_tm_clones` in branchy 0x4010e0, frame_pointer_locals 0x10a0, hashes O2 0x4012b0, rv_O0g 0x1120, rv_O2 0x12e0, shapes 0x401100, two_units 0x10c0 | G | D445: `frame_dummy` tails to it and its only way in is the loader's `.init_array` call, whose glibc row reads no result (`dl-init.c` `call_init`, `r2abi::loader_call`); C identical, the proof line adds "no call reads the integer result register" | c14a75b3a |
 | cmd `member_calls` | G | D359 names the DWARF member call master printed bare | e508c86bb |
 
-The regression count is 18 at rebuild-design-7: 8 X, 5 X with C, 3 I, 1 V, and shapes 0x402206 `main`, whose proof line is a P move but whose C waits on V, I, E and O (D378). In each, master printed C resting on a call it could not bound, so the move is sound, but the fact that restores master's output is owed.
+The regression count is 18 at rebuild-design-7: 8 X, 5 X with C, 3 I, 1 V, and shapes 0x402206 `main`, whose proof line is a P move but whose C waits on V, I, E and O (D378). In each, master printed C resting on a call it could not bound, so the move is sound, but the fact that restores master's output is owed. At rebuild-design-8 it stays 18: D448 settles the C part of the 5 X with C, so 13 X, 3 I, 1 V and shapes `main`; D447 owes the 13 X.
 
 ### Rejected, no row
 
