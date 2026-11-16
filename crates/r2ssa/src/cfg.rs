@@ -165,9 +165,8 @@ impl DeclaredSuccessors {
             .collect()
     }
 
-    /// Of each source block whose last transfer the source could not follow, the one chunk `cfg`
-    /// ends where it ends; `None` where a block is undeclared or no single chunk ends there.
-    /// O((B + C) log C): chunk ends are indexed once, then each source block is one range read.
+    /// Of each unresolved source block, the one chunk `cfg` ends where it ends; `None` where a block
+    /// is undeclared or no single chunk ends there. O((B + C) log C): one index of chunk ends.
     pub(crate) fn unresolved_in(&self, blocks: &[R2ILBlock], cfg: &CFG) -> Option<BTreeSet<u64>> {
         if blocks
             .iter()
