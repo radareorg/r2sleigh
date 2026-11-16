@@ -402,7 +402,7 @@ r2dec
 | D359 | r2dec spells a projected member (`cur->next`) | census | built e65b14f36 |
 | D360 | An array member's element projects with its index (constant or guard-bounded). Open: r2types names no field and r2dec spells no `a[i]` (`member_indexed`) | `layouts::a_bounded_index_into_an_array_member_projects_its_element` | open (built in part eae6214be) |
 | D379 | A bound ends no C: r2dec ends control only at a proven `Never` | `default_deny.rs` | built f78e5f11e |
-| D489 | One owner drops relocation slots from data objects: `crates/r2dec/src/render/globals.rs:56-60` refuses a symbol spelled `reloc.`, a radare2 flag prefix, beside r2engine's `data_symbols`, which already drops the slots it states | the prefix test deleted from r2dec; census byte-identical | open |
+| D489 | One owner drops relocation slots from data objects: r2engine `data_symbols` (`crates/r2engine/src/native.rs:3231-3235`) drops a slot where a loader write sits at its place, and `Globals::at` no longer refuses a symbol spelled `reloc.`. Dry run on e3ee40d1b: 0 `Globals::at` calls with a `reloc.` symbol at no function over the census (392), `tests/db/cmd` (59) and DecBench (2,621). Census, `tests/db/cmd` and DecBench byte-identical | the prefix test deleted from r2dec; census byte-identical | built, rd10-ssa-dec |
 
 r2s
 ---

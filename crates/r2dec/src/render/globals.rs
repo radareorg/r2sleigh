@@ -53,9 +53,8 @@ impl<'a> Globals<'a> {
         taken: impl Fn(&str) -> bool,
     ) -> Option<Named> {
         let symbol = self.symbols.get(&address)?;
-        // radare2's `reloc.` names a slot holding the object's address (r2engine's `data_symbols`
-        // drops the slots it states), and code is a function: neither is the object.
-        if symbol.starts_with("reloc.") || self.functions.contains_key(&address) {
+        // Code is a function, no object; r2engine `data_symbols` drops relocation slots (D489).
+        if self.functions.contains_key(&address) {
             return None;
         }
         let name = c_identifier_for_data_symbol(symbol);
@@ -163,5 +162,35 @@ pub(crate) fn c_identifier_for_data_symbol(flag: &str) -> String {
         format!("g_{cleaned}")
     } else {
         cleaned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name proves nothing (AGENTS.md rule 6): r2engine `data_symbols` drops relocation slots
+    /// (D489), so a data symbol that arrives is an object whatever its flag space.
+    #[test]
+    fn a_reloc_spelled_data_symbol_is_an_object() {
+        let symbols = BTreeMap::from([(0x4010, "reloc.x".to_owned())]);
+        let functions = BTreeMap::new();
+        let types = ProgramDataObjectTypeFacts::default();
+        let globals = Globals {
+            symbols: &symbols,
+            functions: &functions,
+            types: &types,
+            ptr_bits: 64,
+            used: RefCell::new(BTreeMap::new()),
+            names: RefCell::new(BTreeMap::new()),
+        };
+        let word = MachineType::Integer {
+            width_bits: 64,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        };
+        assert!(globals.at(0x4010, &word, false, |_| false).is_some());
+        let objects = globals.objects();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].name, "x");
     }
 }
