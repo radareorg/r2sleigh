@@ -182,15 +182,20 @@ pub(crate) fn inferred_signature_to_spec(
     let params = signature
         .params
         .iter()
+        // Local inference names no parameter: `prepare.rs` spells each by its position (D480).
         .map(|param| FunctionParamSpec {
-            name: param.name.clone(),
+            name: None,
             ty: Some(preserving_c_typedefs(&param.ty)),
         })
         .collect::<Vec<_>>();
     if ret_type.is_none() && params.is_empty() {
         return None;
     }
-    Some(FunctionSignatureSpec { ret_type, params })
+    Some(FunctionSignatureSpec {
+        ret_type,
+        params,
+        basis: SignatureBasis::Inferred,
+    })
 }
 
 pub(crate) fn is_generic_signature_type(ty: Option<&CTypeLike>) -> bool {

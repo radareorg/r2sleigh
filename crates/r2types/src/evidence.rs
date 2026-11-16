@@ -1551,14 +1551,15 @@ mod tests {
             ret_type: Some(CTypeLike::Void),
             params: vec![
                 crate::FunctionParamSpec {
-                    name: "lhs".to_string(),
+                    name: Some("lhs".to_string()),
                     ty: Some(machine.clone()),
                 },
                 crate::FunctionParamSpec {
-                    name: "rhs".to_string(),
+                    name: Some("rhs".to_string()),
                     ty: Some(machine.clone()),
                 },
             ],
+            basis: crate::SignatureBasis::Declared,
         };
         let mut facts = crate::FunctionFacts::new(crate::FunctionTypeFacts {
             signature_certificate: crate::SignatureCertificate::from_signature(
@@ -1667,9 +1668,10 @@ mod tests {
         let signature = crate::FunctionSignatureSpec {
             ret_type: Some(CTypeLike::Void),
             params: vec![crate::FunctionParamSpec {
-                name: "length".to_string(),
+                name: Some("length".to_string()),
                 ty: Some(signed),
             }],
+            basis: crate::SignatureBasis::Declared,
         };
         let mut facts = crate::FunctionFacts::new(crate::FunctionTypeFacts {
             signature_certificate: crate::SignatureCertificate::from_signature(

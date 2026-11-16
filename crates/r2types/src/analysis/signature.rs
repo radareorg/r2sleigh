@@ -12,7 +12,7 @@ fn type_is_authoritative_named_scalar_role(ty: &CTypeLike) -> bool {
 }
 
 pub(crate) fn param_has_authoritative_named_scalar_role(param: &FunctionParamSpec) -> bool {
-    !crate::signature_param_name_is_weak(&param.name)
+    !crate::signature_param_name_is_weak(param.name.as_deref())
         && param
             .ty
             .as_ref()
@@ -28,8 +28,7 @@ pub(crate) fn merge_local_signature_into_merged_signature(
         (Some(signature), None) => Some(signature),
         (None, Some(signature)) => Some(signature),
         (Some(mut external), Some(local)) => {
-            let external_param_count_is_authoritative =
-                signature_param_count_is_authoritative(&external);
+            let external_param_count_is_authoritative = external.basis == SignatureBasis::Declared;
             // A declared `void` return says the function returns nothing. That
             // is an answer, not a missing one, and it is the only return type a
             // local reading of the machine cannot contradict: a function that
@@ -57,7 +56,7 @@ pub(crate) fn merge_local_signature_into_merged_signature(
                 external
                     .params
                     .resize_with(local.params.len(), || FunctionParamSpec {
-                        name: String::new(),
+                        name: None,
                         ty: None,
                     });
             }
@@ -67,18 +66,15 @@ pub(crate) fn merge_local_signature_into_merged_signature(
                     continue;
                 }
                 let target = &mut external.params[idx];
-                if target.name.is_empty() {
-                    target.name = r2source::positional_parameter_name(idx);
-                }
-                if !is_generic_arg_name(&local_param.name) && is_generic_arg_name(&target.name) {
+                if target.name.is_none() {
                     target.name = local_param.name.clone();
                 }
                 if local_param_should_override_external(
                     local_param.ty.as_ref(),
                     target.ty.as_ref(),
-                    &target.name,
+                    target.name.as_deref(),
                 ) || (!external_param_count_is_authoritative
-                    && is_generic_arg_name(&target.name)
+                    && target.name.is_none()
                     && scalar_signedness_conflicts(local_param.ty.as_ref(), target.ty.as_ref()))
                 {
                     target.ty = local_param.ty;
@@ -109,9 +105,9 @@ pub(crate) fn local_signature_should_override_external(
 pub(crate) fn local_param_should_override_external(
     local: Option<&CTypeLike>,
     external: Option<&CTypeLike>,
-    external_name: &str,
+    external_name: Option<&str>,
 ) -> bool {
-    if external.is_some() && !is_generic_arg_name(external_name) {
+    if external.is_some() && external_name.is_some() {
         return false;
     }
     local_signature_should_override_external(local, external)
@@ -178,9 +174,9 @@ pub(crate) fn apply_signature_context_overrides(
         return;
     };
 
-    let authoritative_param_count = signature_param_count_is_authoritative(signature)
-        || crate::signature_projection_is_exact(signature);
-    if authoritative_param_count && signature_out.params.len() > signature.params.len() {
+    if signature.basis == SignatureBasis::Declared
+        && signature_out.params.len() > signature.params.len()
+    {
         signature_out.params.truncate(signature.params.len());
     }
 
@@ -211,16 +207,12 @@ pub(crate) fn apply_signature_context_overrides(
         {
             inferred_param.ty = ty.clone();
         }
-        if !is_generic_arg_name(&param.name)
+        if let Some(name) = &param.name
             && let Some(inferred_param) = signature_out.params.get_mut(idx)
         {
-            inferred_param.name = param.name.clone();
+            inferred_param.name = name.clone();
         }
     }
-}
-
-pub(crate) fn signature_param_count_is_authoritative(signature: &FunctionSignatureSpec) -> bool {
-    crate::signature_param_count_is_authoritative(signature)
 }
 
 /// Whether an inferred type says nothing a weaker hint may not replace: none, a carrier of a width

@@ -822,18 +822,25 @@ fn trusted_source_signature(
         .map(|(index, parameter)| r2types::FunctionParamSpec {
             name: (parameter.name())
                 .filter(|name| !name.is_empty())
-                .map_or_else(
-                    || r2source::positional_parameter_name(index),
-                    str::to_string,
-                ),
+                .map(str::to_string),
             ty: typed(interface.and_then(|interface| interface.parameter_logical_value(index))),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // The prototype states its arity; an empty list does only where it is prototyped, a bit the
+    // declaration does not carry here, so it stays inferred (D480).
+    let basis = match interface.is_some() && !params.is_empty() {
+        true => r2types::SignatureBasis::Declared,
+        false => r2types::SignatureBasis::Inferred,
+    };
     let ret_type = match interface.map(r2ssa::SourceFunctionInterface::return_kind) {
         Some(r2ssa::SourceFunctionReturn::Void) => Some(r2types::CTypeLike::Void),
         _ => typed(interface.and_then(r2ssa::SourceFunctionInterface::return_logical_value)),
     };
-    let spec = r2types::FunctionSignatureSpec { ret_type, params };
+    let spec = r2types::FunctionSignatureSpec {
+        ret_type,
+        params,
+        basis,
+    };
     Some(spec)
 }
 

@@ -463,6 +463,7 @@ fn exact_source_return_type_preserves_signed_i32_with_matching_certificate() {
             signedness: crate::Signedness::Signed,
         }),
         params: Vec::new(),
+        basis: crate::SignatureBasis::Inferred,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(signature.clone()),
@@ -1668,12 +1669,13 @@ fn prepared_render_facts_certify_params_stack_memory_and_returns_by_semantic_id(
             signedness: crate::Signedness::Unsigned,
         }),
         params: vec![FunctionParamSpec {
-            name: "buffer".to_string(),
+            name: Some("buffer".to_string()),
             ty: Some(CTypeLike::Int {
                 bits: 64,
                 signedness: crate::Signedness::Unsigned,
             }),
         }],
+        basis: crate::SignatureBasis::Declared,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(signature.clone()),
@@ -2317,6 +2319,7 @@ fn decompile_type_override_requires_render_authorized_signature() {
     let base_signature = crate::FunctionSignatureSpec {
         ret_type: Some(crate::CTypeLike::Void),
         params: Vec::new(),
+        basis: crate::SignatureBasis::Inferred,
     };
     let override_signature = crate::FunctionSignatureSpec {
         ret_type: Some(crate::CTypeLike::Int {
@@ -2324,12 +2327,13 @@ fn decompile_type_override_requires_render_authorized_signature() {
             signedness: crate::Signedness::Unsigned,
         }),
         params: vec![crate::FunctionParamSpec {
-            name: "buf".to_string(),
+            name: Some("buf".to_string()),
             ty: Some(crate::CTypeLike::Pointer(Box::new(crate::CTypeLike::Int {
                 bits: 8,
                 signedness: crate::Signedness::Unsigned,
             }))),
         }],
+        basis: crate::SignatureBasis::Declared,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(base_signature.clone()),
@@ -2633,9 +2637,10 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
     let signature = FunctionSignatureSpec {
         ret_type: Some(CTypeLike::uint(32)),
         params: vec![FunctionParamSpec {
-            name: "arg1".to_string(),
+            name: None,
             ty: Some(CTypeLike::uint(64)),
         }],
+        basis: crate::SignatureBasis::Inferred,
     };
     let mut facts = FunctionFacts::new(FunctionTypeFacts {
         merged_signature: Some(signature.clone()),

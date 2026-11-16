@@ -91,14 +91,15 @@ fn main_name_keeps_its_stated_signature() {
         ret_type: Some(CTypeLike::typedef("int")),
         params: vec![
             FunctionParamSpec {
-                name: "argc".to_string(),
+                name: Some("argc".to_string()),
                 ty: Some(char_ptr.clone()),
             },
             FunctionParamSpec {
-                name: "argv".to_string(),
+                name: Some("argv".to_string()),
                 ty: Some(CTypeLike::Pointer(Box::new(char_ptr.clone()))),
             },
         ],
+        basis: SignatureBasis::Declared,
     };
     let parsed_context = ParsedExternalContext {
         current_signature: Some(stated.clone()),
@@ -287,12 +288,13 @@ fn local_inferred_scalar_param_narrows_external_wide_signature() {
             signedness: Signedness::Signed,
         }),
         params: vec![FunctionParamSpec {
-            name: "arg1".to_string(),
+            name: None,
             ty: Some(CTypeLike::Int {
                 bits: 64,
                 signedness: Signedness::Unsigned,
             }),
         }],
+        basis: SignatureBasis::Inferred,
     };
     let parsed_context = ParsedExternalContext {
         current_signature: Some(current_signature.clone()),
@@ -340,31 +342,32 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
         ret_type: Some(typedef_type("size_t")),
         params: vec![
             FunctionParamSpec {
-                name: "buf".to_string(),
+                name: Some("buf".to_string()),
                 ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
                     bits: 8,
                     signedness: Signedness::Unsigned,
                 }))),
             },
             FunctionParamSpec {
-                name: "n".to_string(),
+                name: Some("n".to_string()),
                 ty: Some(typedef_type("size_t")),
             },
             FunctionParamSpec {
-                name: "a".to_string(),
+                name: Some("a".to_string()),
                 ty: Some(CTypeLike::Int {
                     bits: 8,
                     signedness: Signedness::Unsigned,
                 }),
             },
             FunctionParamSpec {
-                name: "b".to_string(),
+                name: Some("b".to_string()),
                 ty: Some(CTypeLike::Int {
                     bits: 8,
                     signedness: Signedness::Unsigned,
                 }),
             },
         ],
+        basis: SignatureBasis::Declared,
     };
     let parsed_context = ParsedExternalContext {
         current_signature: Some(current_signature.clone()),
@@ -431,20 +434,21 @@ fn authoritative_external_signature_keeps_param_count_over_longer_local_signatur
         }))),
         params: vec![
             FunctionParamSpec {
-                name: "src".to_string(),
+                name: Some("src".to_string()),
                 ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
                     bits: 8,
                     signedness: Signedness::Signed,
                 }))),
             },
             FunctionParamSpec {
-                name: "len".to_string(),
+                name: Some("len".to_string()),
                 ty: Some(CTypeLike::Int {
                     bits: 64,
                     signedness: Signedness::Unsigned,
                 }),
             },
         ],
+        basis: SignatureBasis::Declared,
     };
     let parsed_context = ParsedExternalContext {
         current_signature: Some(current_signature.clone()),
@@ -502,22 +506,24 @@ fn generated_external_signature_allows_proven_local_param_extension() {
     let external = FunctionSignatureSpec {
         ret_type: Some(signed_int_type(64)),
         params: vec![FunctionParamSpec {
-            name: "arg1".to_string(),
+            name: None,
             ty: Some(signed_int_type(64)),
         }],
+        basis: SignatureBasis::Inferred,
     };
     let local = FunctionSignatureSpec {
         ret_type: Some(signed_int_type(32)),
         params: vec![
             FunctionParamSpec {
-                name: "arg0".to_string(),
+                name: None,
                 ty: Some(signed_int_type(64)),
             },
             FunctionParamSpec {
-                name: "arg1".to_string(),
+                name: None,
                 ty: Some(signed_int_type(32)),
             },
         ],
+        basis: SignatureBasis::Inferred,
     };
 
     let merged = merge_local_signature_into_merged_signature(Some(external), Some(local))
@@ -532,17 +538,19 @@ fn generated_external_carrier_param_yields_to_local_pointer_evidence() {
     let external = FunctionSignatureSpec {
         ret_type: Some(signed_int_type(64)),
         params: vec![FunctionParamSpec {
-            name: "arg1".to_string(),
+            name: None,
             ty: Some(signed_int_type(64)),
         }],
+        basis: SignatureBasis::Inferred,
     };
     let pointer = CTypeLike::Pointer(Box::new(CTypeLike::Void));
     let local = FunctionSignatureSpec {
         ret_type: Some(signed_int_type(64)),
         params: vec![FunctionParamSpec {
-            name: "arg0".to_string(),
+            name: None,
             ty: Some(pointer.clone()),
         }],
+        basis: SignatureBasis::Inferred,
     };
 
     let merged = merge_local_signature_into_merged_signature(Some(external), Some(local))
@@ -560,16 +568,18 @@ fn generated_signed_defaults_yield_to_certified_unsigned_signature() {
     let external = FunctionSignatureSpec {
         ret_type: Some(signed_int_type(64)),
         params: vec![FunctionParamSpec {
-            name: "arg0".to_string(),
+            name: None,
             ty: Some(signed_int_type(64)),
         }],
+        basis: SignatureBasis::Inferred,
     };
     let local = FunctionSignatureSpec {
         ret_type: Some(unsigned.clone()),
         params: vec![FunctionParamSpec {
-            name: "arg0".to_string(),
+            name: None,
             ty: Some(unsigned.clone()),
         }],
+        basis: SignatureBasis::Inferred,
     };
 
     let merged = merge_local_signature_into_merged_signature(Some(external), Some(local))
@@ -860,7 +870,7 @@ fn interproc_arg_write_out_param_certificate_records_write_evidence() {
             function_name: "sym.write_user".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
-                name: "out".to_string(),
+                name: "arg0".to_string(),
                 ty: parse_test_type("void *", 64),
             }],
         },
@@ -873,7 +883,8 @@ fn interproc_arg_write_out_param_certificate_records_write_evidence() {
     assert_eq!(analysis.type_facts.out_param_certificates.len(), 1);
     let cert = &analysis.type_facts.out_param_certificates[0];
     assert_eq!(cert.param_index, 0);
-    assert_eq!(cert.param_name, "out");
+    // Local inference names no parameter: the certificate spells its position (D480).
+    assert_eq!(cert.param_name, "arg0");
     assert_eq!(cert.pointee_type.as_deref(), Some("void"));
     assert_eq!(
         cert.evidence,
@@ -921,7 +932,7 @@ fn interproc_memory_write_out_param_certificate_records_memory_write_evidence() 
             function_name: "sym.write_user".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
-                name: "out".to_string(),
+                name: "arg0".to_string(),
                 ty: parse_test_type("void *", 64),
             }],
         },
@@ -934,7 +945,8 @@ fn interproc_memory_write_out_param_certificate_records_memory_write_evidence() 
     assert_eq!(analysis.type_facts.out_param_certificates.len(), 1);
     let cert = &analysis.type_facts.out_param_certificates[0];
     assert_eq!(cert.param_index, 0);
-    assert_eq!(cert.param_name, "out");
+    // Local inference names no parameter: the certificate spells its position (D480).
+    assert_eq!(cert.param_name, "arg0");
     assert_eq!(
         cert.evidence,
         vec![OutParamCertificateEvidence::InterprocMemoryWrite]
@@ -1012,25 +1024,26 @@ fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature(
                 }),
                 params: vec![
                     FunctionParamSpec {
-                        name: "parser".to_string(),
+                        name: Some("parser".to_string()),
                         ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
                             "parser".to_string(),
                         )))),
                     },
                     FunctionParamSpec {
-                        name: "slot".to_string(),
+                        name: Some("slot".to_string()),
                         ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
                             "slot".to_string(),
                         )))),
                     },
                     FunctionParamSpec {
-                        name: "flags".to_string(),
+                        name: Some("flags".to_string()),
                         ty: Some(CTypeLike::Int {
                             bits: 32,
                             signedness: Signedness::Unsigned,
                         }),
                     },
                 ],
+                basis: SignatureBasis::Declared,
             }),
             ..Default::default()
         },
@@ -1450,4 +1463,42 @@ fn a_memory_effect_summary_does_not_retype_a_parameter() {
         spelled(&spelled_signature(&analysis).params[0].ty),
         "int64_t"
     );
+}
+
+/// A declared `int f(int, char *)` whose parameters have no names keeps both whether the body
+/// reads one register or three: the declaration states the arity (D480).
+#[test]
+fn a_declared_signature_with_unnamed_parameters_keeps_its_arity() {
+    let char_pointer = CTypeLike::Pointer(Box::new(CTypeLike::plain_char(None)));
+    let declared = FunctionSignatureSpec {
+        ret_type: Some(signed_int_type(32)),
+        params: vec![
+            FunctionParamSpec {
+                name: None,
+                ty: Some(signed_int_type(32)),
+            },
+            FunctionParamSpec {
+                name: None,
+                ty: Some(char_pointer),
+            },
+        ],
+        basis: SignatureBasis::Declared,
+    };
+    for read in [1, 3] {
+        let local = FunctionSignatureSpec {
+            ret_type: Some(signed_int_type(32)),
+            params: vec![
+                FunctionParamSpec {
+                    name: None,
+                    ty: Some(signed_int_type(64)),
+                };
+                read
+            ],
+            basis: SignatureBasis::Inferred,
+        };
+        let merged =
+            merge_local_signature_into_merged_signature(Some(declared.clone()), Some(local))
+                .expect("merged signature");
+        assert_eq!(merged.params.len(), 2, "{read} read");
+    }
 }

@@ -1608,8 +1608,7 @@ impl FunctionFacts {
     pub fn parameter_name(&self, slot: usize) -> String {
         (self.type_facts().render_authorized_signature())
             .and_then(|signature| signature.params.get(slot))
-            .map(|parameter| parameter.name.as_str())
-            .filter(|name| !crate::is_generic_arg_name(name))
+            .and_then(|parameter| parameter.name.as_deref())
             .map_or_else(|| self.display_names.parameter_name(slot), str::to_owned)
     }
 
@@ -2280,8 +2279,7 @@ impl FunctionFacts {
             let name = names
                 .as_ref()
                 .and_then(|names| names.get(index).cloned())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| r2source::positional_parameter_name(index));
+                .flatten();
             params.push(crate::FunctionParamSpec { name, ty: Some(ty) });
         }
         let ret_type = match interface.return_kind() {
@@ -2301,9 +2299,15 @@ impl FunctionFacts {
             );
             return false;
         };
+        // The interface states the arity where a declaration states its types (D480).
+        let basis = match interface.types_are_declared() && !params.is_empty() {
+            true => crate::SignatureBasis::Declared,
+            false => crate::SignatureBasis::Inferred,
+        };
         let signature = crate::FunctionSignatureSpec {
             ret_type: Some(ret_type),
             params,
+            basis,
         };
         let Some(certificate) = crate::SignatureCertificate::from_signature(
             &signature,

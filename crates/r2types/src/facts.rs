@@ -127,7 +127,7 @@ impl SignatureCertificate {
                 )
             })
             && signature.params.iter().all(|param| param.ty.is_some());
-        if !(signature_param_count_is_authoritative(signature)
+        if !(signature.basis == SignatureBasis::Declared
             || source_authorizes_empty_arity
             || local_evidence_authorizes_inferred_arity)
         {
@@ -226,14 +226,25 @@ impl SignatureCertificateSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionParamSpec {
-    pub name: String,
+    /// `None` where the declaration names no parameter: DWARF states a `DW_TAG_formal_parameter`
+    /// with or without `DW_AT_name`, and a printed signature spells the position.
+    pub name: Option<String>,
     pub ty: Option<CTypeLike>,
+}
+
+/// What a signature's parameter list rests on: a declaration states its arity, inference does not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SignatureBasis {
+    Declared,
+    #[default]
+    Inferred,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionSignatureSpec {
     pub ret_type: Option<CTypeLike>,
     pub params: Vec<FunctionParamSpec>,
+    pub basis: SignatureBasis,
 }
 
 /// The structure a parameter points to as its accesses lay it out.
@@ -572,18 +583,12 @@ impl FunctionTypeFacts {
     }
 }
 
-pub fn signature_projection_is_exact(signature: &FunctionSignatureSpec) -> bool {
-    signature.ret_type.is_some()
-        && signature
-            .params
-            .iter()
-            .all(|param| !crate::context::is_generic_arg_name(&param.name) && param.ty.is_some())
-}
-
-pub fn signature_param_name_is_weak(name: &str) -> bool {
+pub fn signature_param_name_is_weak(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return true;
+    };
     let normalized = name.trim().to_ascii_lowercase();
     normalized.is_empty()
-        || crate::context::is_generic_arg_name(&normalized)
         || matches!(
             normalized.as_str(),
             "status"
@@ -605,23 +610,13 @@ pub fn signature_param_name_is_weak(name: &str) -> bool {
         )
 }
 
-/// The signature states a type, or names a parameter beyond its `argN` placeholder.
+/// The signature states a type, or names a parameter.
 pub fn signature_is_specific(signature: &FunctionSignatureSpec) -> bool {
     signature.ret_type.is_some()
         || signature
             .params
             .iter()
-            .any(|param| param.ty.is_some() || !crate::context::is_generic_arg_name(&param.name))
-}
-
-pub fn signature_param_count_is_authoritative(signature: &FunctionSignatureSpec) -> bool {
-    if signature.params.is_empty() {
-        return false;
-    }
-    signature
-        .params
-        .iter()
-        .any(|param| !crate::context::is_generic_arg_name(&param.name))
+            .any(|param| param.ty.is_some() || param.name.is_some())
 }
 
 pub fn is_generic_signature_type(ty: Option<&CTypeLike>) -> bool {
@@ -816,24 +811,18 @@ impl FunctionTypeFactsBuilder {
         out_param_certificates.dedup();
 
         let FunctionTypeFactInputs {
-            mut merged_signature,
+            merged_signature,
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            mut register_params,
+            register_params,
             callee_facts,
             program_data_objects,
-            mut signature_certificate,
+            signature_certificate,
             interproc_diagnostics,
             diagnostics,
             ..
         } = self.inputs;
-
-        canonicalize_generic_param_names(
-            &mut merged_signature,
-            &mut signature_certificate,
-            &mut register_params,
-        );
 
         let mut diagnostics = diagnostics;
         dedup_preserving_order(&mut diagnostics);
@@ -857,36 +846,6 @@ impl FunctionTypeFactsBuilder {
     }
 }
 
-fn canonical_generic_param_name(index: usize, name: &str) -> String {
-    if crate::context::is_generic_arg_name(name) {
-        r2source::positional_parameter_name(index)
-    } else {
-        name.to_string()
-    }
-}
-
-fn canonicalize_signature_generic_param_names(signature: &mut FunctionSignatureSpec) {
-    for (index, param) in signature.params.iter_mut().enumerate() {
-        param.name = canonical_generic_param_name(index, &param.name);
-    }
-}
-
-fn canonicalize_generic_param_names(
-    merged_signature: &mut Option<FunctionSignatureSpec>,
-    signature_certificate: &mut Option<SignatureCertificate>,
-    register_params: &mut [ExternalRegisterParamSpec],
-) {
-    if let Some(signature) = merged_signature.as_mut() {
-        canonicalize_signature_generic_param_names(signature);
-    }
-    if let Some(certificate) = signature_certificate.as_mut() {
-        canonicalize_signature_generic_param_names(&mut certificate.signature);
-    }
-    for (index, param) in register_params.iter_mut().enumerate() {
-        param.name = canonical_generic_param_name(index, &param.name);
-    }
-}
-
 fn dedup_preserving_order(items: &mut Vec<String>) {
     let mut seen = rustc_hash::FxHashSet::default();
     items.retain(|item| seen.insert(item.clone()));
@@ -905,7 +864,14 @@ mod tests {
 
     fn test_param(name: &str, ty: CTypeLike) -> FunctionParamSpec {
         FunctionParamSpec {
-            name: name.to_string(),
+            name: Some(name.to_string()),
+            ty: Some(ty),
+        }
+    }
+
+    fn unnamed_param(ty: CTypeLike) -> FunctionParamSpec {
+        FunctionParamSpec {
+            name: None,
             ty: Some(ty),
         }
     }
@@ -914,6 +880,7 @@ mod tests {
         FunctionSignatureSpec {
             ret_type: Some(test_int(32)),
             params: vec![test_param("value", test_int(32))],
+            basis: SignatureBasis::Declared,
         }
     }
 
@@ -951,10 +918,8 @@ mod tests {
     fn local_inference_certifies_typed_generic_parameter_names_for_rendering() {
         let signature = FunctionSignatureSpec {
             ret_type: Some(test_int(32)),
-            params: vec![
-                test_param("arg0", test_int(64)),
-                test_param("arg1", test_int(32)),
-            ],
+            params: vec![unnamed_param(test_int(64)), unnamed_param(test_int(32))],
+            basis: SignatureBasis::Inferred,
         };
         let certificate = SignatureCertificate::from_signature(
             &signature,
@@ -985,6 +950,7 @@ mod tests {
         let signature = FunctionSignatureSpec {
             ret_type: Some(CTypeLike::Void),
             params: Vec::new(),
+            basis: SignatureBasis::Inferred,
         };
         let certificate = SignatureCertificate::from_signature(
             &signature,
@@ -1001,9 +967,10 @@ mod tests {
         let signature = FunctionSignatureSpec {
             ret_type: Some(CTypeLike::Void),
             params: vec![FunctionParamSpec {
-                name: "dst".to_string(),
+                name: Some("dst".to_string()),
                 ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Void))),
             }],
+            basis: SignatureBasis::Declared,
         };
         let certificate = SignatureCertificate::from_signature(
             &signature,
@@ -1019,9 +986,10 @@ mod tests {
         let signature = FunctionSignatureSpec {
             ret_type: None,
             params: vec![FunctionParamSpec {
-                name: "count".to_string(),
+                name: Some("count".to_string()),
                 ty: None,
             }],
+            basis: SignatureBasis::Declared,
         };
         let certificate = SignatureCertificate::from_signature(
             &signature,
@@ -1071,6 +1039,7 @@ mod tests {
         let different_signature = FunctionSignatureSpec {
             ret_type: Some(test_int(32)),
             params: vec![test_param("other", test_int(32))],
+            basis: SignatureBasis::Declared,
         };
         let facts = FunctionTypeFacts {
             merged_signature: Some(signature),
@@ -1107,9 +1076,10 @@ mod tests {
         let signature = FunctionSignatureSpec {
             ret_type: None,
             params: vec![FunctionParamSpec {
-                name: "count".to_string(),
+                name: Some("count".to_string()),
                 ty: None,
             }],
+            basis: SignatureBasis::Declared,
         };
         let facts = FunctionTypeFacts {
             merged_signature: Some(signature),
@@ -1117,9 +1087,10 @@ mod tests {
                 &FunctionSignatureSpec {
                     ret_type: None,
                     params: vec![FunctionParamSpec {
-                        name: "count".to_string(),
+                        name: Some("count".to_string()),
                         ty: None,
                     }],
+                    basis: SignatureBasis::Declared,
                 },
                 [SignatureCertificateSource::ExternalContext],
             ),
@@ -1131,19 +1102,11 @@ mod tests {
     }
 
     #[test]
-    fn builder_canonicalizes_generic_parameter_names_by_slot() {
+    fn builder_keeps_an_unnamed_parameter_unnamed() {
         let signature = FunctionSignatureSpec {
             ret_type: Some(test_int(32)),
-            params: vec![
-                FunctionParamSpec {
-                    name: "arg1".to_string(),
-                    ty: Some(test_int(64)),
-                },
-                FunctionParamSpec {
-                    name: "arg2".to_string(),
-                    ty: Some(test_int(32)),
-                },
-            ],
+            params: vec![unnamed_param(test_int(64)), unnamed_param(test_int(32))],
+            basis: SignatureBasis::Inferred,
         };
         let certificate = SignatureCertificate::from_signature(
             &signature,
@@ -1152,41 +1115,32 @@ mod tests {
         let facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
             merged_signature: Some(signature),
             signature_certificate: certificate,
-            register_params: vec![
-                ExternalRegisterParamSpec {
-                    name: "arg1".to_string(),
-                    ty: Some(test_int(64)),
-                    reg: "rdi".to_string(),
-                },
-                ExternalRegisterParamSpec {
-                    name: "arg2".to_string(),
-                    ty: Some(test_int(32)),
-                    reg: "rsi".to_string(),
-                },
-            ],
             ..FunctionTypeFactInputs::default()
         })
         .build();
 
         let signature = facts.render_authorized_signature().expect("signature");
-        assert_eq!(signature.params[0].name, "arg0");
-        assert_eq!(signature.params[1].name, "arg1");
-        assert_eq!(facts.register_params[0].name, "arg0");
-        assert_eq!(facts.register_params[1].name, "arg1");
+        assert!(signature.params.iter().all(|param| param.name.is_none()));
     }
 
+    /// A declaration states its arity whatever it calls a parameter, `arg1` included; inference
+    /// states none, however it names one (D480).
     #[test]
-    fn generated_typed_arg_names_do_not_make_arity_authoritative() {
-        let generated = FunctionSignatureSpec {
+    fn a_declared_parameter_spelled_like_a_position_is_authoritative() {
+        let untyped = |name: Option<&str>, basis| FunctionSignatureSpec {
             ret_type: Some(test_int(64)),
-            params: vec![test_param("arg1", test_int(64))],
+            params: vec![FunctionParamSpec {
+                name: name.map(str::to_string),
+                ty: None,
+            }],
+            basis,
         };
-        let named = FunctionSignatureSpec {
-            ret_type: Some(test_int(64)),
-            params: vec![test_param("value", test_int(64))],
-        };
-
-        assert!(!signature_param_count_is_authoritative(&generated));
-        assert!(signature_param_count_is_authoritative(&named));
+        let external = [SignatureCertificateSource::ExternalContext];
+        for name in [Some("arg1"), None] {
+            let declared = untyped(name, SignatureBasis::Declared);
+            assert!(SignatureCertificate::from_signature(&declared, external).is_some());
+        }
+        let inferred = untyped(Some("value"), SignatureBasis::Inferred);
+        assert!(SignatureCertificate::from_signature(&inferred, external).is_none());
     }
 }

@@ -17,7 +17,7 @@ use r2ssa::{
     SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
 };
 
-use crate::context::{ParsedExternalContext, is_generic_arg_name};
+use crate::context::ParsedExternalContext;
 use crate::convert::CTypeLike;
 use crate::facts::{
     ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeAtomicEffect,
@@ -27,7 +27,7 @@ use crate::facts::{
     CalleeSyncOp, CalleeTransferEffect, CalleeTransferLength, FunctionParamSpec,
     FunctionSignatureSpec, FunctionTypeFactInputs, FunctionTypeFacts, InterprocFactDiagnostics,
     OutParamCertificate, OutParamCertificateEvidence, OutParamCertificateSource,
-    ScalarArrayRenderCandidate, SignatureCertificate, SignatureCertificateSource,
+    ScalarArrayRenderCandidate, SignatureBasis, SignatureCertificate, SignatureCertificateSource,
 };
 use crate::function_facts::{
     FunctionFacts, InterprocSummaryView, ProjectedFacts, SourceOwnedFunctionFacts,
@@ -70,12 +70,10 @@ impl TypeAnalysis {
         }
         let interface = self.source.machine_context().function_interface()?;
         interface.result_carriers()?;
-        interface.parameters().is_empty().then(|| {
-            std::borrow::Cow::Owned(crate::FunctionSignatureSpec {
-                ret_type: None,
-                params: Vec::new(),
-            })
-        })
+        interface
+            .parameters()
+            .is_empty()
+            .then(|| std::borrow::Cow::Owned(crate::FunctionSignatureSpec::default()))
     }
 
     /// The header's own unproven carrier, which every caller's extern spells as the header does.
@@ -153,8 +151,7 @@ impl TypeAnalysis {
                     _ => {
                         r2il::refusal_evidence!(
                             "callee-signature",
-                            "{entry:#x}: parameter {slot} ({}) has no certified entity",
-                            parameter.name
+                            "{entry:#x}: parameter {slot} has no certified entity"
                         );
                         return None;
                     }
@@ -582,7 +579,7 @@ fn build_type_analysis_inner(
         .as_ref()
         .into_iter()
         .chain(input.parsed_context.merged_signature.as_ref())
-        .any(signature_param_count_is_authoritative);
+        .any(|signature| signature.basis == SignatureBasis::Declared);
 
     let mut signature_certificate_sources = Vec::new();
     if authoritative_external_arity {
@@ -926,8 +923,7 @@ fn out_param_certificates_from_projection(
         .map(|(param_index, evidence)| {
             let param = merged_signature.and_then(|signature| signature.params.get(*param_index));
             let param_name = param
-                .map(|param| param.name.clone())
-                .filter(|name| !name.trim().is_empty())
+                .and_then(|param| param.name.clone())
                 .unwrap_or_else(|| r2source::positional_parameter_name(*param_index));
             let pointee_type = param
                 .and_then(|param| param.ty.as_ref())

@@ -20,10 +20,8 @@ pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSigna
         ret_type: Some(signature.ret_type.clone().unwrap_or(CTypeLike::Void)),
         params: (signature.params.iter().enumerate())
             .map(|(index, param)| InferredSignatureParam {
-                name: match param.name.trim().is_empty() {
-                    true => format!("arg{}", index + 1),
-                    false => param.name.clone(),
-                },
+                name: (param.name.clone())
+                    .unwrap_or_else(|| r2source::positional_parameter_name(index)),
                 ty: (param.ty.clone())
                     .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void))),
             })
@@ -182,9 +180,10 @@ fn a_declared_struct_spelled_like_a_placeholder_keeps_its_type() {
     let current_signature = FunctionSignatureSpec {
         ret_type: Some(CTypeLike::Void),
         params: vec![FunctionParamSpec {
-            name: "cfg".to_string(),
+            name: Some("cfg".to_string()),
             ty: Some(declared.clone()),
         }],
+        basis: SignatureBasis::Declared,
     };
     let analysis = build_type_analysis(TypeAnalysisInput {
         ptr_bits: 64,
