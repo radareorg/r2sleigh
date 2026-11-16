@@ -836,7 +836,7 @@ jobs:
     steps:
       - name: Cache qemu-user 8.2.2 with plugins
         id: qemu
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: qemu
           key: qemu-8.2.2-aarch64-x86_64-linux-user-plugins-ubuntu-24.04-v2
