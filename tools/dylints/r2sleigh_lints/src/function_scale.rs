@@ -158,11 +158,6 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
         "for",
         1,
     ),
-    (
-        "r2ssa::obligation::SemanticObligationInventory::collect",
-        ".values()",
-        1,
-    ),
     ("r2ssa::obligation::ValueReaders::of", ".iter()", 1),
     ("r2ssa::recover_interface::body_proven_result", "compute", 1),
     (
@@ -253,11 +248,6 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
     (
         "r2ssa::semantic::boundaries::convention_call_boundary",
         "body_writes",
-        1,
-    ),
-    (
-        "r2ssa::semantic::certificates::collect_prepared_function_certificates",
-        ".values()",
         1,
     ),
     (
