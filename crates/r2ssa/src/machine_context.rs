@@ -545,6 +545,8 @@ pub struct SourceMachineContext {
     source_string_literals: BTreeMap<u64, String>,
     /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
+    /// Where the loader places the image, as the capture states it.
+    load_base: r2abi::statement::LoadBase,
     /// What the read-only format each printf call's own block passes consumes, by the call's
     /// instruction (D409).
     format_tails: BTreeMap<u64, r2abi::format::PrintfConsumedArguments>,
@@ -944,6 +946,7 @@ impl SourceMachineContext {
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
+            load_base: r2abi::statement::LoadBase::Unstated,
             format_tails: BTreeMap::new(),
             immutable_literals: Box::default(),
             data_structs: None,
@@ -1678,6 +1681,17 @@ impl SourceMachineContext {
             .iter()
             .map(|(address, bytes)| (*address, bytes.clone().into_boxed_slice()))
             .collect();
+    }
+
+    /// Bind where the loader places the image, as the capture states it.
+    pub(crate) fn bind_load_base(&mut self, load: r2abi::statement::LoadBase) {
+        self.load_base = load;
+    }
+
+    /// Where the loader places the image: a constant is an absolute address only under `Linked`
+    /// (gABI chapter 5, "Base Address").
+    pub const fn load_base(&self) -> r2abi::statement::LoadBase {
+        self.load_base
     }
 
     /// What a `size`-byte load at `address` reads, where the capture holds those bytes read-only

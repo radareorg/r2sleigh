@@ -371,6 +371,9 @@ pub struct OwnedFunctionImage {
     /// Bytes the container states read-only and the loader leaves alone, at each address the
     /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
     read_only: Box<[(u64, Vec<u8>)]>,
+    /// Where the loader places the image, as its header states it: a constant is an absolute
+    /// address only under `Linked` (gABI chapter 5, "Base Address").
+    load: r2abi::statement::LoadBase,
     /// Named data objects this function points at. The name is display data.
     data_symbols: Box<[SourceDataObject]>,
     /// The graph each data object's `type_id` is a node of.
@@ -510,6 +513,11 @@ impl OwnedFunctionImage {
 
     pub fn read_only(&self) -> &[(u64, Vec<u8>)] {
         &self.read_only
+    }
+
+    /// Where the loader places the image, as its header states it.
+    pub const fn load_base(&self) -> r2abi::statement::LoadBase {
+        self.load
     }
 
     pub fn code_pointer_tables(&self) -> &[SourceCodePointerTable] {
@@ -1231,6 +1239,7 @@ mod tests {
                 string_literals: Box::new([]),
                 immutable_literals: Box::new([]),
                 read_only: Box::new([]),
+                load: r2abi::statement::LoadBase::Unstated,
                 data_symbols: Box::new([]),
                 data_types: None,
                 code_pointer_tables: Box::new([]),

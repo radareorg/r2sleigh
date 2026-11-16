@@ -95,6 +95,11 @@ pub trait Program: crate::body::Program {
         r2abi::statement::SourceLanguage::C
     }
 
+    /// Where the loader places the image, as its header states it; `Unstated` where none does.
+    fn load_base(&self) -> r2abi::statement::LoadBase {
+        r2abi::statement::LoadBase::Unstated
+    }
+
     /// The registers the body at `entry` leaves as it found them on every path to a return, from
     /// its held register effect (D320); `None` where nothing proves any kept.
     fn kept_at(&self, _entry: u64) -> Option<BTreeSet<CanonicalStorageId>> {
@@ -3077,6 +3082,7 @@ impl<'a> Native<'a> {
             interface,
             closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
+            load: self.program.load_base(),
             member_calls,
         };
 
