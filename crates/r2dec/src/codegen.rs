@@ -1349,9 +1349,7 @@ impl<'c> CodeGenerator<'c> {
     }
 
     fn emit_comment_text(&mut self, text: &str) {
-        let symbols = &self.symbols;
-        let text = sanitize_comment_text_keeping(text, |token| symbols.by_name(token).is_some());
-        self.output.push_str(&text);
+        self.output.push_str(&escape_comment_text(text));
     }
 
     fn emit_positive_literal_magnitude(&mut self, literal: PositiveLiteralMagnitude) {
@@ -1554,126 +1552,9 @@ fn operand_precedence_floor(parent: BinaryOp, operand: &CExpr, default: u8) -> u
     }
 }
 
-pub(crate) fn sanitize_comment_text(text: &str) -> String {
-    sanitize_comment_text_keeping(text, |_| false)
-}
-
-/// Sanitize a comment, keeping every token `declared` says the function
-/// declares.
-///
-/// The sanitizer exists to keep machine labels a reader cannot find in the
-/// body out of the prose around it. A name the function declares is one the
-/// reader can find: the body spells it, and a comment that rewrote it to
-/// "register" would disagree with the line below it.
-pub(crate) fn sanitize_comment_text_keeping(text: &str, declared: impl Fn(&str) -> bool) -> String {
-    let flattened = text.replace("*/", "* /").replace(['\r', '\n'], " ");
-    sanitize_comment_raw_tokens(&sanitize_comment_debug_ids(&flattened), declared)
-}
-
-fn sanitize_comment_debug_ids(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut index = 0;
-    while index < text.len() {
-        let rest = &text[index..];
-        let replacement = if rest.starts_with("ValueId(") {
-            Some("value")
-        } else if rest.starts_with("ObjectId(") {
-            Some("object")
-        } else {
-            None
-        };
-        if let Some(replacement) = replacement {
-            out.push_str(replacement);
-            if let Some(end) = rest.find(')') {
-                index += end + 1;
-            } else {
-                break;
-            }
-            continue;
-        }
-        let ch = rest.chars().next().expect("valid char boundary");
-        out.push(ch);
-        index += ch.len_utf8();
-    }
-    out
-}
-
-fn sanitize_comment_raw_tokens(text: &str, declared: impl Fn(&str) -> bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut token = String::new();
-    let flush_token = |out: &mut String, token: &mut String| {
-        if token.is_empty() {
-            return;
-        }
-        if declared(token) {
-            out.push_str(token);
-        } else if let Some(replacement) = sanitized_comment_token(token) {
-            out.push_str(replacement);
-        } else {
-            out.push_str(token);
-        }
-        token.clear();
-    };
-
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
-            token.push(ch);
-        } else {
-            flush_token(&mut out, &mut token);
-            out.push(ch);
-        }
-    }
-    flush_token(&mut out, &mut token);
-    out
-}
-
-fn sanitized_comment_token(token: &str) -> Option<&'static str> {
-    let lower = token.to_ascii_lowercase();
-    if matches!(lower.as_str(), "fake_stack_slot" | "saved_fp") {
-        return Some("stack slot");
-    }
-    if is_ssa_versioned_register_label(token) {
-        return Some("register");
-    }
-    if lower.starts_with("tmp:") || lower.starts_with("ram:") {
-        return Some("temporary");
-    }
-    for prefix in ["stack_", "slot_", "local_", "arg_", "var_"] {
-        if let Some(suffix) = lower.strip_prefix(prefix)
-            && raw_stack_suffix_label(suffix)
-        {
-            return Some("stack slot");
-        }
-    }
-    if let Some(rest) = lower.strip_prefix('t')
-        && rest.len() >= 3
-        && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Some("temporary");
-    }
-    None
-}
-
-fn raw_stack_suffix_label(suffix: &str) -> bool {
-    if suffix.is_empty() {
-        return false;
-    }
-    let suffix = suffix.strip_suffix('h').unwrap_or(suffix);
-    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_ssa_versioned_register_label(name: &str) -> bool {
-    let Some((base, suffix)) = name.rsplit_once('_') else {
-        return false;
-    };
-    // An SSA label: an uppercase register base and a version.
-    !base.is_empty()
-        && !suffix.is_empty()
-        && suffix.bytes().all(|byte| byte.is_ascii_digit())
-        && base.bytes().any(|byte| byte.is_ascii_alphabetic())
-        && base
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+/// A comment's text as C lexes it inside `/* */`: on one line, with no `*/` to close it early.
+pub(crate) fn escape_comment_text(text: &str) -> String {
+    text.replace("*/", "* /").replace(['\r', '\n'], " ")
 }
 
 /// A rendering and the tree it was rendered from.

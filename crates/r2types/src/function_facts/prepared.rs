@@ -29,27 +29,6 @@ impl CallsiteRenderDisposition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackSlotOwnerRenderAuthorization {
-    pub object: r2ssa::ObjectId,
-    pub offset: i64,
-    pub name: String,
-}
-
-pub(crate) fn recovered_stack_owner_name_is_renderable(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    !lower.is_empty()
-        && lower != "stack"
-        && lower != "slot"
-        && lower != "saved_fp"
-        && lower != "fake_stack_slot"
-        && !lower.starts_with("stack_")
-        && !lower.starts_with("slot_")
-        && !lower.starts_with("local_")
-        && !lower.starts_with("arg_")
-        && !lower.starts_with("var_")
-}
-
 pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
     match ty {
         CTypeLike::Void

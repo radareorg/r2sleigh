@@ -676,37 +676,6 @@ fn test_control_domain() -> r2ssa::ControlDomain {
     }
 }
 
-fn test_render_with_stack_slots<const N: usize>(
-    slots: [(r2ssa::ObjectId, r2ssa::StackAddressBase, i64); N],
-) -> FunctionRenderFacts {
-    FunctionRenderFacts {
-        certified_entities: slots
-            .into_iter()
-            .map(|(object, base, offset)| {
-                let id = r2ssa::SemanticId::stack_slot(object);
-                (
-                    id,
-                    CertifiedEntity::StackSlot {
-                        id,
-                        object,
-                        base,
-                        offset,
-                        size: None,
-                        array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
-                        source_slot: None,
-                        role: None.map(|slot: r2ssa::SourceStackSlotSpec| slot.role()),
-                        reload_values: BTreeSet::new(),
-                        stored_values: BTreeSet::new(),
-                        callee_allocation: None,
-                        ty: None,
-                    },
-                )
-            })
-            .collect(),
-        ..FunctionRenderFacts::default()
-    }
-}
-
 #[test]
 fn function_facts_owns_input_quality_evidence() {
     let complete = FunctionInputQualityFacts {
@@ -2341,43 +2310,6 @@ fn memory_access_lookup_requires_exact_address_space() {
             .memory_access_for_inst(r2ssa::InstId(7), false, r2il::SpaceId::Custom(8))
             .is_none()
     );
-}
-
-#[test]
-fn function_facts_authorizes_recovered_stack_owner_only_by_exact_object_offset_and_name() {
-    let object = r2ssa::ObjectId(21);
-    let facts = FunctionFacts::default().with_render(test_render_with_stack_slots([(
-        object,
-        r2ssa::StackAddressBase::FramePointer,
-        -4,
-    )]));
-
-    let authorization = facts
-        .authorized_recovered_stack_slot_owner_render(object, -4, "i")
-        .expect("a recovered loop scalar with exact object and offset should authorize");
-    assert_eq!(authorization.object, object);
-    assert_eq!(authorization.offset, -4);
-    assert_eq!(authorization.name, "i");
-    assert!(
-        facts
-            .authorized_recovered_stack_slot_owner_render(r2ssa::ObjectId(22), -4, "i")
-            .is_none(),
-        "wrong object must not authorize recovered stack owner rendering"
-    );
-    assert!(
-        facts
-            .authorized_recovered_stack_slot_owner_render(object, 4, "i")
-            .is_none(),
-        "wrong offset must not authorize recovered stack owner rendering"
-    );
-    for placeholder in ["fake_stack_slot", "local_4", "var_4h", "stack_8"] {
-        assert!(
-            facts
-                .authorized_recovered_stack_slot_owner_render(object, -4, placeholder)
-                .is_none(),
-            "placeholder name {placeholder} must not authorize recovered stack owner rendering"
-        );
-    }
 }
 
 #[test]
