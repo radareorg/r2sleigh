@@ -185,3 +185,31 @@ fn a_c_call_through_a_value_in_a_go_program_keeps_no_rbx() {
     let go = rendered(in_go).expect("a C function in a Go program renders");
     assert!(!go.contains("_u32(7);"), "{go}");
 }
+
+/// `runtime.morestack_noctxt` stated as C code is no Go routine: only a Go callee under the
+/// runtime's premise re-enters its caller (D486), so the stack check stays a branch.
+#[test]
+fn a_c_program_naming_runtime_morestack_states_no_reentry() {
+    let throws = || {
+        Literal::of_code(
+            THROWS,
+            &[
+                ("main.f", BASE, 0x1e),
+                ("runtime.morestack_noctxt", BASE + 0x30, 1),
+                ("runtime.throw", BASE + 0x40, 1),
+            ],
+        )
+    };
+    let go = rendered(throws().in_go(Some((1, 21)), Some(&[]))).expect("Go renders");
+    assert!(
+        go.contains("compiler-inserted (assuming go-runtime)"),
+        "{go}"
+    );
+    let growth = BASE + 0x30..BASE + 0x31;
+    let named = throws()
+        .in_go(Some((1, 21)), Some(&[]))
+        .with_language_at(growth, r2engine::program::SourceLanguage::C);
+    let c = rendered(named).expect("renders");
+    assert!(c.contains("morestack"), "{c}");
+    assert!(!c.contains("compiler-inserted"), "{c}");
+}

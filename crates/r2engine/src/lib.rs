@@ -53,9 +53,8 @@ mod stub;
 pub use r2dec::{CRole, EffectObligationAudit, EffectObligationDisposition};
 use route::decompile_route_decision;
 pub use route::{
-    EngineDiagnostics, EngineFunctionIdentity, EnginePlan, EngineRequestKind, EngineRequestPlan,
-    EngineRouteDecision, EngineTypedRouteDecision, select_engine_plan,
-    should_use_prepared_semantic_view,
+    EngineDiagnostics, EnginePlan, EngineRequestKind, EngineRequestPlan, EngineRouteDecision,
+    EngineTypedRouteDecision, select_engine_plan, should_use_prepared_semantic_view,
 };
 #[cfg(test)]
 use route::{plan_decompile_request, semantic_route_reason};

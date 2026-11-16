@@ -1608,28 +1608,6 @@ fn engine_owns_public_guard_fallback_comments() {
 }
 
 #[test]
-fn function_identity_keeps_ordered_aliases_for_summary_and_type_routes() {
-    let identity = EngineFunctionIdentity::with_aliases(
-        0x7000,
-        "fcn.00007000",
-        "sym.limfield.isra.0",
-        ["dbg.limfield", "sym.limfield.isra.0"],
-    );
-    let candidates = identity.name_candidates().collect::<Vec<_>>();
-
-    assert_eq!(
-        candidates,
-        vec![
-            "fcn.00007000",
-            "00007000",
-            "sym.limfield.isra.0",
-            "limfield",
-            "dbg.limfield"
-        ]
-    );
-}
-
-#[test]
 fn function_analysis_artifact_request_builder_owns_analysis_policy() {
     let request = EngineFunctionAnalysisArtifactRequest::full_semantics_for_function(
         EngineFunctionAnalysisArtifactRequestInput {
