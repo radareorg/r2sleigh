@@ -177,6 +177,7 @@ pub struct LibraryRow {
     pub passing: crate::mangled::Passing,
     /// Whether the row states what the function returns.
     pub result: RowResult,
+    /// Whether a cited source states the function never returns; an uncited row states false (D485).
     pub noreturn: bool,
     /// A parameter that, holding this value, makes the call not return.
     pub halts_on: Option<(u8, Halt)>,
@@ -501,7 +502,8 @@ impl LibraryRows {
             tail,
             passing: crate::mangled::Passing::Stated,
             result: RowResult::Stated,
-            noreturn: declared.noreturn,
+            // An uncited table states no noreturn: its rows cite nothing that says so (D485).
+            noreturn: declared.noreturn && embedded.cited,
             halts_on: declared.halts_on,
             yields: declared.yields,
             citation: citation.into(),
@@ -839,6 +841,15 @@ mod tests {
             None,
             "`%*d %d` reads one argument, printf counts three"
         );
+    }
+
+    /// An uncited table states no noreturn, as it states no tail and no effects (D485).
+    #[test]
+    fn an_uncited_table_states_no_noreturn() {
+        let text = "f=func\nfunc.f.args=0\nfunc.f.noreturn=true\nfunc.f.ret=void\n";
+        let rows = LibraryRows::parse(LibraryId::Glibc, text);
+        let row = rows.row(LibraryId::Glibc, "f").expect("f");
+        assert!(!row.noreturn);
     }
 
     /// A row of an uncited table is `Unstated` whatever it spells; the cited one states its tail.
