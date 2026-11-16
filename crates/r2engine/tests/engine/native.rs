@@ -8799,7 +8799,7 @@ const GO_STACK_CHECK_EFFECTFUL: &[u8] = &[
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
 ];
 
-/// The Go prologue's bytes, its stack-growth routine under the name a test gives it.
+/// The Go prologue's bytes, stated Go, its stack-growth routine under the name a test gives it.
 struct GoStack {
     fixture: Fixture,
     growth: String,
@@ -8837,6 +8837,10 @@ impl Program for GoStack {
 
     fn import_at(&self, vaddr: u64) -> Option<String> {
         self.fixture.import_at(vaddr)
+    }
+
+    fn language_at(&self, _vaddr: u64) -> r2engine::program::SourceLanguage {
+        r2engine::program::SourceLanguage::Go
     }
 }
 

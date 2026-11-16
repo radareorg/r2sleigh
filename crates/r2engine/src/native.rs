@@ -2346,7 +2346,11 @@ impl<'a> Native<'a> {
     fn evidence(&self, walked: &Walked, callees: &Callees) -> r2ssa::CalleeEvidence {
         let calls = call_sites(&walked.body, self.program);
         let library = library_evidence(self.program, self.target.imports, &calls);
-        callees.evidence(library, reentering_calls(&calls), walked.body.exits.clone())
+        callees.evidence(
+            library,
+            reentering_calls(self.program, &calls),
+            walked.body.exits.clone(),
+        )
     }
 
     /// A body resolved from its first seal, and whether another seal is the answer: one restating
@@ -2965,7 +2969,7 @@ impl<'a> Native<'a> {
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
         let calls = call_sites(&walked.body, self.program);
         let library = library_evidence(self.program, self.target.imports, &calls);
-        let reentering = reentering_calls(&calls);
+        let reentering = reentering_calls(self.program, &calls);
         let snapshot = self.snapshot(walked, calls, capture)?;
         let lifted = Disassembler::lift_owned_function(snapshot)
             .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
@@ -3152,12 +3156,16 @@ fn library_evidence(
         .collect()
 }
 
-/// The call targets r2abi's runtime model says re-enter their caller at its entry, by the name the
-/// program gives them: a model keyed by name, which the stack check weighs beside its shape.
-fn reentering_calls(calls: &[NativeCall]) -> BTreeSet<u64> {
+/// The calls that re-enter their caller at its entry: a Go callee the container states, under the
+/// granted runtime premise, that r2abi's model names (`r2abi/src/runtime.rs`, obj6.go `stacksplit`).
+fn reentering_calls(program: &dyn Program, calls: &[NativeCall]) -> BTreeSet<u64> {
+    if !accepted_premises().contains(&r2source::Premise::GoRuntime) {
+        return BTreeSet::new();
+    }
     calls
         .iter()
         .filter(|call| call.transfer == r2source::AdvisoryCallTransfer::Call)
+        .filter(|call| program.language_at(call.target) == r2abi::statement::SourceLanguage::Go)
         .filter(|call| {
             call.name
                 .as_deref()
