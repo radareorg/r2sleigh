@@ -2200,3 +2200,91 @@ fn a_cxa_finalize_call_reads_no_register_past_its_one_argument() {
     assert!(!text.contains("a register past them reaches"), "{text}");
     assert!(text.contains("__cxa_finalize("), "{text}");
 }
+
+/// `dcgettext(0, 0, 5)` through the stub at 0x1080, then `error(0, 0, "%s", that)` through 0x1090,
+/// the format at 0x10a0: diff `fcn_17320`'s shape (D449).
+fn translating_then_erroring() -> String {
+    let mut code = vec![0x90u8; 0xb0];
+    code[..0x29].copy_from_slice(&[
+        0x31, 0xff, // 1000 xor edi, edi
+        0x31, 0xf6, // 1002 xor esi, esi
+        0xba, 0x05, 0x00, 0x00, 0x00, // 1004 mov edx, 5
+        0xe8, 0x72, 0x00, 0x00, 0x00, // 1009 call 0x1080
+        0x48, 0x89, 0xc1, // 100e mov rcx, rax
+        0x31, 0xff, // 1011 xor edi, edi
+        0x31, 0xf6, 0x90, 0x90, 0x90, // 1013 xor esi, esi
+        0x48, 0x8d, 0x15, 0x81, 0x00, 0x00, 0x00, // 1018 lea rdx, [rip + 0x81]: 0x10a0
+        0x31, 0xc0, // 101f xor eax, eax
+        0xe8, 0x6a, 0x00, 0x00, 0x00, // 1021 call 0x1090
+        0x31, 0xc0, // 1026 xor eax, eax
+        0xc3, // 1028 ret
+    ]);
+    code[0x80..0x86].copy_from_slice(&common::JUMP_STUB);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0xa0..0xa3].copy_from_slice(b"%s\0");
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x29)])
+        .importing_through(BASE + 0x80..BASE + 0x86, BASE + 0x88, "dcgettext")
+        .importing("error")
+        .with_data()
+        .running_on(common::GLIBC);
+    let rendered = OpenProgram::of(program).rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D449: glibc 2.39's libintl.h line 51 states `dcgettext`'s three parameters and no tail, so the
+/// entry RCX, R8 and R9 reach no read and the caller's parameters are exact, never a floor.
+#[test]
+fn a_dcgettext_call_reads_exactly_its_three_arguments() {
+    let text = translating_then_erroring();
+    assert!(!text.contains("the parameters are a floor"), "{text}");
+    assert!(
+        text.contains("char* dcgettext(const char*, const char*, int32_t);"),
+        "{text}"
+    );
+    let arguments = common::call_arguments(&text, "dcgettext").expect("a call");
+    assert_eq!(arguments.len(), 3, "{text}");
+}
+
+/// D151's hazard, struct pointer class: a cited prototype naming a struct renders each parameter
+/// with its own type (`strftime`, `utime`), never every one `uint64_t` (D449).
+#[test]
+fn a_cited_struct_pointer_parameter_keeps_every_parameter_type() {
+    let strftime = calling_import(&[0xe8, 0x8b, 0x00, 0x00, 0x00, 0xc3], "strftime");
+    assert!(
+        strftime.contains("strftime(char*, uint64_t, const char*, const struct tm*);"),
+        "{strftime}"
+    );
+    let utime = calling_import(&[0xe8, 0x8b, 0x00, 0x00, 0x00, 0xc3], "utime");
+    assert!(
+        utime.contains("utime(const char*, const struct utimbuf*);"),
+        "{utime}"
+    );
+    for text in [strftime, utime] {
+        assert!(!text.contains("the parameters are a floor"), "{text}");
+    }
+}
+
+/// D151's hazard, function pointer parameter: `qsort`'s comparator keeps its own type beside the
+/// three data parameters (D449).
+#[test]
+fn a_cited_function_pointer_parameter_keeps_every_parameter_type() {
+    let text = calling_import(
+        &[
+            0x48, 0x8d, 0x0d, 0x07, 0x00, 0x00, 0x00, // 1000 lea rcx, [rip + 7]: 0x100e
+            0xe8, 0x84, 0x00, 0x00, 0x00, // 1007 call 0x1090
+            0xc3, // 100c ret
+            0x90, // 100d padding
+            0x31, 0xc0, // 100e xor eax, eax: the comparator
+            0xc3, // 1010 ret
+        ],
+        "qsort",
+    );
+    assert!(
+        text.contains(
+            "void qsort(void*, uint64_t, uint64_t, int32_t(*)(const void*, const void*));"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("the parameters are a floor"), "{text}");
+}

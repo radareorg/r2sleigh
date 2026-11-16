@@ -528,3 +528,45 @@ fn a_cited_slot_returning_int_reads_its_integer_bytes() {
     let main = musl.prototype(row).parameters[0].code_result(musl.graph());
     assert_eq!(main, Some(r2abi::ResultRead::Integer { bytes: 4 }));
 }
+
+/// D448, D449: a row a header states is cited where it binds; `ioctl` and `ptrace` stay variadic,
+/// `objc_msgSend` unstated, and each uncited list stays at the count the moves leave.
+#[test]
+fn the_rows_a_header_states_are_cited_where_they_bind() {
+    let glibc = LibraryRows::embedded(CLibrary::Glibc);
+    let cited = |rows: &LibraryRows, library, name: &str| {
+        let row = rows.row(library, name).unwrap_or_else(|| panic!("{name}"));
+        assert!(row.cited(), "{name}");
+        row.tail
+    };
+    assert_eq!(cited(&glibc, LibraryId::Glibc, "dcgettext"), Tail::None);
+    assert!(glibc.row(LibraryId::Portable, "dcgettext").is_none());
+    for name in ["ioctl", "ptrace"] {
+        assert_eq!(
+            cited(&glibc, LibraryId::Glibc, name),
+            Tail::Variadic,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        cited(&glibc, LibraryId::CxxRuntime, "__cxa_finalize"),
+        Tail::None
+    );
+    let libsystem = LibraryRows::embedded(CLibrary::LibSystem);
+    assert_eq!(cited(&libsystem, LibraryId::LibSystem, "qsort"), Tail::None);
+    assert_eq!(
+        cited(&libsystem, LibraryId::LibSystem, "ioctl"),
+        Tail::Variadic
+    );
+    let msg_send = libsystem.row(LibraryId::Objc, "objc_msgSend");
+    assert_ne!(msg_send.map(|row| row.tail), Some(Tail::None));
+    let listed = table("uncited-rows.txt");
+    let count = |heading: &str| {
+        let section = listed.split("\n# ").find(|s| s.starts_with(heading));
+        let lines = section.unwrap_or_default().lines().skip(1);
+        lines.filter(|line| line.contains(" | ")).count()
+    };
+    assert!(count("types.sdb.txt,") <= 57, "{}", count("types.sdb.txt,"));
+    assert!(count("types-linux.sdb.txt,") <= 5);
+    assert!(count("types-cxx.sdb.txt,") <= 43);
+}

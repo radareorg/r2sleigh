@@ -43,3 +43,293 @@ func.errc.noreturn=true
 func.errc.ret=void
 func.errc.include=err.h
 func.errc.tail=format(printf,2)
+
+# D449: rows that moved from types.sdb.txt to types-glibc.sdb.txt and that the macOS SDK 27.0
+# declares too, each read from its SDK header, so libSystem keeps a row for each.
+
+# stdlib.h: the macOS SDK 27.0 declares it at _stdlib.h line 287, which stdlib.h includes:
+# `uint32_t arc4random(void);`
+arc4random=func
+func.arc4random.args=0
+func.arc4random.ret=uint32_t
+func.arc4random.include=stdlib.h
+
+# time.h: the macOS SDK 27.0 declares it at _time.h line 111, which time.h includes:
+# `char *_LIBC_CSTR asctime(const struct tm *);`
+asctime=func
+func.asctime.args=1
+func.asctime.arg.0=const struct tm *,tp
+func.asctime.ret=char *
+func.asctime.include=time.h
+
+# libgen.h line 43: the macOS SDK 27.0 declares
+# `char *_LIBC_CSTR basename(char *_LIBC_CSTR);`
+basename=func
+func.basename.args=1
+func.basename.arg.0=char *,path
+func.basename.ret=char *
+func.basename.include=libgen.h
+
+# sys/socket.h line 712: the macOS SDK 27.0 declares
+# `int bind(int, const struct sockaddr *, socklen_t) __DARWIN_ALIAS(bind);`
+bind=func
+func.bind.args=3
+func.bind.arg.0=int,fd
+func.bind.arg.1=const struct sockaddr *,addr
+func.bind.arg.2=socklen_t,len
+func.bind.ret=int
+func.bind.include=sys/socket.h
+
+# stdlib.h: the macOS SDK 27.0 declares it at _stdlib.h line 161, which stdlib.h includes:
+# `void *bsearch(const void *__key, const void *_LIBC_SIZE(__width * __nel) __base, size_t __nel,
+# size_t __width, int (* _Nonnull __compar)(const void *, const void *));`
+bsearch=func
+func.bsearch.args=5
+func.bsearch.arg.0=const void *,key
+func.bsearch.arg.1=const void *,base
+func.bsearch.arg.2=size_t,nmemb
+func.bsearch.arg.3=size_t,size
+func.bsearch.arg.4=int (*)(const void *, const void *),compar
+func.bsearch.ret=void *
+func.bsearch.include=stdlib.h
+
+# strings.h: the macOS SDK 27.0 declares it at _strings.h line 75, which strings.h includes:
+# `void bzero(void *_LIBC_SIZE(__n), size_t __n) __POSIX_C_DEPRECATED(200112L);`
+bzero=func
+func.bzero.args=2
+func.bzero.arg.0=void *,s
+func.bzero.arg.1=size_t,n
+func.bzero.ret=void
+func.bzero.include=strings.h
+
+# sys/socket.h line 713: the macOS SDK 27.0 declares
+# `int connect(int, const struct sockaddr *, socklen_t) __DARWIN_ALIAS_C(connect);`
+connect=func
+func.connect.args=3
+func.connect.arg.0=int,fd
+func.connect.arg.1=const struct sockaddr *,addr
+func.connect.arg.2=socklen_t,len
+func.connect.ret=int
+func.connect.include=sys/socket.h
+
+# fenv.h line 379: the macOS SDK 27.0 declares
+# `extern int fesetenv(const fenv_t * /* envp */);`
+fesetenv=func
+func.fesetenv.args=1
+func.fesetenv.arg.0=const fenv_t *,envp
+func.fesetenv.ret=int
+func.fesetenv.include=fenv.h
+
+# fenv.h line 326: the macOS SDK 27.0 declares
+# `extern int fesetexceptflag(const fexcept_t * /* flagp */, int /* excepts */);`
+fesetexceptflag=func
+func.fesetexceptflag.args=2
+func.fesetexceptflag.arg.0=const fexcept_t *,flagp
+func.fesetexceptflag.arg.1=int,excepts
+func.fesetexceptflag.ret=int
+func.fesetexceptflag.include=fenv.h
+
+# fenv.h line 380: the macOS SDK 27.0 declares
+# `extern int feupdateenv(const fenv_t * /* envp */);`
+feupdateenv=func
+func.feupdateenv.args=1
+func.feupdateenv.arg.0=const fenv_t *,envp
+func.feupdateenv.ret=int
+func.feupdateenv.include=fenv.h
+
+# getopt.h line 72: the macOS SDK 27.0 declares
+# `int getopt_long(int __argc, char *_LIBC_CSTR const *_LIBC_COUNT(__argc), const char *, const
+# struct option *, int *);`
+getopt_long=func
+func.getopt_long.args=5
+func.getopt_long.arg.0=int,argc
+func.getopt_long.arg.1=char **,argv
+func.getopt_long.arg.2=const char *,shortopts
+func.getopt_long.arg.3=const struct option *,longopts
+func.getopt_long.arg.4=int *,longind
+func.getopt_long.ret=int
+func.getopt_long.include=getopt.h
+
+# time.h: the macOS SDK 27.0 declares it at _time.h line 116, which time.h includes:
+# `struct tm *gmtime(const time_t *);`
+gmtime=func
+func.gmtime.args=1
+func.gmtime.arg.0=const time_t *,timer
+func.gmtime.ret=struct tm *
+func.gmtime.include=time.h
+
+# arpa/inet.h line 86: the macOS SDK 27.0 declares
+# `int inet_aton(const char *, struct in_addr *);`
+inet_aton=func
+func.inet_aton.args=2
+func.inet_aton.arg.0=const char *,cp
+func.inet_aton.arg.1=struct in_addr *,inp
+func.inet_aton.ret=int
+func.inet_aton.include=arpa/inet.h
+
+# sys/ioctl.h line 97: the macOS SDK 27.0 declares
+# `int ioctl(int, unsigned long, ...);`
+ioctl=func
+func.ioctl.args=3
+func.ioctl.arg.0=int,fd
+func.ioctl.arg.1=unsigned long,request
+func.ioctl.arg.2=,...
+func.ioctl.ret=int
+func.ioctl.include=sys/ioctl.h
+func.ioctl.tail=variadic
+
+# sys/xattr.h line 77: the macOS SDK 27.0 declares
+# `ssize_t listxattr(const char *path, char *namebuff, size_t size, int options);`
+listxattr=func
+func.listxattr.args=4
+func.listxattr.arg.0=const char *,path
+func.listxattr.arg.1=char *,namebuff
+func.listxattr.arg.2=size_t,size
+func.listxattr.arg.3=int,options
+func.listxattr.ret=ssize_t
+func.listxattr.include=sys/xattr.h
+
+# locale.h: the macOS SDK 27.0 declares it at _locale.h line 80, which locale.h includes:
+# `struct lconv *localeconv(void);`
+localeconv=func
+func.localeconv.args=0
+func.localeconv.ret=struct lconv *
+func.localeconv.include=locale.h
+
+# time.h: the macOS SDK 27.0 declares it at _time.h line 117, which time.h includes:
+# `struct tm *localtime(const time_t *);`
+localtime=func
+func.localtime.args=1
+func.localtime.arg.0=const time_t *,timer
+func.localtime.ret=struct tm *
+func.localtime.include=time.h
+
+# string.h: the macOS SDK 27.0 declares it at _string.h line 187, which string.h includes:
+# `void *_LIBC_UNSAFE_INDEXABLE memmem(const void *_LIBC_SIZE(__big_len) __big, size_t __big_len,
+# const void *_LIBC_SIZE(__little_len) __little, size_t __little_len)
+# __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_4_3);`
+memmem=func
+func.memmem.args=4
+func.memmem.arg.0=const void *,haystack
+func.memmem.arg.1=size_t,haystacklen
+func.memmem.arg.2=const void *,needle
+func.memmem.arg.3=size_t,needlelen
+func.memmem.ret=void *
+func.memmem.include=string.h
+
+# unistd.h line 687: the macOS SDK 27.0 declares
+# `char *_LIBC_CSTR mktemp(char *_LIBC_CSTR);`
+mktemp=func
+func.mktemp.args=1
+func.mktemp.arg.0=char *,template
+func.mktemp.ret=char *
+func.mktemp.include=unistd.h
+
+# time.h: the macOS SDK 27.0 declares it at _time.h line 118, which time.h includes:
+# `time_t mktime(struct tm *) __DARWIN_ALIAS(mktime);`
+mktime=func
+func.mktime.args=1
+func.mktime.arg.0=struct tm *,tp
+func.mktime.ret=time_t
+func.mktime.include=time.h
+
+# sys/ptrace.h line 100: the macOS SDK 27.0 declares
+# `int ptrace(int _request, pid_t _pid, caddr_t _addr, int _data);`
+ptrace=func
+func.ptrace.args=4
+func.ptrace.arg.0=int,request
+func.ptrace.arg.1=pid_t,pid
+func.ptrace.arg.2=char *,addr
+func.ptrace.arg.3=int,data
+func.ptrace.ret=int
+func.ptrace.include=sys/ptrace.h
+
+# utmpx.h line 168: the macOS SDK 27.0 declares
+# `struct utmpx * pututxline(const struct utmpx *);`
+pututxline=func
+func.pututxline.args=1
+func.pututxline.arg.0=const struct utmpx *,utmpx
+func.pututxline.ret=struct utmpx *
+func.pututxline.include=utmpx.h
+
+# stdlib.h: the macOS SDK 27.0 declares it at _stdlib.h line 180, which stdlib.h includes:
+# `void qsort(void *_LIBC_SIZE(__nel * __width) __base, size_t __nel, size_t __width, int (*
+# _Nonnull __compar)(const void *, const void *));`
+qsort=func
+func.qsort.args=4
+func.qsort.arg.0=void *,base
+func.qsort.arg.1=size_t,nmemb
+func.qsort.arg.2=size_t,size
+func.qsort.arg.3=int (*)(const void *, const void *),compar
+func.qsort.ret=void
+func.qsort.include=stdlib.h
+
+# signal.h line 100: the macOS SDK 27.0 declares
+# `int sigprocmask(int, const sigset_t * __restrict, sigset_t * __restrict);`
+sigprocmask=func
+func.sigprocmask.args=3
+func.sigprocmask.arg.0=int,how
+func.sigprocmask.arg.1=const sigset_t *,set
+func.sigprocmask.arg.2=sigset_t *,oset
+func.sigprocmask.ret=int
+func.sigprocmask.include=signal.h
+
+# time.h: the macOS SDK 27.0 declares it at _time.h line 119, which time.h includes:
+# `size_t strftime(char *_LIBC_COUNT(__maxsize) __restrict, size_t __maxsize, const char *
+# __restrict, const struct tm * __restrict) __DARWIN_ALIAS(strftime);`
+strftime=func
+func.strftime.args=4
+func.strftime.arg.0=char *,s
+func.strftime.arg.1=size_t,maxsize
+func.strftime.arg.2=const char *,format
+func.strftime.arg.3=const struct tm *,tp
+func.strftime.ret=size_t
+func.strftime.include=time.h
+
+# string.h: the macOS SDK 27.0 declares it at _string.h line 202, which string.h includes:
+# `size_t strlcpy(char *_LIBC_COUNT(__size) __dst, const char *__source, size_t __size);`
+strlcpy=func
+func.strlcpy.args=3
+func.strlcpy.arg.0=char *,dest
+func.strlcpy.arg.1=const char *,src
+func.strlcpy.arg.2=size_t,n
+func.strlcpy.ret=size_t
+func.strlcpy.include=string.h
+
+# unistd.h line 615: the macOS SDK 27.0 declares
+# `int usleep(useconds_t) __DARWIN_ALIAS_C(usleep);`
+usleep=func
+func.usleep.args=1
+func.usleep.arg.0=useconds_t,useconds
+func.usleep.ret=int
+func.usleep.include=unistd.h
+
+# utime.h line 75: the macOS SDK 27.0 declares
+# `int utime(const char *, const struct utimbuf *);`
+utime=func
+func.utime.args=2
+func.utime.arg.0=const char *,file
+func.utime.arg.1=const struct utimbuf *,file_times
+func.utime.ret=int
+func.utime.include=utime.h
+
+# sys/time.h line 208: the macOS SDK 27.0 declares
+# `int utimes(const char *, const struct timeval *);`
+utimes=func
+func.utimes.args=2
+func.utimes.arg.0=const char *,file
+func.utimes.arg.1=const struct timeval *,tvp
+func.utimes.ret=int
+func.utimes.include=sys/time.h
+
+# wchar.h: the macOS SDK 27.0 declares it at _wchar.h line 137, which wchar.h includes:
+# `size_t wcsftime(wchar_t * __restrict _LIBC_COUNT(__maxlen), size_t __maxlen, const wchar_t *
+# __restrict, const struct tm * __restrict) __DARWIN_ALIAS(wcsftime);`
+wcsftime=func
+func.wcsftime.args=4
+func.wcsftime.arg.0=wchar_t *,s
+func.wcsftime.arg.1=size_t,maxsize
+func.wcsftime.arg.2=const wchar_t *,format
+func.wcsftime.arg.3=const struct tm *,tp
+func.wcsftime.ret=size_t
+func.wcsftime.include=wchar.h
