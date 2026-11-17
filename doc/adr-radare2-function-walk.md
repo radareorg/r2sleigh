@@ -121,15 +121,20 @@ As built:
   import the loader writes at the CIE's indirect pointer (`DW.ref.__gxx_personality_v0`); an import's
   name is a declaration, so pad facts rest on `Basis::Declared`. A direct pointer, an unrowed import
   and a relocatable object's personality state no pad (`PersonalityUnstated`).
-- r2engine `body.rs`: each call, returning or not, records its pad. After the normal walk the pads
+- r2engine `body.rs`: each call, returning or not, records its pad (`Body::pads.unwinds`). The pads
   are walked by a second `Walk` that never writes the first and stops wherever the normal flow
-  decoded; a resumed walk (`open`, `follow`) resumes the pads' walk too. An instruction both flows
-  reach is the normal flow's. `Body::blocks`, `successors` and `calls` are byte for byte what they
-  were; `Body::pads` holds the pad blocks, every unwind edge, and the calls made only there.
+  decoded. An instruction both flows reach is the normal flow's. `Body::blocks`, `successors` and
+  `calls` are byte for byte what they were; `Body::pads` holds the pad blocks, every unwind edge,
+  and the calls made only there.
+- Only a reader of pads walks them (D599): the survey's trace (its extents and holders) and the
+  reference index's listed walk walk them with the normal flow, resuming with it (`open`, `follow`);
+  the analysis' walk, a return's trace and the dispatch rounds record the unwinds and walk none;
+  `pdf`, `afb` and `afi` walk the pads beside the analysis' body (`body::pads_beside`), from its
+  instructions and recorded unwinds.
 - Listing surfaces ask for both: `pdf`, `afb` (tag `u`, `EdgeKind::Unwind`), `afi`, `axt` and the
   survey's extents and holders. `pdd`, the seal and the lane passes read `Body::blocks`, and the
   proof line states `N landing pads not rendered: exceptional flow, a store read only there may be
-  elided`. `Escapes` refuses the closed world of an image where any body unwinds
+  elided`, N the distinct pads the rendered calls unwind to. `Escapes` refuses the closed world of an image where any body unwinds
   (`closed-world: unwind flow unread (D598)`): no lane pass reads a call made in a pad.
 - A pad's edge back into the normal flow (a `catch` that returns) lands inside a normal block,
   which is not split: `afb` lists no edge there. Splitting it is D598's, with the pad's entry state.

@@ -224,7 +224,7 @@ r2sleigh_result_u32 _Z7guardedi(r2sleigh_word_u32 arg0)
     uint64_t tmp_1342_8_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: 2 constructs are marked below; 69 source obligations: 35 rendered, 29 elided, 0 refused, 2 assumed (frame extent unproven), 3 residual; 14 statements rendered; 1 held from entry, read as residuals (FS_OFFSET_0); 1 callee prototype supplied by the source; the parameters are a floor: at least 1 (a register past them reaches the call to 0x1273); 2 landing pads not rendered: exceptional flow, a store read only there may be elided; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: 2 constructs are marked below; 69 source obligations: 35 rendered, 29 elided, 0 refused, 2 assumed (frame extent unproven), 3 residual; 14 statements rendered; 1 held from entry, read as residuals (FS_OFFSET_0); 1 callee prototype supplied by the source; the parameters are a floor: at least 1 (a register past them reaches the call to 0x1273); 1 landing pad not rendered: exceptional flow, a store read only there may be elided; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)arg0);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 36U) + (uint64_t)20U), (uint64_t)r2sleigh_load_u64((void*)(uint64_t)((uint64_t)r2sleigh_residual_u64(1) + (uint64_t)40U)));

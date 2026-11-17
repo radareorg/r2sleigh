@@ -428,11 +428,13 @@ impl<S: Source + 'static> OpenProgram<S> {
             }
         };
         let artifact = prepared.artifact().artifact();
-        let walk = self.body_of(entry).ok();
+        let pads = (self.body_of(entry).ok())
+            .zip(self.target(entry).ok())
+            .map(|(walk, target)| walk.pads(target.disasm, &view));
         let read = |sealed: &SealedFunctionAnalysis| {
             let mut info =
                 super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn);
-            (walk.as_deref()).inspect(|walk| info.hold_pads(walk.pads()));
+            (pads.as_ref()).inspect(|pads| info.hold_pads(pads));
             info
         };
         // The frame's locals are the frame model's, whichever pipeline renders (ADR frame-model).
@@ -570,14 +572,12 @@ impl<S: Source + 'static> OpenProgram<S> {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, entry, &prepared)) {
                 Ok(Err(reason)) => reason,
-                Ok(Ok(listing)) => {
+                Ok(Ok((listing, pads))) => {
                     let blocks = (prepared.outline().blocks.iter()).map(|block| {
                         let successors = block.successors.clone();
                         (block.addr, u64::from(block.size), successors)
                     });
-                    let walk = self.body_of(entry).ok();
-                    let pads = walk.as_deref().map(crate::native::Walk::pads);
-                    let shape = shape_of(blocks, prepared.dispatches(), pads);
+                    let shape = shape_of(blocks, prepared.dispatches(), Some(&pads));
                     return Ok((listing, shape));
                 }
                 Err(panicked) => NativeRefusal::from(panicked),
@@ -600,13 +600,14 @@ impl<S: Source + 'static> OpenProgram<S> {
         target: &crate::native::NativeTarget<'_>,
         entry: u64,
         prepared: &Prepared,
-    ) -> Result<FunctionListing, NativeRefusal> {
+    ) -> Result<(FunctionListing, crate::body::Pads), NativeRefusal> {
         let key = (entry, self.view().thumb_at(entry));
         let walking = (self.db.get::<super::analysis::Walked>(&key))
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
         let walk = walking.0.as_ref().map_err(Clone::clone)?;
         let mut lifted = walk.lifted();
-        lifted.extend(walk.pads().blocks.iter().map(|block| block.lifted.clone()));
+        let pads = walk.pads(target.disasm, &self.view());
+        lifted.extend(pads.blocks.iter().map(|block| block.lifted.clone()));
         lifted.sort_by_key(|block| block.addr);
         let body = WalkedBody::new(entry, &lifted, target.arch);
         let proved = Proved::new(prepared);
@@ -614,10 +615,11 @@ impl<S: Source + 'static> OpenProgram<S> {
             body: Some(&body),
             ..self.answered(Some(&proved))
         };
-        Ok(FunctionListing {
+        let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted),
             refused: None,
-        })
+        };
+        Ok((listing, pads))
     }
 
     /// The listing of the body of a function whose analysis was refused: the walk `Walked` holds,
@@ -669,8 +671,9 @@ impl<S: Source + 'static> OpenProgram<S> {
             let successors = block.successors.clone();
             (block.lifted.addr, u64::from(block.lifted.size), successors)
         });
-        let shape = shape_of(blocks, dispatches.into_iter(), Some(&body.pads));
-        lifted.extend(body.pads.blocks.iter().map(|block| block.lifted.clone()));
+        let pads = walk.pads(target.disasm, &self.view());
+        let shape = shape_of(blocks, dispatches.into_iter(), Some(&pads));
+        lifted.extend(pads.blocks.iter().map(|block| block.lifted.clone()));
         lifted.sort_by_key(|block| block.addr);
         let walked = WalkedBody::new(entry, &lifted, target.arch);
         let answered = Answered {
@@ -1005,7 +1008,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 unwinding: 0,
             })));
         }
-        let walker = super::returns::Walking::new(view.clone(), true)?;
+        let walker = super::returns::Walking::new(view.clone(), true)?.walking_pads();
         let found = crate::discovery::functions(&view, seeds, &walker);
         let keyed = (found.returns.into_iter())
             .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer));

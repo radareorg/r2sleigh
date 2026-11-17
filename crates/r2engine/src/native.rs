@@ -604,9 +604,13 @@ impl Walk {
         switched(blocks, &self.tables)
     }
 
-    /// What the body's calls unwind to, held apart from its blocks (D570).
-    pub fn pads(&self) -> &crate::body::Pads {
-        &self.root.body.pads
+    /// What the body's calls unwind to, walked beside its blocks for a listing (D570, D599).
+    pub fn pads(
+        &self,
+        disasm: &r2sleigh_lift::Disassembler,
+        program: &dyn crate::body::Program,
+    ) -> crate::body::Pads {
+        crate::body::pads_beside(&self.root.body, disasm, program)
     }
 }
 
