@@ -116,29 +116,29 @@ r2sleigh_word_u32 fcn_401050(void)
     {
         crc32_init();
         rax_2 = (uint64_t)fnv1a32(0x402060, 61);
-        __printf_chk(2, "fnv1a32     %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_2 >> 0U));
+        __printf_chk(2, "fnv1a32     %08x\n", (uint64_t)(uint32_t)rax_2);
         rax_5 = fnv1a64(0x402060, 61);
         __printf_chk(2, "fnv1a64     %016llx\n", rax_5);
         rax_8 = (uint64_t)djb2(0x402060, 61);
-        __printf_chk(2, "djb2        %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_8 >> 0U));
+        __printf_chk(2, "djb2        %08x\n", (uint64_t)(uint32_t)rax_8);
         rax_11 = (uint64_t)sdbm(0x402060, 61);
-        __printf_chk(2, "sdbm        %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_11 >> 0U));
+        __printf_chk(2, "sdbm        %08x\n", (uint64_t)(uint32_t)rax_11);
         rax_14 = (uint64_t)adler32(0x402060, 61);
-        __printf_chk(2, "adler32     %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_14 >> 0U));
+        __printf_chk(2, "adler32     %08x\n", (uint64_t)(uint32_t)rax_14);
         rax_17 = (uint64_t)fletcher32(0x402060, 30);
-        __printf_chk(2, "fletcher32  %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_17 >> 0U));
+        __printf_chk(2, "fletcher32  %08x\n", (uint64_t)(uint32_t)rax_17);
         rax_20 = (uint64_t)crc32_bitwise(0x402060, 61);
-        __printf_chk(2, "crc32_bit   %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_20 >> 0U));
+        __printf_chk(2, "crc32_bit   %08x\n", (uint64_t)(uint32_t)rax_20);
         rax_23 = (uint64_t)crc32_table(0x402060, 61);
-        __printf_chk(2, "crc32_tab   %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_23 >> 0U));
+        __printf_chk(2, "crc32_tab   %08x\n", (uint64_t)(uint32_t)rax_23);
         rax_26 = (uint64_t)murmur3_32((uint8_t*)(uint64_t)0x402060U, 61, (uint32_t)0x9747b28cU);
-        __printf_chk(2, "murmur3_32  %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_26 >> 0U));
+        __printf_chk(2, "murmur3_32  %08x\n", (uint64_t)(uint32_t)rax_26);
         rax_29 = (uint64_t)xxhash32(0x402060, 61, 0);
-        __printf_chk(2, "xxhash32    %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_29 >> 0U));
+        __printf_chk(2, "xxhash32    %08x\n", (uint64_t)(uint32_t)rax_29);
         rax_32 = siphash24((uint8_t*)(uint64_t)0x402060U, 61, (uint64_t)0x706050403020100U, (uint64_t)0xf0e0d0c0b0a0908U);
         __printf_chk(2, "siphash24   %016llx\n", rax_32);
         rax_35 = (uint64_t)pearson(0x402060, 61);
-        __printf_chk(2, "pearson     %02x\n", (uint64_t)(uint8_t)((uint64_t)rax_35 >> 0U));
+        __printf_chk(2, "pearson     %02x\n", (uint64_t)(uint8_t)rax_35);
         rax_38 = combined(0x402060, 61);
         __printf_chk(2, "combined    %016llx\n", rax_38);
         return 0;
@@ -307,7 +307,7 @@ r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_401348_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U)) * (uint64_t)0x1000193U) >> 0U);
+                tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)rax_2) * (uint64_t)0x1000193U);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401351_3_0_1;
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
@@ -393,7 +393,7 @@ r2sleigh_word_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
                 tmp_4013d3_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdi_2 - (uint64_t)1U));
-                tmp_lane_4013d7_6_0_1 = (uint32_t)((uint32_t)(uint8_t)tmp_4013d3_8_1 + (uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) * (uint32_t)32U) + (uint32_t)((uint64_t)rax_2 >> 0U)));
+                tmp_lane_4013d7_6_0_1 = (uint32_t)((uint32_t)(uint8_t)tmp_4013d3_8_1 + (uint32_t)((uint32_t)((uint32_t)rax_2 * (uint32_t)32U) + (uint32_t)rax_2));
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_4013d7_6_0_1;
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)rsi_1));
@@ -433,7 +433,7 @@ r2sleigh_word_u32 sdbm(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_401406_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                tmp_lane_40140d_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rax_2 >> 0U) * (uint64_t)0x1003fU) >> 0U) + (uint32_t)(uint8_t)tmp_401406_0_1);
+                tmp_lane_40140d_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)rax_2 * (uint64_t)0x1003fU) + (uint32_t)(uint8_t)tmp_401406_0_1);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_40140d_6_0_1;
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
@@ -478,16 +478,16 @@ r2sleigh_word_u32 adler32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_401440_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                rdx_3 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401440_0_1 + (uint32_t)((uint64_t)rdx_2 >> 0U));
-                tmp_lane_40145b_5_0_1 = (uint32_t)((uint32_t)((uint64_t)rdx_3 >> 0U) - (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)((uint64_t)rdx_3 * (uint64_t)0x80078071U) >> (uint64_t)(uint32_t)47U)) >> 0U) * (uint64_t)0xfff1U) >> 0U));
-                rax_4 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) + (uint32_t)tmp_lane_40145b_5_0_1);
-                tmp_lane_401478_5_0_1 = (uint32_t)((uint32_t)((uint64_t)rax_4 >> 0U) - (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)((uint64_t)rax_4 * (uint64_t)0x80078071U) >> (uint64_t)(uint32_t)47U)) >> 0U) * (uint64_t)0xfff1U) >> 0U));
+                rdx_3 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401440_0_1 + (uint32_t)rdx_2);
+                tmp_lane_40145b_5_0_1 = (uint32_t)((uint32_t)rdx_3 - (uint32_t)((uint64_t)(int32_t)((uint64_t)((uint64_t)rdx_3 * (uint64_t)0x80078071U) >> (uint64_t)(uint32_t)47U) * (uint64_t)0xfff1U));
+                rax_4 = (uint64_t)(uint32_t)((uint32_t)rax_2 + (uint32_t)tmp_lane_40145b_5_0_1);
+                tmp_lane_401478_5_0_1 = (uint32_t)((uint32_t)rax_4 - (uint32_t)((uint64_t)(int32_t)((uint64_t)((uint64_t)rax_4 * (uint64_t)0x80078071U) >> (uint64_t)(uint32_t)47U) * (uint64_t)0xfff1U));
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401478_5_0_1;
                 rdi_1 = rdi_2;
                 rdx_2 = (uint64_t)(uint32_t)tmp_lane_40145b_5_0_1;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
             {
-                return (uint32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401478_5_0_1 << (uint32_t)16U)) | (uint32_t)tmp_lane_40145b_5_0_1);
+                return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401478_5_0_1 << (uint32_t)16U) | (uint32_t)tmp_lane_40145b_5_0_1);
             }
         }
     }
@@ -529,18 +529,18 @@ r2sleigh_word_u32 fletcher32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_4014c0_0_1 = r2sleigh_load_u16((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)2U);
-                r8_1 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rdx_2 + (uint64_t)(uint16_t)tmp_4014c0_0_1) >> 0U);
-                rdx_8 = (uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)((uint64_t)r8_1 + (uint64_t)((uint64_t)((uint64_t)r8_1 + (uint64_t)((uint64_t)r8_1 * (uint64_t)0x10000U)) * (uint64_t)0x8000U)) >> (uint64_t)(uint32_t)47U);
-                tmp_lane_4014ed_5_0_1 = (uint32_t)((uint32_t)((uint32_t)((uint64_t)rdx_8 >> 0U) + (uint32_t)((uint64_t)r8_1 >> 0U)) - (uint32_t)((uint32_t)((uint64_t)rdx_8 >> 0U) * (uint32_t)0x10000U));
-                rcx_4 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(uint32_t)tmp_lane_4014ed_5_0_1 + (uint64_t)rax_2) >> 0U);
-                rax_8 = (uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)((uint64_t)rcx_4 + (uint64_t)((uint64_t)((uint64_t)rcx_4 + (uint64_t)((uint64_t)rcx_4 * (uint64_t)0x10000U)) * (uint64_t)0x8000U)) >> (uint64_t)(uint32_t)47U);
-                tmp_lane_401517_5_0_1 = (uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_8 >> 0U) + (uint32_t)((uint64_t)rcx_4 >> 0U)) - (uint32_t)((uint32_t)((uint64_t)rax_8 >> 0U) * (uint32_t)0x10000U));
+                r8_1 = (uint64_t)(uint32_t)((uint64_t)rdx_2 + (uint64_t)(uint16_t)tmp_4014c0_0_1);
+                rdx_8 = (uint64_t)((uint64_t)((uint64_t)r8_1 + (uint64_t)((uint64_t)((uint64_t)r8_1 + (uint64_t)((uint64_t)r8_1 * (uint64_t)0x10000U)) * (uint64_t)0x8000U)) >> (uint64_t)(uint32_t)47U);
+                tmp_lane_4014ed_5_0_1 = (uint32_t)((uint32_t)((uint32_t)rdx_8 + (uint32_t)r8_1) - (uint32_t)((uint32_t)rdx_8 * (uint32_t)0x10000U));
+                rcx_4 = (uint64_t)(uint32_t)((uint64_t)(uint32_t)tmp_lane_4014ed_5_0_1 + (uint64_t)rax_2);
+                rax_8 = (uint64_t)((uint64_t)((uint64_t)rcx_4 + (uint64_t)((uint64_t)((uint64_t)rcx_4 + (uint64_t)((uint64_t)rcx_4 * (uint64_t)0x10000U)) * (uint64_t)0x8000U)) >> (uint64_t)(uint32_t)47U);
+                tmp_lane_401517_5_0_1 = (uint32_t)((uint32_t)((uint32_t)rax_8 + (uint32_t)rcx_4) - (uint32_t)((uint32_t)rax_8 * (uint32_t)0x10000U));
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401517_5_0_1;
                 rdi_1 = rdi_2;
                 rdx_2 = (uint64_t)(uint32_t)tmp_lane_4014ed_5_0_1;
             } while ((uint8_t)((uint64_t)tmp_4014a9_8_1 != (uint64_t)rdi_2));
             {
-                return (uint32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401517_5_0_1 << (uint32_t)16U)) | (uint32_t)tmp_lane_4014ed_5_0_1);
+                return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401517_5_0_1 << (uint32_t)16U) | (uint32_t)tmp_lane_4014ed_5_0_1);
             }
         }
     }
@@ -578,12 +578,12 @@ r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdi_1 = arg0;
             do {
                 tmp_401548_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rax_4 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401548_0_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U));
+                rax_4 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401548_0_1 ^ (uint32_t)rax_2);
                 rdx_3 = 8;
                 do {
-                    tmp_lane_401566_2_2_1 = (uint32_t)((uint32_t)((uint32_t)1U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint64_t)rax_4 >> 0U) >> (uint32_t)1U)) ^ (uint32_t)((uint32_t)((uint32_t)0U - (uint32_t)((uint32_t)((uint64_t)rax_4 >> 0U) & (uint32_t)1U)) & (uint32_t)0xedb88320U));
+                    tmp_lane_401566_2_2_1 = (uint32_t)((uint32_t)((uint32_t)rax_4 >> (uint32_t)1U) ^ (uint32_t)((uint32_t)((uint32_t)0U - (uint32_t)((uint32_t)rax_4 & (uint32_t)1U)) & (uint32_t)0xedb88320U));
                     rax_8 = (uint64_t)(uint32_t)tmp_lane_401566_2_2_1;
-                    tmp_lane_401568_5_0_1 = (uint32_t)((uint32_t)((uint64_t)rdx_3 >> 0U) - (uint32_t)1U);
+                    tmp_lane_401568_5_0_1 = (uint32_t)((uint32_t)rdx_3 - (uint32_t)1U);
                     rax_4 = rax_8;
                     rdx_3 = (uint64_t)(uint32_t)tmp_lane_401568_5_0_1;
                 } while ((uint8_t)((uint32_t)tmp_lane_401568_5_0_1 != (uint32_t)0U));
@@ -711,8 +711,8 @@ r2sleigh_result_u64 crc32_init(void)
         rdx_2 = 0x404040;
         xmm4_2 = r2sleigh_load_u128((void*)(uint64_t)0x4022a0U);
         do {
-            tmp_lane_4015b9_0_0_1 = (uint32_t)((__uint128_t)xmm4_2 >> 0U);
-            tmp_lane_4015b9_0_1_1 = (uint32_t)((__uint128_t)xmm5_1 >> 0U);
+            tmp_lane_4015b9_0_0_1 = (uint32_t)xmm4_2;
+            tmp_lane_4015b9_0_1_1 = (uint32_t)xmm5_1;
             tmp_lane_4015b9_0_2_1 = (uint32_t)((uint32_t)tmp_lane_4015b9_0_0_1 + (uint32_t)tmp_lane_4015b9_0_1_1);
             xmm4_3 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffff00000000U)) | ((__uint128_t)tmp_lane_4015b9_0_2_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 0U);
             tmp_lane_4015b9_1_0_1 = (uint32_t)((__uint128_t)xmm4_2 >> 32U);
@@ -730,36 +730,36 @@ r2sleigh_result_u64 crc32_init(void)
             rax_2 = 8;
             xmm2_2 = xmm4_2;
             do {
-                tmp_lane_4015c4_0_0_1 = (uint32_t)((__uint128_t)xmm2_2 >> 0U);
-                tmp_lane_4015c4_0_1_1 = (uint32_t)1U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4015c4_0_0_1 >> (uint32_t)1U);
+                tmp_lane_4015c4_0_0_1 = (uint32_t)xmm2_2;
+                tmp_lane_4015c4_0_1_1 = (uint32_t)((uint32_t)tmp_lane_4015c4_0_0_1 >> (uint32_t)1U);
                 xmm2_3 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffff00000000U)) | ((__uint128_t)tmp_lane_4015c4_0_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 0U);
                 tmp_lane_4015c4_1_0_1 = (uint32_t)((__uint128_t)xmm2_2 >> 32U);
-                tmp_lane_4015c4_1_1_1 = (uint32_t)1U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4015c4_1_0_1 >> (uint32_t)1U);
+                tmp_lane_4015c4_1_1_1 = (uint32_t)((uint32_t)tmp_lane_4015c4_1_0_1 >> (uint32_t)1U);
                 xmm2_4 = (__uint128_t)(((__uint128_t)xmm2_3 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffU)) | ((__uint128_t)tmp_lane_4015c4_1_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 32U);
                 tmp_lane_4015c4_2_0_1 = (uint32_t)((__uint128_t)xmm2_2 >> 64U);
-                tmp_lane_4015c4_2_1_1 = (uint32_t)1U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4015c4_2_0_1 >> (uint32_t)1U);
+                tmp_lane_4015c4_2_1_1 = (uint32_t)((uint32_t)tmp_lane_4015c4_2_0_1 >> (uint32_t)1U);
                 xmm2_5 = (__uint128_t)(((__uint128_t)xmm2_4 & (__uint128_t)((__uint128_t)0xffffffff00000000U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_4015c4_2_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 64U);
                 tmp_lane_4015c4_3_0_1 = (uint32_t)((__uint128_t)xmm2_2 >> 96U);
-                tmp_lane_4015c4_3_1_1 = (uint32_t)1U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4015c4_3_0_1 >> (uint32_t)1U);
+                tmp_lane_4015c4_3_1_1 = (uint32_t)((uint32_t)tmp_lane_4015c4_3_0_1 >> (uint32_t)1U);
                 xmm2_6 = (__uint128_t)(((__uint128_t)xmm2_5 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_4015c4_3_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
                 xmm6_2 = (__uint128_t)((__uint128_t)xmm2_2 & (__uint128_t)xmm3_1);
-                tmp_lane_4015d1_0_0_1 = (uint32_t)((__uint128_t)xmm6_2 >> 0U);
+                tmp_lane_4015d1_0_0_1 = (uint32_t)xmm6_2;
                 tmp_lane_4015d1_1_0_1 = (uint32_t)((__uint128_t)xmm6_2 >> 32U);
                 tmp_lane_4015d1_2_0_1 = (uint32_t)((__uint128_t)xmm6_2 >> 64U);
                 tmp_lane_4015d1_3_0_1 = (uint32_t)((__uint128_t)xmm6_2 >> 96U);
-                tmp_lane_4015d6_0_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 0U);
+                tmp_lane_4015d6_0_1_1 = (uint32_t)xmm6_2;
                 tmp_lane_4015d6_1_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 32U);
                 tmp_lane_4015d6_2_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 64U);
                 tmp_lane_4015d6_3_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 96U);
-                tmp_lane_4015df_0_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 0U);
+                tmp_lane_4015df_0_1_1 = (uint32_t)xmm6_2;
                 tmp_lane_4015df_1_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 32U);
                 tmp_lane_4015df_2_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 64U);
                 tmp_lane_4015df_3_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 96U);
-                tmp_lane_4015e8_0_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 0U);
+                tmp_lane_4015e8_0_1_1 = (uint32_t)xmm6_2;
                 tmp_lane_4015e8_1_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 32U);
                 tmp_lane_4015e8_2_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 64U);
                 tmp_lane_4015e8_3_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 96U);
-                tmp_lane_4015f1_0_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 0U);
+                tmp_lane_4015f1_0_1_1 = (uint32_t)xmm6_2;
                 tmp_lane_4015f1_0_2_1 = (uint32_t)((uint32_t)tmp_lane_4015f1_0_1_1 + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015d1_0_0_1 * (uint32_t)16U) - (uint32_t)tmp_lane_4015d6_0_1_1) * (uint32_t)8U) - (uint32_t)tmp_lane_4015df_0_1_1) * (uint32_t)32U) - (uint32_t)tmp_lane_4015e8_0_1_1) * (uint32_t)4U));
                 xmm0_30 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffff00000000U)) | ((__uint128_t)tmp_lane_4015f1_0_2_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 0U);
                 tmp_lane_4015f1_1_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 32U);
@@ -771,36 +771,36 @@ r2sleigh_result_u64 crc32_init(void)
                 tmp_lane_4015f1_3_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 96U);
                 tmp_lane_4015f1_3_2_1 = (uint32_t)((uint32_t)tmp_lane_4015f1_3_1_1 + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015d1_3_0_1 * (uint32_t)16U) - (uint32_t)tmp_lane_4015d6_3_1_1) * (uint32_t)8U) - (uint32_t)tmp_lane_4015df_3_1_1) * (uint32_t)32U) - (uint32_t)tmp_lane_4015e8_3_1_1) * (uint32_t)4U));
                 xmm0_33 = (__uint128_t)(((__uint128_t)xmm0_32 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_4015f1_3_2_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
-                tmp_lane_4015f9_0_0_1 = (uint32_t)((__uint128_t)xmm0_33 >> 0U);
+                tmp_lane_4015f9_0_0_1 = (uint32_t)xmm0_33;
                 tmp_lane_4015f9_1_0_1 = (uint32_t)((__uint128_t)xmm0_33 >> 32U);
                 tmp_lane_4015f9_2_0_1 = (uint32_t)((__uint128_t)xmm0_33 >> 64U);
                 tmp_lane_4015f9_3_0_1 = (uint32_t)((__uint128_t)xmm0_33 >> 96U);
-                tmp_lane_401602_0_1_1 = (uint32_t)3U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_0_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_0_2_1) << (uint32_t)3U);
+                tmp_lane_401602_0_1_1 = (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_0_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_0_2_1) << (uint32_t)3U);
                 xmm1_10 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffff00000000U)) | ((__uint128_t)tmp_lane_401602_0_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 0U);
-                tmp_lane_401602_1_1_1 = (uint32_t)3U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_1_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_1_2_1) << (uint32_t)3U);
+                tmp_lane_401602_1_1_1 = (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_1_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_1_2_1) << (uint32_t)3U);
                 xmm1_11 = (__uint128_t)(((__uint128_t)xmm1_10 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffU)) | ((__uint128_t)tmp_lane_401602_1_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 32U);
-                tmp_lane_401602_2_1_1 = (uint32_t)3U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_2_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_2_2_1) << (uint32_t)3U);
+                tmp_lane_401602_2_1_1 = (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_2_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_2_2_1) << (uint32_t)3U);
                 xmm1_12 = (__uint128_t)(((__uint128_t)xmm1_11 & (__uint128_t)((__uint128_t)0xffffffff00000000U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_401602_2_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 64U);
-                tmp_lane_401602_3_1_1 = (uint32_t)3U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_3_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_3_2_1) << (uint32_t)3U);
+                tmp_lane_401602_3_1_1 = (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4015f9_3_0_1 * (uint32_t)0x400U) - (uint32_t)tmp_lane_4015f1_3_2_1) << (uint32_t)3U);
                 xmm1_13 = (__uint128_t)(((__uint128_t)xmm1_12 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_401602_3_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
-                tmp_lane_40160b_0_0_1 = (uint32_t)((__uint128_t)xmm1_13 >> 0U);
-                tmp_lane_40160b_0_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 0U);
+                tmp_lane_40160b_0_0_1 = (uint32_t)xmm1_13;
+                tmp_lane_40160b_0_1_1 = (uint32_t)xmm6_2;
                 tmp_lane_40160b_1_0_1 = (uint32_t)((__uint128_t)xmm1_13 >> 32U);
                 tmp_lane_40160b_1_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 32U);
                 tmp_lane_40160b_2_0_1 = (uint32_t)((__uint128_t)xmm1_13 >> 64U);
                 tmp_lane_40160b_2_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 64U);
                 tmp_lane_40160b_3_0_1 = (uint32_t)((__uint128_t)xmm1_13 >> 96U);
                 tmp_lane_40160b_3_1_1 = (uint32_t)((__uint128_t)xmm6_2 >> 96U);
-                tmp_lane_40160f_0_1_1 = (uint32_t)5U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_0_0_1 + (uint32_t)tmp_lane_40160b_0_1_1) << (uint32_t)5U);
+                tmp_lane_40160f_0_1_1 = (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_0_0_1 + (uint32_t)tmp_lane_40160b_0_1_1) << (uint32_t)5U);
                 xmm0_39 = (__uint128_t)(((__uint128_t)0U & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffff00000000U)) | ((__uint128_t)tmp_lane_40160f_0_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 0U);
-                tmp_lane_40160f_1_1_1 = (uint32_t)5U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_1_0_1 + (uint32_t)tmp_lane_40160b_1_1_1) << (uint32_t)5U);
+                tmp_lane_40160f_1_1_1 = (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_1_0_1 + (uint32_t)tmp_lane_40160b_1_1_1) << (uint32_t)5U);
                 xmm0_40 = (__uint128_t)(((__uint128_t)xmm0_39 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffU)) | ((__uint128_t)tmp_lane_40160f_1_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 32U);
-                tmp_lane_40160f_2_1_1 = (uint32_t)5U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_2_0_1 + (uint32_t)tmp_lane_40160b_2_1_1) << (uint32_t)5U);
+                tmp_lane_40160f_2_1_1 = (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_2_0_1 + (uint32_t)tmp_lane_40160b_2_1_1) << (uint32_t)5U);
                 xmm0_41 = (__uint128_t)(((__uint128_t)xmm0_40 & (__uint128_t)((__uint128_t)0xffffffff00000000U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_40160f_2_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 64U);
-                tmp_lane_40160f_3_1_1 = (uint32_t)5U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_3_0_1 + (uint32_t)tmp_lane_40160b_3_1_1) << (uint32_t)5U);
+                tmp_lane_40160f_3_1_1 = (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_3_0_1 + (uint32_t)tmp_lane_40160b_3_1_1) << (uint32_t)5U);
                 xmm0_42 = (__uint128_t)(((__uint128_t)xmm0_41 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_40160f_3_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
                 xmm2_7 = (__uint128_t)((__uint128_t)xmm2_6 ^ (__uint128_t)xmm0_42);
-                tmp_lane_401618_5_0_1 = (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) - (uint32_t)1U);
+                tmp_lane_401618_5_0_1 = (uint32_t)((uint32_t)rax_2 - (uint32_t)1U);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401618_5_0_1;
                 xmm2_2 = xmm2_7;
             } while ((uint8_t)((uint32_t)tmp_lane_401618_5_0_1 != (uint32_t)0U));
@@ -847,8 +847,8 @@ r2sleigh_word_u32 crc32_table(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_401648_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                tmp_401657_10_1 = r2sleigh_load_u32((void*)((uint64_t)((uint64_t)(uint8_t)((uint32_t)((uint32_t)(uint8_t)tmp_401648_0_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U)) >> 0U) * (uint64_t)4U) + (uint64_t)&crc_tab));
-                tmp_lane_401657_5_1_1 = (uint32_t)((uint32_t)((uint32_t)8U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) >> (uint32_t)8U)) ^ (uint32_t)tmp_401657_10_1);
+                tmp_401657_10_1 = r2sleigh_load_u32((void*)((uint64_t)((uint64_t)(uint8_t)((uint32_t)(uint8_t)tmp_401648_0_1 ^ (uint32_t)rax_2) * (uint64_t)4U) + (uint64_t)&crc_tab));
+                tmp_lane_401657_5_1_1 = (uint32_t)((uint32_t)((uint32_t)rax_2 >> (uint32_t)8U) ^ (uint32_t)tmp_401657_10_1);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401657_5_1_1;
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
@@ -898,7 +898,7 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
     /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 44 statements rendered; a call reads the result (assuming closed-world) */
     {
         rcx_1 = (uint64_t)(uint32_t)arg2;
-        rax_2 = (uint64_t)(uint32_t)2U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)arg1 >> (uint64_t)(uint32_t)2U);
+        rax_2 = (uint64_t)((uint64_t)arg1 >> (uint64_t)(uint32_t)2U);
         if ((uint8_t)((uint64_t)rax_2 == (uint64_t)0U)) {
             rcx_4 = rcx_1;
         } else {
@@ -907,11 +907,11 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
             rdx_2 = (uint64_t)arg0;
             for (; ; ) {
                 tmp_4016a0_0_1 = r2sleigh_load_u32((void*)rdx_2);
-                tmp_lane_4016a0_4_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)tmp_4016a0_0_1 * (uint64_t)0xffffffffcc9e2d51U) >> 0U);
+                tmp_lane_4016a0_4_0_1 = (uint32_t)((uint64_t)(int32_t)tmp_4016a0_0_1 * (uint64_t)0xffffffffcc9e2d51U);
                 rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)4U);
-                tmp_lane_4016b3_2_2_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)15U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016a0_4_0_1 << (uint32_t)15U)) | (uint32_t)((uint32_t)17U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016a0_4_0_1 >> (uint32_t)17U))) * (uint64_t)0x1b873593U) >> 0U) ^ (uint32_t)((uint64_t)rcx_2 >> 0U));
-                rax_7 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016b3_2_2_1 << (uint32_t)13U)) | (uint32_t)((uint32_t)19U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016b3_2_2_1 >> (uint32_t)19U)));
-                rcx_3 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)((uint64_t)rax_7 + (uint64_t)((uint64_t)rax_7 * (uint64_t)4U)) - (uint64_t)0x19ab949cU) >> 0U);
+                tmp_lane_4016b3_2_2_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016a0_4_0_1 << (uint32_t)15U) | (uint32_t)((uint32_t)tmp_lane_4016a0_4_0_1 >> (uint32_t)17U)) * (uint64_t)0x1b873593U) ^ (uint32_t)rcx_2);
+                rax_7 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)tmp_lane_4016b3_2_2_1 << (uint32_t)13U) | (uint32_t)((uint32_t)tmp_lane_4016b3_2_2_1 >> (uint32_t)19U));
+                rcx_3 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rax_7 + (uint64_t)((uint64_t)rax_7 * (uint64_t)4U)) - (uint64_t)0x19ab949cU);
                 if ((uint8_t)((uint64_t)tmp_401695_8_1 != (uint64_t)rdx_3)) {
                     rcx_2 = rcx_3;
                     rdx_2 = rdx_3;
@@ -923,28 +923,28 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
         }
         {
             rdi_1 = (uint64_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x4) + (uint64_t)arg0);
-            rax_11 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)arg1 >> 0U) & (uint32_t)3U);
+            rax_11 = (uint64_t)(uint32_t)((uint32_t)arg1 & (uint32_t)3U);
             if ((uint8_t)((uint64_t)rax_11 == (uint64_t)2U)) {
                 rax_26 = 0;
                 {
                     tmp_40172f_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)1U * 1U));
-                    rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)8U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U)) ^ (uint32_t)((uint64_t)rax_26 >> 0U));
+                    rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U) ^ (uint32_t)rax_26);
                 }
             } else {
                 if ((uint8_t)((uint64_t)rax_11 == (uint64_t)3U)) {
                     tmp_401728_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)2U * 1U));
-                    rax_26 = (uint64_t)(uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)(uint8_t)tmp_401728_8_1 << (uint32_t)16U));
+                    rax_26 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401728_8_1 << (uint32_t)16U);
                     {
                         tmp_40172f_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)1U * 1U));
-                        rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)8U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U)) ^ (uint32_t)((uint64_t)rax_26 >> 0U));
+                        rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U) ^ (uint32_t)rax_26);
                     }
                 } else {
                     if ((uint8_t)((uint64_t)rax_11 != (uint64_t)1U)) {
                         rcx_6 = rcx_4;
-                        tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)((uint64_t)rcx_6 >> 0U) ^ (uint32_t)((uint64_t)arg1 >> 0U));
-                        tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U)) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU) >> 0U);
-                        tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U)) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U) >> 0U);
-                        return (uint32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U)) ^ (uint32_t)tmp_lane_401715_3_0_1);
+                        tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_6 ^ (uint32_t)arg1);
+                        tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU);
+                        tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U);
+                        return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401715_3_0_1);
                     } else {
                         rdx_6 = 0;
                     }
@@ -952,14 +952,14 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
             }
             {
                 tmp_4016e8_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                tmp_lane_4016ed_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_4016e8_0_1 ^ (uint32_t)((uint64_t)rdx_6 >> 0U)) * (uint64_t)0xffffffffcc9e2d51U) >> 0U);
-                rcx_6 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)15U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016ed_3_0_1 << (uint32_t)15U)) | (uint32_t)((uint32_t)17U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016ed_3_0_1 >> (uint32_t)17U))) * (uint64_t)0x1b873593U) >> 0U) ^ (uint32_t)((uint64_t)rcx_4 >> 0U));
+                tmp_lane_4016ed_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_4016e8_0_1 ^ (uint32_t)rdx_6) * (uint64_t)0xffffffffcc9e2d51U);
+                rcx_6 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016ed_3_0_1 << (uint32_t)15U) | (uint32_t)((uint32_t)tmp_lane_4016ed_3_0_1 >> (uint32_t)17U)) * (uint64_t)0x1b873593U) ^ (uint32_t)rcx_4);
             }
             {
-                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)((uint64_t)rcx_6 >> 0U) ^ (uint32_t)((uint64_t)arg1 >> 0U));
-                tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U)) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU) >> 0U);
-                tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U)) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U) >> 0U);
-                return (uint32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U)) ^ (uint32_t)tmp_lane_401715_3_0_1);
+                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_6 ^ (uint32_t)arg1);
+                tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU);
+                tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U);
+                return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401715_3_0_1);
             }
         }
     }
@@ -1028,25 +1028,25 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
             rdx_11 = (uint64_t)(uint32_t)((uint32_t)arg2 + (uint32_t)0x165667b1U);
         } else {
             tmp_40176f_0_1 = (uint64_t)((uint64_t)rsi_1 - (uint64_t)16U);
-            r10_2 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rdx_1 + (uint64_t)0x61c8864fU) >> 0U);
-            r11_2 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rdx_1 + (uint64_t)0x24234428U) >> 0U);
+            r10_2 = (uint64_t)(uint32_t)((uint64_t)rdx_1 + (uint64_t)0x61c8864fU);
+            r11_2 = (uint64_t)(uint32_t)((uint64_t)rdx_1 + (uint64_t)0x24234428U);
             r9_2 = (uint64_t)(uint32_t)arg2;
-            rax_2 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rdx_1 - (uint64_t)0x7a143589U) >> 0U);
+            rax_2 = (uint64_t)(uint32_t)((uint64_t)rdx_1 - (uint64_t)0x7a143589U);
             rdx_2 = arg0;
             do {
                 tmp_401788_0_1 = r2sleigh_load_u32((void*)rdx_2);
                 rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)16U);
-                tmp_lane_401792_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)tmp_401788_0_1 * (uint64_t)0xffffffff85ebca77U) >> 0U) + (uint32_t)((uint64_t)r11_2 >> 0U));
-                tmp_lane_401798_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401792_6_0_1 << (uint32_t)13U)) | (uint32_t)((uint32_t)19U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401792_6_0_1 >> (uint32_t)19U))) * (uint64_t)0xffffffff9e3779b1U) >> 0U);
+                tmp_lane_401792_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_401788_0_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)r11_2);
+                tmp_lane_401798_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401792_6_0_1 << (uint32_t)13U) | (uint32_t)((uint32_t)tmp_lane_401792_6_0_1 >> (uint32_t)19U)) * (uint64_t)0xffffffff9e3779b1U);
                 tmp_40179f_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_3 - (uint64_t)12U));
-                tmp_lane_4017a6_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)tmp_40179f_8_1 * (uint64_t)0xffffffff85ebca77U) >> 0U) + (uint32_t)((uint64_t)rax_2 >> 0U));
+                tmp_lane_4017a6_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_40179f_8_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)rax_2);
                 tmp_4017a8_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_3 - (uint64_t)8U));
-                tmp_lane_4017b2_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017a6_6_0_1 << (uint32_t)13U)) | (uint32_t)((uint32_t)19U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017a6_6_0_1 >> (uint32_t)19U))) * (uint64_t)0xffffffff9e3779b1U) >> 0U);
-                tmp_lane_4017b8_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)tmp_4017a8_8_1 * (uint64_t)0xffffffff85ebca77U) >> 0U) + (uint32_t)((uint64_t)r9_2 >> 0U));
-                tmp_lane_4017be_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017b8_6_0_1 << (uint32_t)13U)) | (uint32_t)((uint32_t)19U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017b8_6_0_1 >> (uint32_t)19U))) * (uint64_t)0xffffffff9e3779b1U) >> 0U);
+                tmp_lane_4017b2_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4017a6_6_0_1 << (uint32_t)13U) | (uint32_t)((uint32_t)tmp_lane_4017a6_6_0_1 >> (uint32_t)19U)) * (uint64_t)0xffffffff9e3779b1U);
+                tmp_lane_4017b8_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_4017a8_8_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)r9_2);
+                tmp_lane_4017be_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4017b8_6_0_1 << (uint32_t)13U) | (uint32_t)((uint32_t)tmp_lane_4017b8_6_0_1 >> (uint32_t)19U)) * (uint64_t)0xffffffff9e3779b1U);
                 tmp_4017c5_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_3 - (uint64_t)4U));
-                tmp_lane_4017cc_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)tmp_4017c5_8_1 * (uint64_t)0xffffffff85ebca77U) >> 0U) + (uint32_t)((uint64_t)r10_2 >> 0U));
-                tmp_lane_4017d2_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017cc_6_0_1 << (uint32_t)13U)) | (uint32_t)((uint32_t)19U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017cc_6_0_1 >> (uint32_t)19U))) * (uint64_t)0xffffffff9e3779b1U) >> 0U);
+                tmp_lane_4017cc_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_4017c5_8_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)r10_2);
+                tmp_lane_4017d2_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4017cc_6_0_1 << (uint32_t)13U) | (uint32_t)((uint32_t)tmp_lane_4017cc_6_0_1 >> (uint32_t)19U)) * (uint64_t)0xffffffff9e3779b1U);
                 r10_2 = (uint64_t)(uint32_t)tmp_lane_4017d2_3_0_1;
                 r11_2 = (uint64_t)(uint32_t)tmp_lane_401798_3_0_1;
                 r9_2 = (uint64_t)(uint32_t)tmp_lane_4017be_3_0_1;
@@ -1055,11 +1055,11 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
             } while ((uint8_t)((uint64_t)rdx_3 <= (uint64_t)tmp_40176f_0_1));
             {
                 rdi_2 = (uint64_t)((uint64_t)arg0 + (uint64_t)((uint8_t)((uint64_t)((uint64_t)arg0 + (uint64_t)1U) <= (uint64_t)((uint64_t)rsi_1 - (uint64_t)15U)) ? (uint64_t)((uint64_t)((uint64_t)((uint64_t)arg1 - (uint64_t)16U) & (uint64_t)-0x10) + (uint64_t)16U) : (uint64_t)16U));
-                rdx_11 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)((uint32_t)14U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017d2_3_0_1 >> (uint32_t)14U)) | (uint32_t)((uint32_t)18U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017d2_3_0_1 << (uint32_t)18U))) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)12U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017be_3_0_1 << (uint32_t)12U)) | (uint32_t)((uint32_t)20U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017be_3_0_1 >> (uint32_t)20U))) + (uint32_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)((uint32_t)7U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017b2_3_0_1 << (uint32_t)7U)) | (uint32_t)((uint32_t)25U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_4017b2_3_0_1 >> (uint32_t)25U))) + (uint64_t)(uint32_t)((uint32_t)((uint32_t)1U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401798_3_0_1 << (uint32_t)1U)) | (uint32_t)(uint8_t)((int32_t)tmp_lane_401798_3_0_1 < (int32_t)0U))) >> 0U)));
+                rdx_11 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4017d2_3_0_1 >> (uint32_t)14U) | (uint32_t)((uint32_t)tmp_lane_4017d2_3_0_1 << (uint32_t)18U)) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)tmp_lane_4017be_3_0_1 << (uint32_t)12U) | (uint32_t)((uint32_t)tmp_lane_4017be_3_0_1 >> (uint32_t)20U)) + (uint32_t)((uint64_t)(uint32_t)((uint32_t)((uint32_t)tmp_lane_4017b2_3_0_1 << (uint32_t)7U) | (uint32_t)((uint32_t)tmp_lane_4017b2_3_0_1 >> (uint32_t)25U)) + (uint64_t)(uint32_t)((uint32_t)((uint32_t)tmp_lane_401798_3_0_1 << (uint32_t)1U) | (uint32_t)(uint8_t)((int32_t)tmp_lane_401798_3_0_1 < (int32_t)0U)))));
             }
         }
         {
-            rdx_12 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)rdx_11 >> 0U) + (uint32_t)((uint64_t)arg1 >> 0U));
+            rdx_12 = (uint64_t)(uint32_t)((uint32_t)rdx_11 + (uint32_t)arg1);
             tmp_40181c_0_1 = (uint64_t)((uint64_t)rdi_2 + (uint64_t)4U);
             if ((uint8_t)((uint64_t)rsi_1 < (uint64_t)tmp_40181c_0_1)) {
                 rdi_4 = rdi_2;
@@ -1070,8 +1070,8 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
                 do {
                     tmp_401830_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rcx_14 - (uint64_t)4U));
                     rcx_15 = (uint64_t)((uint64_t)rcx_14 + (uint64_t)4U);
-                    tmp_lane_40183b_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(int32_t)tmp_401830_8_1 * (uint64_t)0xffffffffc2b2ae3dU) >> 0U) + (uint32_t)((uint64_t)rdx_13 >> 0U));
-                    rdx_14 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)15U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_40183b_6_0_1 >> (uint32_t)15U)) | (uint32_t)((uint32_t)17U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_40183b_6_0_1 << (uint32_t)17U))) * (uint64_t)0x27d4eb2fU) >> 0U);
+                    tmp_lane_40183b_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_401830_8_1 * (uint64_t)0xffffffffc2b2ae3dU) + (uint32_t)rdx_13);
+                    rdx_14 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_40183b_6_0_1 >> (uint32_t)15U) | (uint32_t)((uint32_t)tmp_lane_40183b_6_0_1 << (uint32_t)17U)) * (uint64_t)0x27d4eb2fU);
                     rcx_14 = rcx_15;
                     rdx_13 = rdx_14;
                 } while ((uint8_t)((uint64_t)rcx_15 <= (uint64_t)rsi_1));
@@ -1089,8 +1089,8 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
                     for (; ; ) {
                         tmp_40185f_0_1 = r2sleigh_load_u8((void*)rdi_5);
                         rdi_6 = (uint64_t)((uint64_t)rdi_5 + (uint64_t)1U);
-                        tmp_lane_40186c_6_0_1 = (uint32_t)((uint32_t)((uint64_t)((uint64_t)(uint8_t)tmp_40185f_0_1 * (uint64_t)0x165667b1U) >> 0U) + (uint32_t)((uint64_t)rdx_16 >> 0U));
-                        rdx_17 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)11U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_40186c_6_0_1 << (uint32_t)11U)) | (uint32_t)((uint32_t)21U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_40186c_6_0_1 >> (uint32_t)21U))) * (uint64_t)0xffffffff9e3779b1U) >> 0U);
+                        tmp_lane_40186c_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(uint8_t)tmp_40185f_0_1 * (uint64_t)0x165667b1U) + (uint32_t)rdx_16);
+                        rdx_17 = (uint64_t)(uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_40186c_6_0_1 << (uint32_t)11U) | (uint32_t)((uint32_t)tmp_lane_40186c_6_0_1 >> (uint32_t)21U)) * (uint64_t)0xffffffff9e3779b1U);
                         if ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_6)) {
                             rdi_5 = rdi_6;
                             rdx_16 = rdx_17;
@@ -1101,9 +1101,9 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
                     }
                 }
                 {
-                    tmp_lane_401884_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)15U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)((uint64_t)rdx_18 >> 0U) >> (uint32_t)15U)) ^ (uint32_t)((uint64_t)rdx_18 >> 0U)) * (uint64_t)0xffffffff85ebca77U) >> 0U);
-                    tmp_lane_401891_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)13U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401884_3_0_1 >> (uint32_t)13U)) ^ (uint32_t)tmp_lane_401884_3_0_1) * (uint64_t)0xffffffffc2b2ae3dU) >> 0U);
-                    return (uint32_t)((uint32_t)((uint32_t)16U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)tmp_lane_401891_3_0_1 >> (uint32_t)16U)) ^ (uint32_t)tmp_lane_401891_3_0_1);
+                    tmp_lane_401884_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)rdx_18 >> (uint32_t)15U) ^ (uint32_t)rdx_18) * (uint64_t)0xffffffff85ebca77U);
+                    tmp_lane_401891_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401884_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401884_3_0_1) * (uint64_t)0xffffffffc2b2ae3dU);
+                    return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401891_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401891_3_0_1);
                 }
             }
         }
@@ -1228,7 +1228,7 @@ r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word
         r11_2 = (uint64_t)((uint64_t)arg3 ^ (uint64_t)0x646f72616e646f6dU);
         rcx_1 = (uint64_t)((uint64_t)arg3 ^ (uint64_t)0x7465646279746573U);
         r10_3 = (uint64_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x8) + (uint64_t)arg0);
-        rsi_4 = (uint64_t)(uint32_t)56U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)arg1 << (uint64_t)(uint32_t)56U);
+        rsi_4 = (uint64_t)((uint64_t)arg1 << (uint64_t)(uint32_t)56U);
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)r10_3)) {
             r11_12 = r11_2;
             rax_11 = rax_2;
@@ -1244,23 +1244,23 @@ r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word
                 tmp_401908_0_1 = r2sleigh_load_u64((void*)rdi_1);
                 rax_4 = (uint64_t)((uint64_t)rax_3 + (uint64_t)r11_3);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)8U);
-                r11_5 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_3 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_3 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)rax_4);
+                r11_5 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)r11_3 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)r11_3 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)rax_4);
                 rcx_3 = (uint64_t)((uint64_t)rcx_2 ^ (uint64_t)tmp_401908_0_1);
                 rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)rcx_3);
-                rcx_5 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_3 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_3 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_3);
+                rcx_5 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_3 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_3 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_3);
                 rdx_4 = (uint64_t)((uint64_t)rdx_3 + (uint64_t)r11_5);
-                rax_6 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_4 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_4 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_5);
-                r11_7 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_5 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_5 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_4);
-                rcx_7 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_5 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_5 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rax_6);
+                rax_6 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_4 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rax_4 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_5);
+                r11_7 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)r11_5 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)r11_5 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_4);
+                rcx_7 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_5 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_5 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rax_6);
                 rax_7 = (uint64_t)((uint64_t)rax_6 + (uint64_t)r11_7);
-                rdx_6 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_4 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_4 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_7);
-                r11_9 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_7 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_7 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)rax_7);
-                rcx_9 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_7 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_7 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_6);
+                rdx_6 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdx_4 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_4 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_7);
+                r11_9 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)r11_7 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)r11_7 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)rax_7);
+                rcx_9 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_7 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_7 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_6);
                 rdx_7 = (uint64_t)((uint64_t)rdx_6 + (uint64_t)r11_9);
-                rax_9 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_7 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_7 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_9);
-                r11_11 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_9 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_9 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_7);
-                rcx_11 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_9 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_9 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rax_9);
-                rdx_8 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_7 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_7 >> (uint64_t)(uint32_t)32U)));
+                rax_9 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_7 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rax_7 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_9);
+                r11_11 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)r11_9 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)r11_9 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_7);
+                rcx_11 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_9 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_9 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rax_9);
+                rdx_8 = (uint64_t)((uint64_t)((uint64_t)rdx_7 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_7 >> (uint64_t)(uint32_t)32U));
                 rax_10 = (uint64_t)((uint64_t)rax_9 ^ (uint64_t)tmp_401908_0_1);
                 if ((uint8_t)((uint64_t)r10_3 != (uint64_t)rdi_2)) {
                     r11_3 = r11_11;
@@ -1278,12 +1278,12 @@ r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word
             }
         }
         {
-            tmp_lane_40197a_2_1_1 = (uint32_t)((uint32_t)((uint64_t)arg1 >> 0U) & (uint32_t)7U);
+            tmp_lane_40197a_2_1_1 = (uint32_t)((uint32_t)arg1 & (uint32_t)7U);
             switch (tmp_lane_40197a_2_1_1) {
             case 7:
                 {
                     tmp_401990_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)6U * 1U));
-                    rsi_6 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint8_t)tmp_401990_8_1 << (uint64_t)(uint32_t)48U)));
+                    rsi_6 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)((uint64_t)(uint8_t)tmp_401990_8_1 << (uint64_t)(uint32_t)48U));
                     break;
                 }
             case 6:
@@ -1310,27 +1310,27 @@ r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word
             }
             {
                 tmp_40199c_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)5U * 1U));
-                rsi_8 = (uint64_t)((uint64_t)rsi_6 | (uint64_t)((uint64_t)(uint32_t)40U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint8_t)tmp_40199c_8_1 << (uint64_t)(uint32_t)40U)));
+                rsi_8 = (uint64_t)((uint64_t)rsi_6 | (uint64_t)((uint64_t)(uint8_t)tmp_40199c_8_1 << (uint64_t)(uint32_t)40U));
             }
             {
 L2: ;
                 tmp_4019a8_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)4U * 1U));
-                rsi_10 = (uint64_t)((uint64_t)rsi_8 | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint8_t)tmp_4019a8_8_1 << (uint64_t)(uint32_t)32U)));
+                rsi_10 = (uint64_t)((uint64_t)rsi_8 | (uint64_t)((uint64_t)(uint8_t)tmp_4019a8_8_1 << (uint64_t)(uint32_t)32U));
             }
             {
 L3: ;
                 tmp_4019b4_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)3U * 1U));
-                rsi_12 = (uint64_t)((uint64_t)rsi_10 | (uint64_t)((uint64_t)(uint32_t)24U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint8_t)tmp_4019b4_8_1 << (uint64_t)(uint32_t)24U)));
+                rsi_12 = (uint64_t)((uint64_t)rsi_10 | (uint64_t)((uint64_t)(uint8_t)tmp_4019b4_8_1 << (uint64_t)(uint32_t)24U));
             }
             {
 L4: ;
                 tmp_4019c0_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)2U * 1U));
-                rsi_14 = (uint64_t)((uint64_t)rsi_12 | (uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint8_t)tmp_4019c0_8_1 << (uint64_t)(uint32_t)16U)));
+                rsi_14 = (uint64_t)((uint64_t)rsi_12 | (uint64_t)((uint64_t)(uint8_t)tmp_4019c0_8_1 << (uint64_t)(uint32_t)16U));
             }
             {
 L5: ;
                 tmp_4019cc_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)1U * 1U));
-                rsi_16 = (uint64_t)((uint64_t)rsi_14 | (uint64_t)((uint64_t)(uint32_t)8U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint8_t)tmp_4019cc_8_1 << (uint64_t)(uint32_t)8U)));
+                rsi_16 = (uint64_t)((uint64_t)rsi_14 | (uint64_t)((uint64_t)(uint8_t)tmp_4019cc_8_1 << (uint64_t)(uint32_t)8U));
             }
             {
 L6: ;
@@ -1342,52 +1342,52 @@ L7: ;
                 rcx_13 = (uint64_t)((uint64_t)rcx_12 ^ (uint64_t)rsi_18);
                 tmp_4019e2_8_1 = (uint64_t)((uint64_t)rax_11 + (uint64_t)r11_12);
                 rdx_10 = (uint64_t)((uint64_t)rdx_9 + (uint64_t)rcx_13);
-                r11_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_12 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_12 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)tmp_4019e2_8_1);
-                rcx_15 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_13 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_13 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_10);
+                r11_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)r11_12 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)r11_12 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)tmp_4019e2_8_1);
+                rcx_15 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_13 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_13 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_10);
                 rdx_11 = (uint64_t)((uint64_t)rdx_10 + (uint64_t)r11_14);
-                tmp_401a01_8_1 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)tmp_4019e2_8_1 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)tmp_4019e2_8_1 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_15);
-                rcx_17 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_15 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_15 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)tmp_401a01_8_1);
-                rax_16 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_14 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r11_14 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_11);
+                tmp_401a01_8_1 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_4019e2_8_1 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)tmp_4019e2_8_1 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_15);
+                rcx_17 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_15 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_15 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)tmp_401a01_8_1);
+                rax_16 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)r11_14 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)r11_14 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_11);
                 rdi_18 = (uint64_t)((uint64_t)tmp_401a01_8_1 + (uint64_t)rax_16);
-                rdx_13 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_11 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_11 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_17);
-                rax_18 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_16 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_16 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)rdi_18);
-                rcx_19 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_17 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_17 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_13);
+                rdx_13 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdx_11 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_11 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_17);
+                rax_18 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_16 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)rax_16 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)rdi_18);
+                rcx_19 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_17 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_17 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_13);
                 rdx_14 = (uint64_t)((uint64_t)rdx_13 + (uint64_t)rax_18);
-                rdi_20 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdi_18 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdi_18 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_19);
-                rax_20 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_18 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_18 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_14);
-                rdx_15 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_14 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_14 >> (uint64_t)(uint32_t)32U)));
-                rcx_21 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_19 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_19 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rdi_20);
+                rdi_20 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdi_18 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdi_18 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_19);
+                rax_20 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_18 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)rax_18 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_14);
+                rdx_15 = (uint64_t)((uint64_t)((uint64_t)rdx_14 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_14 >> (uint64_t)(uint32_t)32U));
+                rcx_21 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_19 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_19 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rdi_20);
                 rsi_20 = (uint64_t)((uint64_t)((uint64_t)rsi_18 ^ (uint64_t)rdi_20) + (uint64_t)rax_20);
-                tmp_lane_401a50_2_1_1 = (uint8_t)((uint32_t)(uint8_t)((uint64_t)rdx_15 >> 0U) ^ (uint32_t)(uint8_t)255U);
+                tmp_lane_401a50_2_1_1 = (uint8_t)((uint32_t)(uint8_t)rdx_15 ^ (uint32_t)(uint8_t)255U);
                 rdx_16 = (uint64_t)(((uint64_t)rdx_15 & (uint64_t)-0x100) | ((uint64_t)tmp_lane_401a50_2_1_1 & (uint64_t)255U) << 0U);
-                rax_22 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_20 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_20 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)rsi_20);
+                rax_22 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_20 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)rax_20 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)rsi_20);
                 rdx_17 = (uint64_t)((uint64_t)rdx_16 + (uint64_t)rcx_21);
-                rcx_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_21 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_21 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_17);
+                rcx_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_21 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_21 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_17);
                 rdx_18 = (uint64_t)((uint64_t)rdx_17 + (uint64_t)rax_22);
-                rsi_22 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_20 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_20 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_23);
-                rax_24 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_22 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_22 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_18);
-                rcx_25 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_23 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_23 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rsi_22);
+                rsi_22 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rsi_20 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rsi_20 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_23);
+                rax_24 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_22 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)rax_22 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_18);
+                rcx_25 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_23 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_23 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rsi_22);
                 rsi_23 = (uint64_t)((uint64_t)rsi_22 + (uint64_t)rax_24);
-                rdx_20 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_18 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_18 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_25);
-                rax_26 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_24 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_24 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)rsi_23);
-                rcx_27 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_25 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_25 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_20);
+                rdx_20 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdx_18 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_18 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_25);
+                rax_26 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_24 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)rax_24 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)rsi_23);
+                rcx_27 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_25 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_25 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_20);
                 rdx_21 = (uint64_t)((uint64_t)rdx_20 + (uint64_t)rax_26);
-                rsi_25 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_23 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_23 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_27);
-                rax_28 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_26 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_26 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_21);
-                rcx_29 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_27 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_27 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rsi_25);
+                rsi_25 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rsi_23 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rsi_23 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_27);
+                rax_28 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_26 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)rax_26 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_21);
+                rcx_29 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_27 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_27 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rsi_25);
                 rsi_26 = (uint64_t)((uint64_t)rsi_25 + (uint64_t)rax_28);
-                rdx_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_21 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_21 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_29);
-                rax_30 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_28 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_28 >> (uint64_t)(uint32_t)51U))) ^ (uint64_t)rsi_26);
-                rcx_31 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_29 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_29 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_23);
-                rsi_28 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_26 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_26 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_31);
+                rdx_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdx_21 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_21 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_29);
+                rax_30 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_28 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)rax_28 >> (uint64_t)(uint32_t)51U)) ^ (uint64_t)rsi_26);
+                rcx_31 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_29 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_29 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_23);
+                rsi_28 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rsi_26 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rsi_26 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_31);
                 rdx_24 = (uint64_t)((uint64_t)rdx_23 + (uint64_t)rax_30);
-                rax_32 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_30 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_30 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)rdx_24);
-                rcx_33 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_31 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_31 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rsi_28);
-                rsi_30 = (uint64_t)((uint64_t)((uint64_t)rsi_28 + (uint64_t)rax_32) ^ (uint64_t)((uint64_t)((uint64_t)(uint32_t)13U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_32 << (uint64_t)(uint32_t)13U)) | (uint64_t)((uint64_t)(uint32_t)51U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_32 >> (uint64_t)(uint32_t)51U))));
-                rdx_26 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_24 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_24 >> (uint64_t)(uint32_t)32U))) + (uint64_t)rcx_33);
-                rax_36 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)16U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_33 << (uint64_t)(uint32_t)16U)) | (uint64_t)((uint64_t)(uint32_t)48U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rcx_33 >> (uint64_t)(uint32_t)48U))) ^ (uint64_t)rdx_26);
+                rax_32 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_30 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)rax_30 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)rdx_24);
+                rcx_33 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_31 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rcx_31 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rsi_28);
+                rsi_30 = (uint64_t)((uint64_t)((uint64_t)rsi_28 + (uint64_t)rax_32) ^ (uint64_t)((uint64_t)((uint64_t)rax_32 << (uint64_t)(uint32_t)13U) | (uint64_t)((uint64_t)rax_32 >> (uint64_t)(uint32_t)51U)));
+                rdx_26 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdx_24 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_24 >> (uint64_t)(uint32_t)32U)) + (uint64_t)rcx_33);
+                rax_36 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rcx_33 << (uint64_t)(uint32_t)16U) | (uint64_t)((uint64_t)rcx_33 >> (uint64_t)(uint32_t)48U)) ^ (uint64_t)rdx_26);
                 rdx_27 = (uint64_t)((uint64_t)rdx_26 + (uint64_t)rsi_30);
-                return (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_27 << (uint64_t)(uint32_t)32U)) | (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rdx_27 >> (uint64_t)(uint32_t)32U))) ^ (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)17U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_30 << (uint64_t)(uint32_t)17U)) | (uint64_t)((uint64_t)(uint32_t)47U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rsi_30 >> (uint64_t)(uint32_t)47U))) ^ (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)21U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_36 << (uint64_t)(uint32_t)21U)) | (uint64_t)((uint64_t)(uint32_t)43U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_36 >> (uint64_t)(uint32_t)43U))) ^ (uint64_t)rdx_27)));
+                return (uint64_t)((uint64_t)((uint64_t)((uint64_t)rdx_27 << (uint64_t)(uint32_t)32U) | (uint64_t)((uint64_t)rdx_27 >> (uint64_t)(uint32_t)32U)) ^ (uint64_t)((uint64_t)((uint64_t)((uint64_t)rsi_30 << (uint64_t)(uint32_t)17U) | (uint64_t)((uint64_t)rsi_30 >> (uint64_t)(uint32_t)47U)) ^ (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_36 << (uint64_t)(uint32_t)21U) | (uint64_t)((uint64_t)rax_36 >> (uint64_t)(uint32_t)43U)) ^ (uint64_t)rdx_27)));
             }
         }
     }
@@ -1425,7 +1425,7 @@ r2sleigh_word_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_401b20_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                tmp_401b29_8_1 = r2sleigh_load_u8((void*)((uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint64_t)rax_2 >> 0U) ^ (uint32_t)tmp_401b20_0_1) + (uint64_t)&pearson_tab));
+                tmp_401b29_8_1 = r2sleigh_load_u8((void*)((uint64_t)(uint8_t)((uint32_t)(uint8_t)rax_2 ^ (uint32_t)tmp_401b20_0_1) + (uint64_t)&pearson_tab));
                 tmp_lane_401b29_2_0_1 = (uint32_t)(uint8_t)tmp_401b29_8_1;
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401b29_2_0_1;
                 rdi_1 = rdi_2;
@@ -1465,10 +1465,10 @@ r2sleigh_word_u64 combined(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
         rax_1 = fnv1a64(arg0, arg1);
         rax_2 = (uint64_t)djb2(arg0, arg1);
         rax_3 = (uint64_t)crc32_bitwise(arg0, arg1);
-        r9_2 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_3 >> 0U) + (uint64_t)((uint64_t)rax_1 ^ (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)32U))));
-        r9_3 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)7U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r9_2 << (uint64_t)(uint32_t)7U)) | (uint64_t)((uint64_t)(uint32_t)57U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r9_2 >> (uint64_t)(uint32_t)57U)));
-        rax_4 = (uint64_t)murmur3_32((uint8_t*)arg0, arg1, (uint32_t)((uint64_t)r9_3 >> 0U));
-        return (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_4 >> 0U) ^ (uint64_t)r9_3);
+        r9_2 = (uint64_t)((uint64_t)(uint32_t)rax_3 + (uint64_t)((uint64_t)rax_1 ^ (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)32U)));
+        r9_3 = (uint64_t)((uint64_t)((uint64_t)r9_2 << (uint64_t)(uint32_t)7U) | (uint64_t)((uint64_t)r9_2 >> (uint64_t)(uint32_t)57U));
+        rax_4 = (uint64_t)murmur3_32((uint8_t*)arg0, arg1, (uint32_t)r9_3);
+        return (uint64_t)((uint64_t)(uint32_t)rax_4 ^ (uint64_t)r9_3);
     }
 }
 

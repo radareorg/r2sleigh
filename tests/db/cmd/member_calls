@@ -41,7 +41,7 @@ int64_t ops_size(struct ops* o, int32_t n)
         tmp_40137b_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
         tmp_40137e_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
         rax_2 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)tmp_40137e_8_1)(tmp_40137b_0_1, (uint64_t)(uint32_t)n);
-        return (int64_t)((uint64_t)(int32_t)((uint64_t)rax_2 >> 0U) + (uint64_t)1U);
+        return (int64_t)((uint64_t)(int32_t)rax_2 + (uint64_t)1U);
     }
 }
 
@@ -74,7 +74,7 @@ double ops_scale(struct ops* o, double x)
         tmp_4013db_8_1 = r2sleigh_load_u32((void*)((uint64_t)o + (uint64_t)18U * 4U));
         tmp_4013de_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)4U * 8U));
         xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(((double(*)(double, uint64_t))(uint64_t)tmp_4013de_8_1)(x, (uint64_t)(uint32_t)tmp_4013db_8_1));
-        tmp_lane_4013e1_1_0_1 = (uint64_t)((__uint128_t)xmm0_1 >> 0U);
+        tmp_lane_4013e1_1_0_1 = (uint64_t)xmm0_1;
         return (double)(r2sleigh_float_from_bits_64(tmp_lane_4013e1_1_0_1) + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U));
     }
 }
@@ -97,7 +97,7 @@ int32_t ops_log(struct ops* o, const char* s)
         tmp_401402_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)5U * 8U));
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x4013f0:35 covering 1 op (render::values): call to an indirect target: it is handed a vector count: variadic or unprototyped, its argument count unproven */
         r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x4013f0:42 covering 1 op (render::values) */
-        return (int32_t)((uint32_t)((uint64_t)r2sleigh_residual_u64(3) >> 0U) + (uint32_t)1U);
+        return (int32_t)((uint32_t)r2sleigh_residual_u64(3) + (uint32_t)1U);
     }
 }
 
@@ -185,7 +185,7 @@ int64_t ops_size(struct ops* o, int32_t n)
         tmp_4011a9_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
         tmp_4011b1_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
         rax_4 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)tmp_4011a9_8_1)(tmp_4011b1_0_1, (uint64_t)(uint32_t)n);
-        return (int64_t)((uint64_t)(int32_t)((uint64_t)rax_4 >> 0U) + (uint64_t)1U);
+        return (int64_t)((uint64_t)(int32_t)rax_4 + (uint64_t)1U);
     }
 }
 
@@ -229,7 +229,7 @@ int64_t ops_size(struct ops* o, int32_t n)
     {
         x2_2 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
         x0_2 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U)))(r2sleigh_load_u64((void*)(uint64_t)o), (uint64_t)(uint32_t)n);
-        return (int64_t)((uint64_t)(int32_t)((uint64_t)x0_2 >> 0U) + (uint64_t)1U);
+        return (int64_t)((uint64_t)(int32_t)x0_2 + (uint64_t)1U);
     }
 }
 
@@ -284,7 +284,7 @@ int64_t ops_size(struct ops* o, int32_t n)
     {
         x2_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
         x0_4 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U)))(r2sleigh_load_u64((void*)(uint64_t)o), (uint64_t)(uint32_t)n);
-        return (int64_t)((uint64_t)(int32_t)((uint64_t)x0_4 >> 0U) + (uint64_t)1U);
+        return (int64_t)((uint64_t)(int32_t)x0_4 + (uint64_t)1U);
     }
 }
 
