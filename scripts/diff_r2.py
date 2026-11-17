@@ -149,8 +149,9 @@ FENCE = "aoj-fence"
 
 HEX = re.compile(r"0x[0-9a-fA-F]+")
 NOISE = re.compile(r"^\s*(WARN|ERROR|INFO):")
-# radare2 annotates the listing from analysis the engine does not have yet.
-ANNOTATION = re.compile(r"^\s*;")
+# radare2 annotates the listing from analysis the engine does not have yet; a note row may follow
+# the rails and flow lanes either tool draws (doc/adr-display.md, D581).
+ANNOTATION = re.compile(r"^[\s│┌└├┐┘─<>|,`+]*;")
 # A trailing annotation on a disassembly line. Only applied to the listing,
 # where a semicolon never belongs to the instruction itself.
 TRAILING = re.compile(r"\s+;.*$")
