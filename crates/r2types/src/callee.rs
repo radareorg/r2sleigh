@@ -112,8 +112,8 @@ pub struct CalleeIdentityContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalleeIdentity {
     pub target_addr: Option<u64>,
-    pub raw_name: Option<String>,
-    pub display_name: Option<String>,
+    pub raw_name: Option<r2source::SymbolName>,
+    pub display_name: Option<r2source::SymbolName>,
     pub class: CalleeClass,
     pub is_recursive: bool,
     pub signature: Option<FunctionType>,
@@ -309,7 +309,7 @@ impl CalleeIdentity {
     /// A callee known only by its spelling: no class, no address and no evidence, since a name
     /// decides neither (D459); the spelling is kept as written, case and all.
     pub fn from_name(name: &str) -> Self {
-        let raw_name = name.trim().to_string();
+        let raw_name = r2source::SymbolName::new(name.trim());
         Self {
             target_addr: None,
             raw_name: Some(raw_name.clone()),
@@ -350,7 +350,7 @@ impl CalleeIdentity {
         };
 
         let mut identity = if name.is_empty() {
-            let display_name = r2source::unnamed_identifier(addr);
+            let display_name = r2source::SymbolName::new(r2source::unnamed_identifier(addr));
             CalleeIdentity {
                 target_addr: Some(addr),
                 raw_name: Some(display_name.clone()),
@@ -398,8 +398,9 @@ impl CalleeIdentity {
         self
     }
 
+    #[cfg(test)]
     pub fn raw_name(&self) -> &str {
-        self.raw_name.as_deref().unwrap_or("")
+        (self.raw_name.as_ref()).map_or("", r2source::SymbolName::text)
     }
 
     pub fn class(&self) -> CalleeClass {
@@ -566,7 +567,7 @@ mod tests {
         for name in names {
             let identity = CalleeIdentity::from_name(name);
             assert_eq!(identity.raw_name(), name);
-            assert_eq!(identity.display_name.as_deref(), Some(name));
+            assert_eq!(identity.display_name, Some(r2source::SymbolName::new(name)));
             assert_eq!(identity.class(), CalleeClass::Unknown, "{name}");
             assert_eq!(identity.target_addr, None, "{name}");
             assert!(identity.evidence.is_empty(), "{name}");
@@ -585,7 +586,10 @@ mod tests {
         let identity = CalleeIdentity::from_direct_target(0x401000, &ctx);
 
         assert_eq!(identity.target_addr, Some(0x401000));
-        assert_eq!(identity.display_name.as_deref(), Some("sym.imp.printf"));
+        assert_eq!(
+            identity.display_name,
+            Some(r2source::SymbolName::new("sym.imp.printf"))
+        );
         assert_eq!(identity.class(), CalleeClass::Imported);
         assert!(
             identity
@@ -633,7 +637,10 @@ mod tests {
 
         let identity = CalleeIdentity::from_direct_target(0x401028, &ctx);
 
-        assert_eq!(identity.display_name.as_deref(), Some("printf"));
+        assert_eq!(
+            identity.display_name,
+            Some(r2source::SymbolName::new("printf"))
+        );
         assert!(identity.is_import_policy_authorized());
         assert!(
             identity
@@ -1140,7 +1147,10 @@ mod tests {
         let identity = CalleeIdentity::from_direct_target(0x401050, &ctx);
 
         assert_eq!(identity.target_addr, Some(0x401050));
-        assert_eq!(identity.display_name.as_deref(), Some("fcn_401050"));
+        assert_eq!(
+            identity.display_name,
+            Some(r2source::SymbolName::new("fcn_401050"))
+        );
         assert!(
             identity
                 .evidence
@@ -1167,7 +1177,10 @@ mod tests {
         let by_site = facts
             .identity_for_callsite(callsite)
             .expect("callsite identity should be indexed");
-        assert_eq!(by_site.display_name.as_deref(), Some("sym.imp.printf"));
+        assert_eq!(
+            by_site.display_name,
+            Some(r2source::SymbolName::new("sym.imp.printf"))
+        );
         assert_eq!(by_site.non_variadic_known_arity(), Some(2));
         assert_eq!(by_site.class(), CalleeClass::Imported);
         assert!(by_site.is_import_policy_authorized());

@@ -23,6 +23,8 @@ pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
 };
 pub use negative::{Negative, NegativeFact};
+/// The name a container gives an address, a hint only (D460, D492).
+pub use r2abi::SymbolName;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
