@@ -89,9 +89,9 @@ ANALYSIS = [("afl", "entries"), ("afb", "blocks"), ("afi", "noreturn"), ("afv", 
 ANALYSED_CORPORA = ("elf",)
 ANALYSIS_TIMEOUT = 300
 GRADED_ARCHES = ("x86-64", "AArch64")
-# Frame facts no tool states an entry offset for: r2s's `fp-` and `realigned.sp-` bases, and a
-# radare2 bp var whose delta two bp offsets explain. Counted, not compared (ROADMAP D490's open part).
-UNPLACED = ("base", "unstated")
+# Frame facts with no stated entry offset: r2s's `fp-`, `realigned.sp-` and offsetless stack formals,
+# radare2's bp var two bp offsets explain. Counted, not compared (ROADMAP D490, D507).
+UNPLACED = ("base", "formal", "unstated")
 # Fences a session's answers: `<FENCE> <verb> <address>` before each.
 SESSION_FENCE = "diff-r2"
 
@@ -106,6 +106,18 @@ ARGUMENT_REGISTERS = {
     **{low: "r" + whole for whole, low in (("si", "sil"), ("di", "dil"), ("bp", "bpl"), ("sp", "spl"))},
     **{"r{}{}".format(n, s): "r{}".format(n) for n in range(8, 16) for s in "dwb"},
     **{"w{}".format(n): "x{}".format(n) for n in range(31)},
+    # Sleigh's low quadword and doubleword lanes of an SSE register (a double or float argument).
+    **{"xmm{}_{}".format(n, lane): "xmm{}".format(n) for n in range(16) for lane in ("qa", "da")},
+}
+
+# The bytes a C type r2s's `afv` spells occupies, where the spelling alone states it: the extent
+# `frame_witness` measures an offset radare2 lists inside an r2s object against.
+TYPE_BYTES = {
+    **{name: 1 for name in ("char", "bool", "_Bool", "int8_t", "uint8_t")},
+    **{name: 2 for name in ("short", "int16_t", "uint16_t")},
+    **{name: 4 for name in ("int", "float", "int32_t", "uint32_t", "__uint32_t", "unsigned int")},
+    **{name: 8 for name in ("long", "double", "size_t", "int64_t", "uint64_t", "__uint64_t", "long long")},
+    **{name: 16 for name in ("__int128_t", "__uint128_t")},
 }
 
 # Command, comparison mode. The seek is issued to both so the cursor agrees.
@@ -844,17 +856,20 @@ def our_frame(lines):
             found[("refused", " ".join(words))] = " ".join(words)
         elif words[:1] in (["arg"], ["var"]) and len(words) >= 3 and words[-2] == "@":
             found.setdefault(frame_key(words[-1]), " ".join(words))
+        elif words[:1] == ["arg"] and len(words) >= 3:
+            found.setdefault(("formal", words[-1]), " ".join(words))
     return found
 
 
-def their_frame(variables, frame, stackframe):
+def their_frame(variables, frame, stackframe, unstated=None):
     """radare2's `afv` as facts, each to its row, from `afvj`, `afvf` and `afi`'s stackframe.
 
     A var's delta is its offset from the stack pointer at entry (6.2.4 var.c:1389-1396). `afvj`
     prints an sp var's delta plus the stackframe (var.c:641-646) and a bp var's plus the bp's own
     offset, which nothing prints. `afvf` prints -delta for a var at or below 0 and delta - 0x6a
     for an argument or a var at or above 0 (cmd_anal.inc.c:2005-2033), so a bp var's delta is the
-    candidate that gives every bp var of the function one bp offset; with none or two it is unstated.
+    candidate that gives every bp var of the function one bp offset; with none or two it is unstated,
+    and `unstated`, where given, takes each such var's candidate offsets.
     """
     try:
         table = json.loads(variables) if variables else {}
@@ -887,13 +902,77 @@ def their_frame(variables, frame, stackframe):
     for var, deltas in candidates:
         each = {var["ref"]["offset"] - delta for delta in deltas}
         offsets = each if offsets is None else offsets & each
-    for var, _ in candidates:
+    for var, deltas in candidates:
         row = "{} {} {} @ {}{:+#x}".format(
             var["kind"], var["type"], var["name"], var["ref"]["base"], var["ref"]["offset"])
         key = ("offset", var["ref"]["offset"] - next(iter(offsets))) if offsets and len(offsets) == 1 else (
             "unstated", var["name"])
         found.setdefault(key, row)
+        if key[0] == "unstated" and unstated is not None:
+            unstated.update(deltas)
     return found
+
+
+def type_bytes(spelled):
+    """The bytes a C type spelling occupies, or None where the spelling does not state it."""
+    spelled = spelled.strip()
+    array = re.fullmatch(r"(.+)\[(\d+)\]", spelled)
+    if array:
+        element = type_bytes(array.group(1))
+        return element * int(array.group(2)) if element else None
+    if spelled.endswith("*"):
+        return 8
+    sized = re.fullmatch(r"(?:struct )?r2sleigh_(?:bits_|word_u|unread_u)(\d+)", spelled)
+    if sized:
+        return int(sized.group(1)) // 8
+    return TYPE_BYTES.get(spelled)
+
+
+def extents_of(rows):
+    """Each frame object's (start, end, name, type) where its spelled type states its bytes."""
+    found = []
+    for key, row in rows.items():
+        typed = re.fullmatch(r"(?:var|arg) (.+) (\S+) @ \S+", row)
+        if key[0] == "offset" and typed and type_bytes(typed.group(1)):
+            found.append((key[1], key[1] + type_bytes(typed.group(1)), typed.group(2), typed.group(1)))
+    return sorted(found)
+
+
+def frame_witness(facts, function, mine, their, unstated):
+    """What each side states where it lacks the other's frame fact, and the r2s offsets radare2 may hold.
+
+    A radare2 frame fact r2s lacks shows r2s's refusal, the r2s object whose extent (by its spelled
+    type) holds the offset, or, above the entry stack pointer, the stack formals r2s spells with no
+    offset. An r2s offset radare2 lacks shows the radare2 var whose extent holds it, or the radare2
+    vars inside the r2s object. An r2s offset an unstated radare2 bp var may hold is not compared."""
+    refused = next((row for key, row in mine.items() if key[0] == "refused"), None)
+    extents, theirs = extents_of(mine), extents_of(their)
+    unplaced = sum(1 for key in mine if key[0] == "formal")
+    for (place, key), (shown_ours, shown_theirs, side) in list(facts.items()):
+        if place != function or not isinstance(key, tuple):
+            continue
+        if side == "r2s" and key[0] == "offset" and key[1] in unstated:
+            facts[(place, key)] = (shown_ours, shown_theirs, "unplaced")
+        elif side == "r2s" and key[0] == "offset":
+            holder = next((e for e in theirs if e[0] < key[1] < e[1]), None)
+            own = next((e for e in extents if e[0] == key[1]), None)
+            held = [e[2] for e in theirs if own is not None and own[0] < e[0] < own[1]]
+            said = "<missing>"
+            if holder is not None:
+                said += " within={} {}".format(holder[2], holder[3])
+            elif held:
+                said += " holds={}".format(",".join(held))
+            facts[(place, key)] = (shown_ours, said, side)
+        elif side == "r2" and refused is not None:
+            facts[(place, key)] = ("<missing> " + refused, shown_theirs, side)
+        elif side == "r2" and key[0] == "offset":
+            holder = next((e for e in extents if e[0] < key[1] < e[1]), None)
+            said = "<missing>"
+            if holder is not None:
+                said += " inside={} {}".format(holder[2], holder[3])
+            elif key[1] >= 0:
+                said += " above formals={}".format(unplaced)
+            facts[(place, key)] = (said, shown_theirs, side)
 
 
 def stackframe_of(lines):
@@ -901,11 +980,15 @@ def stackframe_of(lines):
 
 
 def reference_rows(lines):
-    """`axt`'s rows, each referencing address to its row."""
+    """`axt`'s rows, each referencing address to its row. A demangled function name may hold
+    spaces, so the address is the first hex word followed by the `[KIND:perm]` word."""
     found = {}
     for words in map(str.split, lines):
-        if len(words) >= 3 and HEX.fullmatch(words[1]) and words[2].startswith("["):
-            found.setdefault(int(words[1], 16), " ".join(words))
+        at = next(
+            (i for i in range(1, len(words) - 1) if HEX.fullmatch(words[i]) and words[i + 1].startswith("[")), None
+        )
+        if at is not None:
+            found.setdefault(int(words[at], 16), " ".join(words))
     return found
 
 
@@ -976,8 +1059,11 @@ def analysis_facts(verb, ours, theirs):
         elif verb == "afv":
             stackframe = stackframe_of(theirs.get(("afi", function), []))
             variables = "".join(theirs.get(("afvj", function), []))
-            their = their_frame(variables, theirs.get(("afvf", function), []), stackframe)
-            add(function, our_frame(lines), their)
+            unstated = set()
+            their = their_frame(variables, theirs.get(("afvf", function), []), stackframe, unstated)
+            mine = our_frame(lines)
+            add(function, mine, their)
+            frame_witness(facts, function, mine, their, unstated)
         elif verb == "axt":
             add(function, reference_rows(lines), reference_rows(other))
             # A reference r2s states alone names the r2s function it lies in, and whether radare2 lists it.

@@ -6,6 +6,8 @@ Pure Python; no binary runs.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import pathlib
 import sys
@@ -470,6 +472,53 @@ class Analysis(unittest.TestCase):
         )
         covered = [diff_r2.judgment_for(table, "a", "afl", item) is not None for item in found]
         self.assertEqual(covered, [True, False])
+
+    def test_the_table_judges_a_frame_fact_by_its_witness_and_an_unjudged_fact_turns_the_gate_red(self):
+        # 0pack 0x5f8290: radare2's var at entry.sp-0x80 lies inside r2s's va_list save area.
+        _, table = diff_r2.load_table(pathlib.Path(__file__).resolve().parent / "diff_r2_judged.toml")
+        variables = {"reg": [], "bp": [], "sp": [
+            {"name": "var_38h", "kind": "var", "type": "int64_t", "ref": {"base": "rsp", "offset": 0x38}}]}
+        theirs = session(afl=afl((0x5F8290, "sym.construct")), afi_0x5f8290=["stackframe: 184"],
+                         afvj_0x5f8290=[json.dumps(variables)], afvf_0x5f8290=[])
+
+        def ours(*frame):
+            return session(arch=["x86-64"], afl=afl((0x5F8290, "sym.construct")), afv_0x5f8290=list(frame))
+
+        def unjudged(mine):
+            found, unjudged, _ = diff_r2.compare("0pack", "afv", "frame", mine, theirs, table, "elf")
+            return len(found), len(unjudged)
+
+        witnessed = ours("var struct r2sleigh_bits_704 stack_m136 @ entry.sp-0x88")
+        self.assertEqual(unjudged(witnessed), (2, 0))
+        # The same fact with no r2s object holding it is a class no entry judges.
+        bare = ours()
+        self.assertEqual(unjudged(bare), (1, 1))
+        args = type("Args", (), {"jobs": 1, "timeout": 1, "verbose": False})()
+        answered = {"witnessed": witnessed, "bare": bare}
+        real = diff_r2.answers
+        diff_r2.answers = lambda binary, *_: (None, {"aa": None, "afv": (answered[binary.stem], theirs)})
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                tally = {
+                    name: diff_r2.grade("elf", [pathlib.Path(name)], [("afv", "frame")], None, None, table, args)[0]
+                    for name in answered
+                }
+        finally:
+            diff_r2.answers = real
+        self.assertEqual((tally["witnessed"]["afv"]["unjudged"], tally["bare"]["afv"]["unjudged"]), (0, 1))
+
+    def test_frame_and_reference_rows_are_read_as_the_shared_definition(self):
+        # Sleigh's low lane of xmm0 is xmm0; a demangled caller's name holds spaces.
+        self.assertEqual(diff_r2.frame_key("xmm0_qa"), ("register", "xmm0"))
+        row = "method.QVariant.toString() const 0x2fb764 [CALL:--x] call sym.dtor"
+        self.assertEqual(list(diff_r2.reference_rows([row])), [0x2FB764])
+        # An r2s offset an unstated radare2 bp var may hold (-0x10 or 0x7a) is not compared.
+        variables = {"bp": [{"name": "var_8h", "kind": "var", "type": "int64_t", "ref": {"base": "rbp", "offset": -8}}]}
+        theirs = session(afvj_0x10=[json.dumps(variables)], afvf_0x10=["0x00000010  var_8h:    int64_t"])
+        mine = session(afv_0x10=["var struct Bar* f @ entry.sp-0x10", "var struct Foo* g @ entry.sp-0x20"])
+        sides = {key: side for (_, key), (_, _, side) in diff_r2.analysis_facts("afv", mine, theirs).items()}
+        self.assertEqual(sides[("offset", -16)], "unplaced")
+        self.assertEqual(sides[("offset", -32)], "r2s")
 
 
 
