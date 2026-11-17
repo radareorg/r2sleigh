@@ -535,7 +535,9 @@ commits): 0 of 451 goldens moved, so golden regressions stay 10. DecBench agains
 sites, loads 39,256 and stores 23,950, 0 refused. Against rebuild-design-10 (contabo `instructions:u`, median of 3): cold pumasim `pdd` -2.75%,
 cold 0pack -2.98%, bash `aa; pdd` -1.14%, pumasim `aa; pdd` -3.18% (D477's dense storage column); outputs identical but pumasim `aa; pdd`,
 whose four `png_error` calls state a cited `noreturn` (D406) and lose four `TransferNotFollowed` gaps. The D490 gate stays red on 539 `afv`,
-9 `axt` and 28 `afl` unjudged facts, the same set on the merged head as on its chain (radare2 6.2.4, Mac); no judgment was widened to cover them.
+9 `axt` and 10 `afl` unjudged facts on CI's Linux runner (28 `afl` on the Mac, where objdump cannot read ieee.elf's FDEs), the set its chain
+left; no judgment was widened to cover them. `census.py stats`: pumasim's table seals fall 1,385 to 1,384 (D406: one table lies past a
+now-noreturn `__longjmp_chk` call; `afl` byte-equal), blessed.
 
 ### Next rounds, from the rulings
 

@@ -1063,8 +1063,10 @@ class Session:
         except OSError:
             pass
         self.process.stdout.read()
-        # Exited and still a zombie (WNOWAIT): the deadline may signal it until the flag is set.
-        os.waitid(os.P_PID, self.process.pid, os.WEXITED | os.WNOWAIT)
+        # Exited, still a zombie (WNOWAIT): the deadline may signal it until the flag is set.
+        # macOS has waitid from Python 3.13; before it the deadline ends at stdout's close.
+        if hasattr(os, "waitid"):
+            os.waitid(os.P_PID, self.process.pid, os.WEXITED | os.WNOWAIT)
         with self.lock:
             self.reaped = True
         self.timer.cancel()
