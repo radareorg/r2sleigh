@@ -81,6 +81,10 @@ impl<'a> BuildFacts<'a> {
         self.context?.raw_call_site_at(instruction)
     }
 
+    pub fn raw_call_slot_at(&self, instruction: u64) -> Option<u64> {
+        self.context?.raw_call_slot_at(instruction)
+    }
+
     pub fn is_tail_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
         self.context
             .is_some_and(|context| context.is_tail_call_site(identity))

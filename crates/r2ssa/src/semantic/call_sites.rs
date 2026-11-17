@@ -61,6 +61,8 @@ pub(crate) fn collect_call_sites(
                     raw_identity,
                     target: target_id,
                     direct_target,
+                    target_slot: (flow.instruction)
+                        .and_then(|instruction| function.raw_call_slot_at(instruction)),
                     fallthrough: if transfer == CallSiteTransfer::TailCall {
                         None
                     } else if op_idx + 1 == insts.len() {

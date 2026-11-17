@@ -1528,3 +1528,21 @@ An indirect call may read every result byte, in a caller's site fates and inside
 - D521 stopped before an edit: the raw call-site record is `RawCallSite` (`machine_context.rs:1960-1967`), read by `semantic/call_sites.rs` only through `BuildFacts` (`semantic/build_facts.rs:80-82`), and neither file was listed.
 - D350 stopped at its land gate. A caller's extern taken from `SourceOwnedCalleeSignature::declaration` (one per callee address, no site result, no site `...`) leaves 172 of 6,104 DecBench pairs unlike the header and refuses 6 calls whose parent extern equaled it (find `fcn_12370`, `fcn_13aa0`), so the gate stops it. 85 of the pairs are a tag the header spells through `tags.defines` and the patch through `tags.admits` (both in `render/values.rs`); the parameter, arity and result pairs and the 6 refusals are not traced. `scripts/extern_agree.py` keys DecBench builds per set and counts refused calls.
 - D456 with D522 stopped on its file map: r2dec spells no record by value (`render/calls.rs:325-350`), so a call's record value has no C type for `quot` and `rem`.
+
+## D350 step 0, traced (2026-11-17, rd13-prototypes-3)
+
+`scripts/extern_agree.py` on DecBench at D525 (0fc75cfc4, an output-identical build): 451 of 6,320 pairs differ, 15 callees declared two ways, 30 `declaration-disagrees`; census 3 of 200. Each class, one witness:
+
+| Class | Pairs | Witness (caller to callee: extern, header) | Cause |
+|---|---|---|---|
+| No call contract | 249 | bzip2 O2-noinline `fcn_2500` to `fcn_44a0`: `uint64_t (r2sleigh_word_u64)`, `r2sleigh_result_u64 (const char*)` | no contract is minted, so r2dec spells the caller's written registers and the convention's word |
+| Tag | 105 | diff O2-noinline `fcn_c290` to `fcn_c0f0`: `struct fcn_c0f0_arg0*`, `void*` | the extern names the tag through the caller's `tags.admits`, the header through the callee's `tags.defines` |
+| Arity, with a contract | 43 | bzip2 O2-noinline `fcn_e4e0` to `fcn_e1a0`: 5 arguments, the last `double`, against `(void)` | the site lists the caller's arguments, the header the callee's proven floor |
+| Result and parameters, with a contract | 19 | bzip2 O2-noinline `fcn_ac50` to `fcn_f870`: `r2sleigh_result_u64 (r2sleigh_word_u64)`, `void (struct fcn_f870_arg0*)` | under `aa` the header reads the closed decision (`void`); the site contract keeps the open interface |
+| Result, with a contract | 18 | find O2-noinline `fcn_ead0` to `fcn_e960`: `r2sleigh_result_u64`, `r2sleigh_result_u32` | the extern spells the site carrier's 8 bytes, the header the result's observed 4 |
+| Parameter type, with a contract | 17 | find O2-noinline `fcn_16b30` to `fcn_16a30`: `r2sleigh_word_u64`, `int32_t` | the header spells the callee's analysed type (`parameter_declaration`); the site has none |
+
+The 6 calls round 12's patch refused (find O2-noinline `0x12588` and two more to `fcn_12370`; find O2 `0x13c89` and two more to `fcn_13aa0`) pass a wrong argument at base. The callee's sixth parameter is `double` at XMM0 (`afv`: `arg5 @ xmm0_qa`). Each site loads XMM0 with 86400.0 (`movsd xmm0, [0x311a8]`, `[0x2c620]`: 0x40f5180000000000), but its argument list places index 5 at R9, so the parent spells `(double)arg5` (the caller's R9, `afv` `arg5 @ r9`) or `(double)r2sleigh_residual_u64(5)`. Under the lane fit these sites misfit (R9 integer lane, XMM0 float home) and refuse, which the gate allows as listed refusals; its byte-identical clause would keep wrong C, so it reads "the 6 sites refuse as lane misfits until D546". D546 owns the placement and is independent of D350.
+
+Two facts for the build: `CalleeFacts::derive` (`crates/r2engine/src/lib.rs`) already runs the callee's own type analysis (`build_source_owned_type_analysis`), so `FunctionDeclaration` needs no new per-callee edge; and under `aa` a header reads the closed decision (bzip2 `fcn_f870` prints `void`), so the declaration is derived from the decided callee.
+
