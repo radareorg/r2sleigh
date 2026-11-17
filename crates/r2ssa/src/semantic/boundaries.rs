@@ -1670,6 +1670,14 @@ pub(crate) fn collect_source_boundary_facts(
                     (CallSiteTransfer::TailCall, _) | (_, SourceCallResult::Void) => {
                         Some(Vec::new())
                     }
+                    // A callee whose lanes hold no value leaves none at the carrier (D458).
+                    (_, SourceCallResult::Unstated { .. })
+                        if (interface.exact_callee_interface())
+                            .and_then(r2source::SourceFunctionInterface::result_carriers)
+                            .is_some_and(|carriers| carriers.hold_no_value()) =>
+                    {
+                        Some(Vec::new())
+                    }
                     // A group's value is its integer carrier, as the callee's header spells it (D201).
                     (
                         CallSiteTransfer::Call,

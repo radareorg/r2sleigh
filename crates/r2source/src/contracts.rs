@@ -1066,9 +1066,18 @@ pub struct SourceResultCarriers {
     /// The dense lane id of the lane the convention fills after the float one (XMM1, q1), where a
     /// return leaves a written byte there: a call reading both reads one group (result-side ADR).
     pub float_second: Option<u8>,
+    /// No return leaves in the float register a byte the body or a stated call result writes: each
+    /// is its entry value or what a call left, so the lane states no result (D458).
+    pub float_unwritten: bool,
 }
 
 impl SourceResultCarriers {
+    /// Whether no lane holds a value: the integer register defines nothing at a return and the
+    /// float one holds only its entry bytes or a call's leftovers (D458).
+    pub const fn hold_no_value(&self) -> bool {
+        self.integer_undefined && self.float_unwritten
+    }
+
     /// Whether `storage` is one of them: the integer register, or a lane at the float one's low end.
     pub fn holds(&self, storage: CanonicalStorageId) -> bool {
         storage == self.integer
@@ -3066,6 +3075,14 @@ impl SourceCallSiteInterface {
             (SourceFunctionReturn::Unproven, _, SourceCallResult::Unstated { carrier })
                 if callee.unstated_carrier() == Some(carrier) =>
             {
+                SourceCallResult::Unstated { carrier }
+            }
+            // No lane holds a byte the body writes: none, at the integer carrier (D458).
+            (
+                SourceFunctionReturn::Unproven,
+                Some(carriers),
+                SourceCallResult::Unstated { carrier },
+            ) if carriers.hold_no_value() && carriers.integer == carrier => {
                 SourceCallResult::Unstated { carrier }
             }
             // An unproven result is no claim, so no exact contract holds it.

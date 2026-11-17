@@ -1338,6 +1338,17 @@ fn result_register_written(
     (stated, unstated): (bool, bool),
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[float]);
+    written_at_returns(graph, facts, &live_out, (stated, unstated)).then_some((float, live_out))
+}
+
+/// Whether a value `live_out` holds at a return is a body's operation, an `Undecided` lane, a
+/// `stated` call's result or, with `unstated`, a call stating none, through any merge. O(V).
+fn written_at_returns(
+    graph: &SsaGraph,
+    facts: Option<&crate::semantic::PreparedFunctionFacts>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    (stated, unstated): (bool, bool),
+) -> bool {
     let mut seen = crate::dense::IdSet::default();
     let mut pending = live_out.iter().collect::<Vec<_>>();
     // Each value is taken once, so the walk ends after at most every value reaching a return.
@@ -1358,13 +1369,13 @@ fn result_register_written(
                     || matches!(by, Some(ReturnedByCall::Undecided(_)))
                     || (unstated && matches!(by, Some(ReturnedByCall::Unstated(_))))
                 {
-                    return Some((float, live_out));
+                    return true;
                 }
             }
-            crate::graph::InstPayload::Op(_) => return Some((float, live_out)),
+            crate::graph::InstPayload::Op(_) => return true,
         }
     }
-    None
+    false
 }
 
 /// Why a lane past the typed three, or the float lane's call bytes, hold a result: the supply walk
@@ -2000,6 +2011,7 @@ fn recover_interface_inner(
                 second: None,
                 integer_undefined: false,
                 float_second: None,
+                float_unwritten: false,
             });
         }
         // A body that writes both result registers on its way out hands back one of them: the
@@ -2032,6 +2044,7 @@ fn recover_interface_inner(
                         second: None,
                         integer_undefined: false,
                         float_second: None,
+                        float_unwritten: false,
                     });
                     result = RecoveredFunctionResult::Unproven;
                     result_causes.insert(SourceResultCause::Ambiguous);
@@ -2075,6 +2088,7 @@ fn recover_interface_inner(
                         second: None,
                         integer_undefined: true,
                         float_second: None,
+                        float_unwritten: false,
                     });
                 }
                 // An argument handed back beside a written float: the callers' reads choose.
@@ -2085,6 +2099,7 @@ fn recover_interface_inner(
                         second: None,
                         integer_undefined: false,
                         float_second: None,
+                        float_unwritten: false,
                     });
                 }
                 None => {}
@@ -2115,6 +2130,7 @@ fn recover_interface_inner(
                     second: Some(high),
                     integer_undefined: false,
                     float_second: None,
+                    float_unwritten: false,
                 });
                 candidate_live_out = both();
             }
@@ -2154,12 +2170,15 @@ fn recover_interface_inner(
         {
             result = RecoveredFunctionResult::Unproven;
             result_causes.insert(SourceResultCause::HandedBack);
+            // The witness: no direct return's float byte is the body's or a call's result (D458).
+            let unwritten = !written_at_returns(graph, Some(&facts), &float_live_out, (true, true));
             result_carriers = (slots.result()).map(|integer| r2source::SourceResultCarriers {
                 integer,
                 float: Some(float),
                 second: None,
                 integer_undefined: true,
                 float_second: None,
+                float_unwritten: unwritten,
             });
         }
     }
@@ -2182,6 +2201,7 @@ fn recover_interface_inner(
                 second,
                 integer_undefined: false,
                 float_second: None,
+                float_unwritten: false,
             });
         }
     }
@@ -3991,7 +4011,9 @@ pub(crate) fn call_lanes(
                 .flatten()
                 .any(|held| overlaps(held, lane))
     };
-    let float = carriers.float.filter(|float| !passed(*float));
+    // A float lane holding only entry bytes and calls' leftovers is no result lane (D458).
+    let float = (carriers.float).filter(|float| !passed(*float) && !carriers.float_unwritten);
+    let unstated = carriers.hold_no_value() && carriers.float.is_some_and(|float| !passed(float));
     if integer.is_some() && carriers.second.is_some_and(|second| !passed(second)) {
         return None;
     }
@@ -4011,6 +4033,10 @@ pub(crate) fn call_lanes(
         }
         // An input handed back as found is the caller's own bytes in that register, as stated.
         (None, None) if !carriers.integer_undefined => SourceCallResult::register(carriers.integer),
+        // No lane holds a value the callee states: the call keeps its contract and states none.
+        (None, None) if unstated => SourceCallResult::Unstated {
+            carrier: carriers.integer,
+        },
         (None, None) => return None,
     };
     Some(CallLanes {
@@ -4279,6 +4305,7 @@ mod tests {
             second: None,
             integer_undefined: true,
             float_second: None,
+            float_unwritten: false,
         };
         let callee = lane_interface(handed_back);
         let every = BTreeSet::from([x0, x1, q0]);
@@ -4304,6 +4331,35 @@ mod tests {
             }
         );
         assert_eq!(lanes.unproven, vec![x1]);
+    }
+
+    /// D458: a float lane whose every return byte is its entry value or a call's leftover states no
+    /// result. With the integer lane undefined the call states none at the integer carrier; defined,
+    /// the integer register is the result and the float lane is unproven; a passed lane passes.
+    #[test]
+    fn an_unwritten_float_lane_states_no_result_at_a_call() {
+        let (x0, x1, q0) = (register(0, 8), register(8, 8), register(0x5000, 16));
+        let unwritten = r2source::SourceResultCarriers {
+            integer: x0,
+            float: Some(q0),
+            second: None,
+            integer_undefined: true,
+            float_second: None,
+            float_unwritten: true,
+        };
+        let results = [x0, x1, q0];
+        let lanes = call_lanes(&lane_interface(unwritten), None, &results).expect("lanes");
+        assert_eq!(lanes.result, SourceCallResult::Unstated { carrier: x0 });
+        let defined = r2source::SourceResultCarriers {
+            integer_undefined: false,
+            ..unwritten
+        };
+        let lanes = call_lanes(&lane_interface(defined), None, &results).expect("lanes");
+        assert_eq!(lanes.result, SourceCallResult::register(x0));
+        assert_eq!(lanes.unproven, vec![x1, q0]);
+        let every = BTreeSet::from([x0, x1, q0]);
+        let lanes = call_lanes(&lane_interface(unwritten), Some(&every), &results);
+        assert_eq!(lanes.expect("lanes").result, SourceCallResult::Void);
     }
 
     fn call_boundary_with(
