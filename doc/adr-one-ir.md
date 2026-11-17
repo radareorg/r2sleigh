@@ -73,7 +73,7 @@ for two answers to disagree.
 ## Left
 
 - F2.1: a `FunctionIndex` on `Sealed` holding RPO, dominators, loops and def-use, and the test-only graph builds replaced by it. Exit: no `SsaGraph` built outside the seal.
-- F2.2: byte-granular liveness over locations (a lane write every reader sees whole defines the register), `ValueLiveness::compute_with_relocations` and r2dec's relocated liveness folded into the one model, #47 and #50. Exit: one liveness model, those issues closed.
+- F2.2: byte-granular liveness over locations (a lane write every reader sees whole defines the register), `ValueLiveness::compute_with_relocations` and r2dec's relocated liveness folded into the one model, #47 and #50. Exit: one liveness model, those issues closed. F2.2b is built (below); F2.2a and one value liveness per seal are open with their facts.
 - F2.3 transitional readers, left over from stages 4 and 5: `SSAFunction::named`, `named_block`, `named_blocks`, `named_ops` and `SsaGraph::named_op` serve readers still keyed by name; r2types' local struct and stack-slot analyses read named blocks and ask the frame through `FrameRoots` (P9 owns their move); r2dec's prepared semantics asks through `value_of` and `canonical_root_var` until the printer reads values. Exit: those accessors deleted.
 - F2.4: the builder with an incremental def-use. The seal still builds the graph twice when the demand pass releases a base (`function/stage.rs`), and the optimiser rebuilds its definition maps once per pass, O(n), until a pass measurably needs better. Measured (2026-10-05): the second build happens in 179 of 1261 census seals and costs at most 10 ms of a 2.7 s `pdd` on the largest pumasim function (92k instructions); interface recovery's duplicate build is gone. Exit: one graph build per function, when a measurement needs it.
 - F2.5: machine projection and term arena as indexes. Exit: no per-round rebuild.
@@ -348,17 +348,21 @@ calls walking 39; pumasim 0x3b6b20 (47 blocks) 9 calls walking 24.
 
 What the measurement changes in the F2.2 plan:
 
-- The live-out walks cost at most 0.13% of a command. They visit a few blocks
-  next to each return (3 of 337 on 0pack's function), so any index swept over
-  every operation of every graph costs more than the walks it replaces.
+- The live-out walks cost at most 0.13% of a command (1 of 763 samples on
+  0pack; self 0.09% on pumasim). They visit a few blocks next to each return
+  (3 of 337 on 0pack's function), so any index swept over every operation of
+  every graph costs more than the walks it replaces.
 - `ValueLiveness` is built twice per seal, over two graphs. The first build is
   the recovery collection (`PreparedFunctionFacts::collect_for_recovery`, site
   `recover`, `Certified::ReturnControls`) over the provisional graph, before
   the seal applies boundary constants and forwards copies. The second is the
   artifact's (`semantic/mod.rs:364`) over the sealed graph.
   `function/mod.rs:1569` is `#[cfg(test)] recomputed_liveness`, no production
-  build. The recovery build's spans feed its loop facts, which feed the
-  obligations `recover_interface.rs` reads (`obligations.is_complete`).
+  build. The recovery build's spans feed its loop facts (`semantic/mod.rs:385`);
+  `obligation.rs:1220` seeds `LoopCarriedState` from their carriers;
+  `DeadPhis::find_from` reads the obligations (`semantic/mod.rs:425`) and the
+  return-control certificates read `DeadPhis` (`:455`); `recover_interface.rs`
+  reads `facts.obligations` and `facts.certificates.machine_return_controls`.
 - `release_undemanded_bytes` (`function/mod.rs:1069`) asks the live-out of the
   graph before the demand release; `semantic/mod.rs:306` asks it of the graph
   after. The two are the same graph only where nothing is released, and no
@@ -386,3 +390,51 @@ Readers at 718a898b2:
   `phi_is_unread`) at `semantic/mod.rs:371`; the test-only
   `recomputed_liveness`. The value liveness and spans are dropped after the
   collection (doc/adr-memory-model.md, decision 1).
+
+## F2.2a and F2.2b as built (2026-11-17)
+
+F2.2b, one value liveness with bytes. `ValueLiveness` holds the demanded
+bytes of each value as a column (`ValueLiveness::bytes`), built by
+`DemandedBytes::of_returning` before the liveness walk at `semantic/mod.rs:370`
+and handed to the facts after the spans (`into_bytes`); the second
+`demanded()` call at the end of the collection is deleted. A value no reader
+needs a byte of holds no range. The witness is the closure itself: it starts
+at every operation with an effect (`demand::has_effect` is an exhaustive
+match), every value a return hands back and every tail read, and only reads
+the certified boundaries drop are left out. Where an exit hands registers to
+code outside the graph (`exits_are_named`) no demand is stated and every byte
+counts as needed. `DemandedBytes` is a dense `Vec<u64>` per value, where it was
+an `IdMap<ValueId, ByteMask>`: held across the liveness walk, the map cost
+15.7 MB of peak on pumasim 0x23fdf0 (+6.2%), the column costs nothing above
+the peak. `ValueLiveness::interfering_lanes(graph, a, b)` answers D470: no
+bytes where the ranges do not overlap or the two hold one content, the bytes
+both have read where they are slices of one location, every byte where they
+are two locations live at once; `O(segments of the two)`, no reader yet.
+`release_undemanded_bytes` keeps its standalone `DemandedBytes::of` over the
+graph before the release, where no value liveness exists.
+
+Measured (Mac, release, median of 3, against 718a898b2): pumasim 0x23fdf0
+-0.257%, 0pack 0x62ecf0 -0.252%, bash `aa; pdd @ 0x2e630` -0.043%, pumasim
+`aa; pdd @ 0x3b6b20` -0.098%; peak RSS -1.60%, -0.16%, -0.49%, -0.04%.
+`pdd` is byte-identical on the 451 goldens and the 2,621 DecBench functions.
+
+Open, with the fact that stopped each:
+
+- One value liveness per seal. The two builds are over two graphs: the
+  recovery collection's provisional graph and the sealed one. The recovery
+  facts read the loop facts its liveness feeds (step 0, above), so dropping
+  that build changes what `recover_interface.rs` reads; the next step is a
+  proof that `LoopCarriedState` seeds cannot move `obligations.unmodelled`,
+  `is_complete` or the return-control certificates, or recovery reading no
+  loop fact.
+- F2.2a, the exit reach read from an index. Built twice: an `ExitWrites` index
+  of each block's writes, calls and merges, filled while the graph is built
+  (`O(1)` per operation), with `FunctionLiveOut::compute` reading it by a block
+  walk that scans no operation. On the first build 64,176 old-against-new
+  comparisons on DecBench and the 4 timed commands were equal; the fused
+  build kept `pdd` byte-identical on the goldens and DecBench. It costs
+  more than the walks: Mac medians over four builds read pumasim `aa; pdd @
+  0x3b6b20` +0.12% to +0.16% and 0pack +0.06% to +0.13% (gate +0.10%). The
+  index is paid on every graph build; the walks it replaces visit 51 to 1,829
+  blocks a command. The graph build moved 1.70% to 1.76% of samples; the rest
+  is unattributed. The patch is kept outside the tree; no cache was added.

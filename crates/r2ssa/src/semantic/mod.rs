@@ -361,14 +361,22 @@ impl PreparedFunctionFacts {
             &memory_accesses,
             &memory,
         ));
+        let body = Body {
+            function,
+            prep,
+            graph,
+            machine_context,
+        };
+        let demanded = demanded(body, (&call_sites, &boundaries), &live_out, &ignored_reads);
         let live_values = crate::liveness::ValueLiveness::compute_with_relocations(
             graph,
             &live_out,
             &crate::dense::IdMap::default(),
             content,
-            &ignored_reads,
+            (&ignored_reads, demanded),
         );
         let storage_spans = StorageSpans::compute(graph, &live_values);
+        let demanded = live_values.into_bytes();
         phase!("liveness", 0);
         let (loops, inductions) = collect_structured_loop_facts(
             Body {
@@ -477,7 +485,6 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase!("assumptions", 0);
-        let demanded = demanded(body, (&call_sites, &boundaries), &live_out, &ignored_reads);
         let facts = Self {
             addresses,
             values,
