@@ -78,7 +78,8 @@ Architecture specification
 `instruction_endianness`, `memory_endianness`, `addr_size`, `alignment`,
 `spaces`, `registers`, `register_projections`, `return_registers`,
 `program_counter`, `user_ops` (names indexed by a `CallOther`'s id),
-`supervisor_calls` and `tracked_entry_values`.
+`supervisor_calls`, `system_calls` (the system-call instructions among them) and
+`tracked_entry_values`.
 
 - `register_projections` is the name-free register geometry table. Empty
   means the geometry is unavailable; otherwise it is strictly sorted, covers

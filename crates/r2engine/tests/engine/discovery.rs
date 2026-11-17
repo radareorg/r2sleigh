@@ -829,6 +829,24 @@ fn a_supervisor_call_whose_proven_number_never_returns_ends_the_body_and_its_cal
     );
 }
 
+/// AArch64 `mov x8, #93` (Linux `exit`), then `svc #0` or `hvc #0`, then `b .`.
+fn exits_through(enters: u32) -> &'static [u8] {
+    let words = [0xd280_0ba8u32, enters, 0x1400_0000];
+    Box::leak(words.iter().flat_map(|word| word.to_le_bytes()).collect())
+}
+
+/// Only a system-call instruction reads the kernel's number register: `svc` with `exit`'s number
+/// ends the body there, `hvc` enters a hypervisor no syscall table states, so its loop stays.
+#[test]
+fn only_a_system_call_instruction_is_read_against_the_syscall_table() {
+    for (enters, end) in [(0xd400_0001, BASE + 8), (0xd400_0002, BASE + 0xc)] {
+        let literal = Literal::of_code(exits_through(enters), &[("quit", BASE, 12)]).in_aarch64();
+        let mut program = OpenProgram::of(literal);
+        believed(&mut program);
+        assert_eq!(extent(&mut program, BASE), (end, true), "{enters:#x}");
+    }
+}
+
 /// `quit` as in [`EXITS_GROUP`], then `other: mov r8d, 39; jmp L`: a second body reaching quit's
 /// `syscall` with `getpid`'s number.
 const SHARES_THE_SYSCALL: &[u8] = &[

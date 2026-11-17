@@ -3420,7 +3420,7 @@ pub(crate) fn supervisor_halts(
         "{entry:#x}: sealed for its supervisor calls"
     );
     let graph = seal.graph();
-    let enters = |op: &r2ssa::SSAOp<_>| matches!(op, r2ssa::SSAOp::CallOther { userop, .. } if spec.supervisor_calls.contains(userop));
+    let enters = |op: &r2ssa::SSAOp<_>| matches!(op, r2ssa::SSAOp::CallOther { userop, .. } if spec.system_calls.contains(userop));
     let mut halts = BTreeMap::new();
     for block in &graph.blocks {
         for &inst in graph.op_insts(block.id) {

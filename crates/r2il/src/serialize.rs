@@ -535,6 +535,11 @@ pub struct ArchSpec {
     #[serde(default)]
     pub supervisor_calls: Vec<u32>,
 
+    /// The supervisor calls that are the platform's system-call instruction, the only ones whose
+    /// number register a syscall table reads (`hvc` and `smc` enter no operating system).
+    #[serde(default)]
+    pub system_calls: Vec<u32>,
+
     /// What the processor specification's `<tracked_set>` says registers hold on entry to every function.
     #[serde(default)]
     pub tracked_entry_values: Vec<TrackedRegisterValue>,
@@ -564,6 +569,7 @@ impl ArchSpec {
             program_counter: None,
             user_ops: Vec::new(),
             supervisor_calls: Vec::new(),
+            system_calls: Vec::new(),
             tracked_entry_values: Vec::new(),
         }
     }
