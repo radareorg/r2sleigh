@@ -18,3 +18,13 @@ fn the_table_declares_which_functions_never_return() {
     // ISO C17 7.24.2.1 states its prototype: a call reads its three fixed parameters only.
     assert_eq!(memcpy.tail, Tail::None);
 }
+
+/// `freopen` spells `FILE *` twice: both spellings are one node of the library graph (D487), so
+/// a name the engine binds to it names one structure.
+#[test]
+fn two_spellings_of_one_library_type_are_one_node() {
+    let rows = LibraryRows::embedded(CLibrary::Glibc);
+    let freopen = (rows.find(CLibrary::Glibc.scope(), "freopen")).expect("freopen is declared");
+    let prototype = rows.prototype(freopen);
+    assert_eq!(prototype.parameters[2].ty, prototype.return_type);
+}

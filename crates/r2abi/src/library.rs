@@ -359,6 +359,7 @@ impl LibraryRows {
         for embedded in shared.iter().chain(own) {
             rows.read_text(embedded, embedded.text);
         }
+        rows.quotient();
         rows
     }
 
@@ -384,6 +385,14 @@ impl LibraryRows {
                 rows.insert(name.into(), row);
             }
         }
+        self.quotient();
+    }
+
+    /// Two spellings of one type are one node (D487, D491's relation, C17 6.2.7p1): the graph's
+    /// quotient, every prototype retyped through it. O((N + E) log N) over the graph's N nodes.
+    fn quotient(&mut self) {
+        let classes = self.graph.quotient();
+        (self.prototypes.iter_mut()).for_each(|prototype| prototype.retype(&classes));
     }
 
     /// The parameters only: a mangled name states no result, so the return type is refused.

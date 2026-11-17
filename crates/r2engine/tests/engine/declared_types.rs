@@ -418,3 +418,59 @@ fn main_keeps_its_declared_signature() {
     assert!(text.contains("(char* argc, char** argv)"), "{text}");
     assert!(!text.contains("envp"), "{text}");
 }
+
+/// `T` as `int` and as `char *` in one interface: a name bound to two structures names neither, so
+/// each parameter renders its own structure in either order (D487).
+#[test]
+fn a_name_bound_to_two_structures_names_neither() {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let header = |swapped: bool| {
+        let mut graph = TypeGraph::new();
+        let int = graph.add(Type::Scalar(Scalar {
+            kind: ScalarKind::Signed,
+            width: Width::Bits(32),
+            name: Some("int".to_owned()),
+        }));
+        let char = graph.add(Type::Scalar(Scalar {
+            kind: ScalarKind::Signed,
+            width: Width::Bits(8),
+            name: Some("char".to_owned()),
+        }));
+        let char_pointer = graph.add(Type::Pointer { target: char });
+        let int_t = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: int,
+        });
+        let pointer_t = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: char_pointer,
+        });
+        let mut parameters = vec![
+            Parameter::new(int_t, "T", Some("count")),
+            Parameter::new(pointer_t, "T", Some("text")),
+        ];
+        if swapped {
+            parameters.reverse();
+        }
+        let prototype = Prototype {
+            name: "pair".to_owned(),
+            parameters,
+            returns: "int".into(),
+            return_type: int,
+            ..Prototype::default()
+        };
+        let mut declarations = r2abi::Declarations::new(graph);
+        declarations.declare_function(common::BASE, prototype);
+        let functions = [("pair", common::BASE, MAIN_RETURNING_ZERO.len() as u64)];
+        let literal =
+            Literal::of_code(MAIN_RETURNING_ZERO, &functions).with_declarations(declarations);
+        let text = rendered(literal, common::BASE);
+        let header = text.lines().next().expect("a header").to_owned();
+        (header, text)
+    };
+    let (declared, text) = header(false);
+    assert!(declared.contains("(int32_t count, char* text)"), "{text}");
+    assert!(!declared.contains("T "), "{text}");
+    let (swapped, text) = header(true);
+    assert!(swapped.contains("(char* text, int32_t count)"), "{text}");
+}

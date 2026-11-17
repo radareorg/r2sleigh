@@ -32,14 +32,14 @@ pub(crate) struct Interned<'a> {
     /// Which declared record each aggregate name stands for: a consumer finds
     /// a layout by its name, so one name has one layout.
     names: BTreeMap<String, TypeId>,
-    /// The node each typedef or scalar name stands at: the first binding of a name wins.
-    named: BTreeMap<String, u32>,
+    /// The node each typedef or scalar name stands at, and the structure it names.
+    named: BTreeMap<String, (u32, u32)>,
+    /// Names bound to two structures: each names neither, so `finish` drops its alias (D487).
+    contested: BTreeSet<String>,
     /// Nodes carrying an alias, so a record keeps its first name.
     aliased: BTreeSet<u32>,
     /// A named copy of a pointer still being placed, resynced at `finish`.
     copies: Vec<(u32, u32)>,
-    /// The structure each named copy stands for, so a signature can tell a merged name (S32).
-    copy_of: BTreeMap<u32, u32>,
     /// Every record's node, which a name binds to even while its layout is placed.
     records: BTreeSet<u32>,
 }
@@ -55,9 +55,9 @@ impl<'a> Interned<'a> {
             tags: BTreeMap::new(),
             names: BTreeMap::new(),
             named: BTreeMap::new(),
+            contested: BTreeSet::new(),
             aliased: BTreeSet::new(),
             copies: Vec::new(),
-            copy_of: BTreeMap::new(),
             records: BTreeSet::new(),
         }
     }
@@ -108,6 +108,8 @@ impl<'a> Interned<'a> {
             );
             self.set(copy, kind, size, align);
         }
+        let contested = &self.contested;
+        (self.parts.aliases).retain(|alias| !contested.contains(alias.name()));
         SourceTypeGraph::from_parts(self.parts)
             .inspect_err(|error| {
                 r2il::refusal_evidence!("declared-types", "the interned graph refused: {error:?}");
@@ -158,11 +160,17 @@ impl<'a> Interned<'a> {
         None
     }
 
-    /// The node `name` stands at over `structure`. A record carries the name
-    /// itself; any other node is copied, so its structure stays unnamed.
+    /// The node `name` stands at over `structure`: a record carries the name, any other node a
+    /// copy. A name already bound to another structure names neither (D487).
     fn named(&mut self, name: String, structure: u32) -> u32 {
-        if let Some(found) = self.named.get(&name) {
-            return *found;
+        if let Some(&(node, bound)) = self.named.get(&name) {
+            if bound != structure && self.contested.insert(name.clone()) {
+                r2il::refusal_evidence!(
+                    "declared-types",
+                    "the name {name} is bound to structures {bound} and {structure}, so it names neither"
+                );
+            }
+            return if bound == structure { node } else { structure };
         }
         let source = &self.parts.types[structure as usize];
         let (kind, size, align) = (source.kind(), source.size_bits(), source.align_bits());
@@ -189,7 +197,6 @@ impl<'a> Interned<'a> {
             _ => {
                 let copy = self.push(kind, size, align);
                 self.copies.push((copy, structure));
-                self.copy_of.insert(copy, structure);
                 self.aliased.insert(copy);
                 copy
             }
@@ -197,7 +204,7 @@ impl<'a> Interned<'a> {
         self.parts
             .aliases
             .push(SourceTypeAlias::new(name.clone(), id));
-        self.named.insert(name, id);
+        self.named.insert(name, (id, structure));
         id
     }
 
@@ -368,21 +375,6 @@ impl<'a> Interned<'a> {
         self.push(SourceTypeKind::Opaque { tag_id: row }, 0, 0)
     }
 
-    /// The sized node `ty` is declared by, where it stands for `ty`'s own structure: a name bound
-    /// first to another structure (two scoped typedefs of one spelling) would misstate its class.
-    fn faithful(&mut self, ty: TypeId) -> Option<u32> {
-        let node = self.object(ty)?;
-        let structure = self.structure(ty)?;
-        let own = node == structure || self.copy_of.get(&node) == Some(&structure);
-        if !own {
-            r2il::refusal_evidence!(
-                "declared-types",
-                "a signature's {ty:?} is named by node {node}, another structure's than {structure}"
-            );
-        }
-        own.then_some(node)
-    }
-
     /// Code whose every stated part has a place. Anything less is code this
     /// graph cannot describe, and a pointer to it points at `void`.
     fn code(&mut self, signature: &Signature) -> Option<u32> {
@@ -397,12 +389,12 @@ impl<'a> Interned<'a> {
         }
         let returns = match self.graph.peel(signature.returns).0 {
             TypeId::VOID => self.leaf(SourceTypeKind::Void, 0, 0),
-            returns => self.faithful(returns)?,
+            returns => self.object(returns)?,
         };
         let parameters = signature
             .parameters
             .iter()
-            .map(|parameter| self.faithful(*parameter))
+            .map(|parameter| self.object(*parameter))
             .collect::<Option<Vec<_>>>()?;
         let row = self.parts.signatures.len() as u32;
         self.parts.signatures.push(SourceCodeSignature::new(
@@ -803,10 +795,10 @@ mod tests {
         );
     }
 
-    /// `struct A { using T = int; }; using T = double;`: two typedefs spelled `T` share one
-    /// presentation node, and each still travels in its own structure's class.
+    /// `struct A { using T = int; }; using T = double;`: a name bound to two structures names
+    /// neither (D487), and each travels in its own structure's class.
     #[test]
-    fn two_typedefs_of_one_spelling_keep_their_own_class() {
+    fn two_typedefs_of_one_spelling_name_neither() {
         use r2ssa::place::ParamClass;
         let mut graph = TypeGraph::new();
         let integer = int(&mut graph);
@@ -824,19 +816,26 @@ mod tests {
             target: double,
         });
         let mut interned = Interned::new(&graph, CDataModel::unix(64));
+        let (first, second) = (interned.node(scoped), interned.node(outer));
+        assert_ne!(first, second, "the second `T` is not the first's node");
         assert_eq!(
-            interned.node(scoped),
-            interned.node(outer),
-            "one spelling, one node"
+            second,
+            interned.structure(outer),
+            "the second is its structure"
         );
         assert_eq!(interned.class(scoped), ParamClass::Integer(4));
         assert_eq!(interned.class(outer), ParamClass::Float(8));
+        let placed = interned.finish().expect("the graph states");
+        assert!(
+            placed.aliases().iter().all(|alias| alias.name() != "T"),
+            "{placed:?}"
+        );
     }
 
-    /// A signature naming the second of two typedefs spelled `T` is code the graph cannot state:
-    /// its node would carry the first `T`'s class, so a pointer to it points at `void` (S32).
+    /// A signature naming the second of two typedefs spelled `T` is code over its own structure: the
+    /// contested name names neither `T` (D487), so the first `T`'s class never reaches it.
     #[test]
-    fn a_signature_through_a_merged_typedef_name_is_not_code() {
+    fn a_signature_through_a_contested_typedef_name_is_code() {
         let mut graph = TypeGraph::new();
         let integer = int(&mut graph);
         let double = graph.add(Type::Scalar(Scalar {
@@ -874,10 +873,11 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         };
-        assert!(matches!(
-            target(&mut interned, through_scoped),
-            SourceTypeKind::Code { .. }
-        ));
-        assert_eq!(target(&mut interned, through_outer), SourceTypeKind::Void);
+        for pointer in [through_scoped, through_outer] {
+            assert!(matches!(
+                target(&mut interned, pointer),
+                SourceTypeKind::Code { .. }
+            ));
+        }
     }
 }
