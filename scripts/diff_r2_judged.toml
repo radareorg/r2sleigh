@@ -34,6 +34,16 @@
 #           r2-right: r2s's defect, with its owner in the reason
 #           unfilled: r2s does not yet state what radare2 does
 #           deliberate: r2s spells it otherwise on purpose
+#
+# A `[[missed]]` entry judges values radare2 reports and r2s does not (`afl`,
+# `axt`, the listings' radare2-only values); they leave the ratchet (D541).
+# command   the verb, or a list of them
+# binaries  file names, each listed, never a pattern
+# values    each value listed (hex, or a posture key), never a pattern; one
+#           listed that the graded run did not report fails the run
+# verdict   r2s-right (with r2_line, radare2's file:line at the pinned
+#           release), r2-right or unfilled (with row, an open ROADMAP row)
+# reason    the witness for each value
 
 # The radare2 release every judgment was made against, as an x86-64 host runs
 # it (a fat file's slice follows the host); CI installs it, and the harness
