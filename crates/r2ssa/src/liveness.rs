@@ -402,10 +402,9 @@ impl ValueLiveness {
     /// the reader is, and the operands it reads are needed until then.
     /// `relocations` maps each folded definition to its one reader, and a
     /// chain of folds resolves to the last reader.
-    /// `ignored_reads` are use sites the text never performs -- a call's
-    /// conventional read of a register the certified call does not pass --
-    /// and they hold nothing live. A value of which `bytes` states no byte is needed holds no
-    /// range (doc/adr-one-ir.md, F2.2b).
+    /// `ignored_reads` are use sites the text never performs (a call's conventional read of a
+    /// register the certified call does not pass) and hold nothing live, as does a value of
+    /// which `bytes` states no byte is needed (doc/adr-one-ir.md, F2.2b).
     pub fn compute_with_relocations(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
@@ -445,12 +444,7 @@ impl ValueLiveness {
 
         for value in &graph.values {
             offsets.push(segments.len() as u32);
-            if (bytes.as_ref()).is_some_and(|bytes| bytes.bytes(value.id) == 0) {
-                continue;
-            }
-            // A literal is written into its reader and occupies no storage, except where a merge
-            // reads it: storage spans join a merge with its sources by these ranges (span.rs).
-            if value.var.constant_bits().is_some() && !read_by_a_merge(graph, value.id) {
+            if holds_no_range(graph, bytes.as_ref(), value) {
                 continue;
             }
             let stamp = value.id.0 + 1;
@@ -929,6 +923,17 @@ fn first_overlap(
         }
         open_same.push((segment, value));
     }
+}
+
+/// A value no reader needs a byte of holds no range (F2.2b). A literal is written into its reader
+/// and occupies no storage, except where a merge reads it: spans join a merge with its sources.
+fn holds_no_range(
+    graph: &crate::graph::SsaGraph,
+    bytes: Option<&crate::demand::DemandedBytes>,
+    value: &crate::graph::GraphValue,
+) -> bool {
+    bytes.is_some_and(|bytes| bytes.bytes(value.id) == 0)
+        || (value.var.constant_bits().is_some() && !read_by_a_merge(graph, value.id))
 }
 
 /// Whether a phi reads `value`.

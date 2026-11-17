@@ -3758,10 +3758,9 @@ impl SSAFunction {
         }
         let substitute = |id: &VarId| substitutes.get(*id).copied().unwrap_or(*id);
         for block in self.blocks.edit().iter_mut() {
-            for phi in block.phis_mut() {
-                for (_, source) in &mut phi.sources {
-                    *source = substitute(source);
-                }
+            let sources = (block.phis_mut().iter_mut()).flat_map(|phi| phi.sources.iter_mut());
+            for (_, source) in sources {
+                *source = substitute(source);
             }
             for op in block.ops_mut() {
                 *op = op.map_sources(substitute);

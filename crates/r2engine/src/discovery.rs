@@ -722,19 +722,17 @@ impl<W: Walker> Fixpoint<'_, W> {
         self.halted.extend(&asked);
         let mut moved = false;
         for address in asked {
-            let transfers = {
-                let (walker, known, returning) = (self.walker, self.known, &self.returning);
-                let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
-                let Some(Ok(walk)) = self.walks.get_mut(&address) else {
-                    continue;
-                };
-                walker.halt(walk, &returns)
+            let (walker, known, returning) = (self.walker, self.known, &self.returning);
+            let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
+            let Some(Ok(walk)) = self.walks.get_mut(&address) else {
+                continue;
             };
-            if let Some(transfers) = transfers {
-                let thumb = self.thumb(address);
-                self.absorb(address, thumb, transfers);
-                moved = true;
-            }
+            let Some(transfers) = walker.halt(walk, &returns) else {
+                continue;
+            };
+            let thumb = self.thumb(address);
+            self.absorb(address, thumb, transfers);
+            moved = true;
         }
         moved
     }

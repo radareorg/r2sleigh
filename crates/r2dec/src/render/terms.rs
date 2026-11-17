@@ -1503,86 +1503,101 @@ mod tests {
     /// D540: each fold's arm equals `r2il::eval` for every 8-bit value and every count it admits.
     #[test]
     fn each_shift_fold_matches_the_machine_at_eight_bits() {
-        use super::{Count, Reach, reach};
-        use r2il::eval::{Operation, Word, apply};
+        use r2il::eval::Operation;
         use r2ssa::MachineOvershiftBehavior::{SignFill, Zero};
         let cases = [
             (Operation::Left, Zero),
             (Operation::Right, Zero),
             (Operation::SRight, SignFill),
         ];
-        // The C arm at the computed width, 32 bits, where `count` is below it.
-        let c_arm = |op: Operation, arm: Reach, x: u8, count: u128| -> u8 {
-            let shifted = |count: u32| match op {
-                Operation::Left => (u32::from(x) << count) as u8,
-                Operation::Right => (u32::from(x) >> count) as u8,
-                _ => (i32::from(x as i8) >> count) as u8,
-            };
+        for (op, overshift) in cases {
+            word_folds_match(op, overshift);
+            byte_folds_match(op, overshift);
+        }
+    }
+
+    /// At 32 bits the computed width is the value's own, so a fold one past the width overflows.
+    fn word_folds_match(op: r2il::eval::Operation, overshift: r2ssa::MachineOvershiftBehavior) {
+        use super::{Count, Reach, reach};
+        use r2il::eval::{Operation, Word, apply};
+        let samples = [0u32, 1, 0x8000_0000, 0xdead_beef, u32::MAX];
+        let pairs = samples
+            .into_iter()
+            .flat_map(|x| (0..=255u128).map(move |c| (x, c)));
+        for (x, c) in pairs {
+            let want = apply(
+                op,
+                &[Word::new(x.into(), 4).unwrap(), Word::new(c, 4).unwrap()],
+                4,
+            );
             let past = match op {
-                Operation::SRight if (x as i8) < 0 => 0xff,
+                Operation::SRight if (x as i32) < 0 => u32::MAX,
                 _ => 0,
             };
-            match arm {
-                Reach::Operand => x,
-                Reach::Past => past,
-                Reach::Shifted => shifted(u32::try_from(count).expect("below 32")),
-                Reach::Guarded if count >= 8 => past,
-                Reach::Guarded => shifted(u32::try_from(count).expect("below 8")),
+            let shifted = |c: u32| match op {
+                Operation::Left => x.checked_shl(c),
+                Operation::Right => x.checked_shr(c),
+                _ => (x as i32).checked_shr(c).map(|v| v as u32),
+            };
+            let got = match reach(overshift, 32, Count::literal(c)) {
+                Reach::Operand => Some(x),
+                Reach::Past => Some(past),
+                Reach::Shifted => shifted(c as u32),
+                Reach::Guarded => None,
+            };
+            assert_eq!(got.map(u128::from), want.ok(), "{op:?} {x:#x} by {c}");
+        }
+    }
+
+    /// The C arm at 8 bits against the machine, for a literal, any and every masked count.
+    fn byte_folds_match(op: r2il::eval::Operation, overshift: r2ssa::MachineOvershiftBehavior) {
+        use super::{Count, reach};
+        let table: Vec<[u8; 256]> = (0..=u8::MAX)
+            .map(|x| std::array::from_fn(|c| byte_machine(op, x, c as u128)))
+            .collect();
+        let any = reach(overshift, 8, Count::any(8));
+        for (x, row) in (0..=u8::MAX).zip(&table) {
+            for (c, &want) in (0..=255u128).zip(row) {
+                let literal = reach(overshift, 8, Count::literal(c));
+                assert_eq!(byte_arm(op, literal, x, c), want, "{op:?} {x} by {c}");
+                assert_eq!(byte_arm(op, any, x, c), want, "{op:?} {x} by any {c}");
             }
-        };
-        let machine = |op: Operation, x: u8, count: u128| {
-            let x = Word::new(u128::from(x), 1).expect("a byte");
-            let count = Word::new(count, 1).expect("a byte");
-            apply(op, &[x, count], 1).expect("a value") as u8
-        };
-        // At 32 bits the computed width is the value's own, so a fold one past the width overflows.
-        for (op, overshift) in cases {
-            for x in [0u32, 1, 0x8000_0000, 0xdead_beef, u32::MAX] {
-                for c in 0..=255u128 {
-                    let want = apply(
-                        op,
-                        &[Word::new(x.into(), 4).unwrap(), Word::new(c, 4).unwrap()],
-                        4,
-                    );
-                    let past = match op {
-                        Operation::SRight if (x as i32) < 0 => u32::MAX,
-                        _ => 0,
-                    };
-                    let shifted = |c: u32| match op {
-                        Operation::Left => x.checked_shl(c),
-                        Operation::Right => x.checked_shr(c),
-                        _ => (x as i32).checked_shr(c).map(|v| v as u32),
-                    };
-                    let got = match reach(overshift, 32, Count::literal(c)) {
-                        Reach::Operand => Some(x),
-                        Reach::Past => Some(past),
-                        Reach::Shifted => shifted(c as u32),
-                        Reach::Guarded => None,
-                    };
-                    assert_eq!(got.map(u128::from), want.ok(), "{op:?} {x:#x} by {c}");
-                }
+            let masks = (0..=255u128).flat_map(|mask| (0..=255u128).map(move |y| (mask, y)));
+            for (mask, y) in masks {
+                let masked = reach(overshift, 8, Count::masked(mask));
+                let c = y & mask;
+                let want = row[c as usize];
+                assert_eq!(byte_arm(op, masked, x, c), want, "{op:?} {x} by {y}&{mask}");
             }
         }
-        for (op, overshift) in cases {
-            let table: Vec<[u8; 256]> = (0..=u8::MAX)
-                .map(|x| std::array::from_fn(|c| machine(op, x, c as u128)))
-                .collect();
-            let any = reach(overshift, 8, Count::any(8));
-            for (x, row) in (0..=u8::MAX).zip(&table) {
-                for (c, &want) in (0..=255u128).zip(row) {
-                    let literal = reach(overshift, 8, Count::literal(c));
-                    assert_eq!(c_arm(op, literal, x, c), want, "{op:?} {x} by {c}");
-                    assert_eq!(c_arm(op, any, x, c), want, "{op:?} {x} by any {c}");
-                }
-                for mask in 0..=255u128 {
-                    let masked = reach(overshift, 8, Count::masked(mask));
-                    for y in 0..=255u128 {
-                        let c = y & mask;
-                        let want = row[c as usize];
-                        assert_eq!(c_arm(op, masked, x, c), want, "{op:?} {x} by {y}&{mask}");
-                    }
-                }
-            }
+    }
+
+    /// The C arm at the computed width, 32 bits, where `count` is below it.
+    fn byte_arm(op: r2il::eval::Operation, arm: super::Reach, x: u8, count: u128) -> u8 {
+        use super::Reach;
+        use r2il::eval::Operation;
+        let shifted = |count: u32| match op {
+            Operation::Left => (u32::from(x) << count) as u8,
+            Operation::Right => (u32::from(x) >> count) as u8,
+            _ => (i32::from(x as i8) >> count) as u8,
+        };
+        let past = match op {
+            Operation::SRight if (x as i8) < 0 => 0xff,
+            _ => 0,
+        };
+        match arm {
+            Reach::Operand => x,
+            Reach::Past => past,
+            Reach::Shifted => shifted(u32::try_from(count).expect("below 32")),
+            Reach::Guarded if count >= 8 => past,
+            Reach::Guarded => shifted(u32::try_from(count).expect("below 8")),
         }
+    }
+
+    fn byte_machine(op: r2il::eval::Operation, x: u8, count: u128) -> u8 {
+        use r2il::eval::{Word, apply};
+        let x = Word::new(u128::from(x), 1).expect("a byte");
+        let count = Word::new(count, 1).expect("a byte");
+        apply(op, &[x, count], 1).expect("a value") as u8
     }
 }

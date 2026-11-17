@@ -84,6 +84,13 @@ type Clauses<'a> = (
     &'a [String],
 );
 
+/// The frame-isolation clause, where an indirect call's promotion rests on it (D471).
+fn note_frame_isolation(detail: &mut String, ledger: Option<&crate::ledger::ObligationLedger>) {
+    if ledger.is_some_and(|ledger| ledger.premises().contains(&Premise::FrameIsolation)) {
+        detail.push_str("; an indirect call writes no frame slot this function did not expose (assuming frame-isolation)");
+    }
+}
+
 /// State what the rendering did and did not show; always emitted, since silence would claim
 /// everything was proven (doc/adr-decompiler-rewrite.md, "The proof line").
 pub(crate) fn note_unproven_constructs(
@@ -184,9 +191,7 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
-    if ledger.is_some_and(|ledger| ledger.premises().contains(&Premise::FrameIsolation)) {
-        detail.push_str("; an indirect call writes no frame slot this function did not expose (assuming frame-isolation)");
-    }
+    note_frame_isolation(&mut detail, ledger);
     if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
         && !premises.is_empty()
     {

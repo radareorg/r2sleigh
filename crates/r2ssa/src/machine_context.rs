@@ -1858,8 +1858,7 @@ fn collect_raw_call_site_identities(
     let mut by_instruction: BTreeMap<u64, Option<RawCallSite>> = BTreeMap::new();
     let mut tails = BTreeSet::new();
     for (block_index, block) in blocks.iter().enumerate() {
-        // The block's origins, stepped forward once to each indirect call: O(ops) a block (D521).
-        let (mut origins, mut stepped) = (BlockOrigins::default(), 0);
+        let mut origins = SteppedOrigins::default();
         for (op_index, op) in block.ops.iter().enumerate() {
             let Some(instruction) = block.instruction_of(op_index) else {
                 continue;
@@ -1936,23 +1935,9 @@ fn collect_raw_call_site_identities(
                 _ => continue,
             };
             let slot = match op {
-                R2ILOp::CallInd { target } => {
-                    // A call clears every origin (`BlockOrigins::step`), so the fold starts past the last.
-                    let segment = &block.ops[stepped..op_index];
-                    if let Some(at) = segment.iter().rposition(R2ILOp::is_call) {
-                        (origins, stepped) = (BlockOrigins::default(), stepped + at + 1);
-                    }
-                    (block.ops[stepped..op_index])
-                        .iter()
-                        .for_each(|op| origins.step(op));
-                    stepped = op_index;
-                    origins
-                        .of(target)
-                        .and_then(crate::origin::ValueOrigin::loaded_slot)
-                }
+                R2ILOp::CallInd { target } => origins.slot_at(&block.ops, op_index, target),
                 _ => None,
-            }
-            .map(|slot| slot.offset);
+            };
             let site = RawCallSite {
                 identity,
                 block: u32::try_from(block_index).expect("fewer than 2^32 blocks"),
@@ -1992,6 +1977,34 @@ pub(crate) struct RawCallSite {
     pub(crate) op: u32,
     /// The RAM slot an indirect call loads its target from in its own block (D521).
     pub(crate) slot: Option<u64>,
+}
+
+/// A block's origins, stepped forward once to each indirect call: O(ops) a block (D521).
+#[derive(Default)]
+struct SteppedOrigins {
+    origins: BlockOrigins,
+    stepped: usize,
+}
+
+impl SteppedOrigins {
+    /// The RAM slot the indirect call at `op_index` loads `target` from in its block.
+    fn slot_at(&mut self, ops: &[R2ILOp], op_index: usize, target: &r2il::Varnode) -> Option<u64> {
+        // A call clears every origin (`BlockOrigins::step`), so the fold starts past the last.
+        if let Some(at) = ops[self.stepped..op_index]
+            .iter()
+            .rposition(R2ILOp::is_call)
+        {
+            *self = Self {
+                origins: BlockOrigins::default(),
+                stepped: self.stepped + at + 1,
+            };
+        }
+        (ops[self.stepped..op_index].iter()).for_each(|op| self.origins.step(op));
+        self.stepped = op_index;
+        let slot = self.origins.of(target);
+        slot.and_then(crate::origin::ValueOrigin::loaded_slot)
+            .map(|slot| slot.offset)
+    }
 }
 
 /// Step a block's origins over `ops`, the operations before its next format site (D437).

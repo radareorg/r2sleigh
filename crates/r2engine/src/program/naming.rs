@@ -391,8 +391,11 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
     let mut held = Vec::new();
     for section in decoded {
         let range = section.vaddr..section.vaddr + section.vsize;
-        let Some(cells) = section_stubs(source, decoder, range, section.align, &slots, alignment)
-        else {
+        let linkage = StubSpan {
+            range,
+            align: section.align,
+        };
+        let Some(cells) = section_stubs(source, decoder, linkage, &slots, alignment) else {
             continue;
         };
         held.push((section.range(), cells));
@@ -445,11 +448,19 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
 /// literal 4, a Mach-O `__stub_helper` header 4; four times that leaves room for padding.
 const STUB_INSTRUCTIONS: usize = 16;
 
+/// A stretch of linkage code and the alignment its stubs start at.
+struct StubSpan {
+    range: std::ops::Range<u64>,
+    align: u64,
+}
+
 fn section_stubs(
     source: &impl Source,
     decoder: &Disassembler,
-    section: std::ops::Range<u64>,
-    align: u64,
+    StubSpan {
+        range: section,
+        align,
+    }: StubSpan,
     slots: &BTreeMap<u64, &str>,
     alignment: u32,
 ) -> Option<Vec<(u64, Cell)>> {
@@ -661,7 +672,11 @@ fn lazy_stubs(
     }
     let range = start..end?;
     let align = u64::from(alignment.max(1));
-    let cells = section_stubs(source, decoder, range.clone(), align, slots, alignment)?;
+    let linkage = StubSpan {
+        range: range.clone(),
+        align,
+    };
+    let cells = section_stubs(source, decoder, linkage, slots, alignment)?;
     Some((range, cells))
 }
 

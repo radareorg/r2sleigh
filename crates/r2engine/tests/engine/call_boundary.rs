@@ -1090,9 +1090,8 @@ fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
     assert!(meter.reloaded <= meter.reload_bound, "{meter:?}");
 }
 
-/// An indirect call between the spill and the reloads writes no slot the function did not
-/// expose under frame isolation (user ruling 2026-11-16): each reload is the stored literal and
-/// the proof line names the premise. Withdrawn, the slot stays memory (`native.rs` D471 gates).
+/// Under frame isolation (D471) an indirect call writes no unexposed slot: each reload is the
+/// stored literal and the proof line names the premise; `native.rs` gates its withdrawal.
 #[test]
 fn a_format_reloaded_past_an_indirect_call_is_its_literal_under_frame_isolation() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
