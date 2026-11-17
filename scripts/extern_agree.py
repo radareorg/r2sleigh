@@ -8,6 +8,10 @@ same run renders is compared with that function's header: the result type and th
 names dropped. Without binaries, the census binaries (doc/adr-call-boundary.md, "S16 as built").
 Exit 1 where more than `--max` pairs differ, 2 where analysis failed: `aa; afl` exits nonzero or
 lists no function, or a function's `pddj` crashed, so no comparison stands in for it.
+
+Each binary is keyed by its DecBench set (`O2`, `O2-noinline`) and its name, so the two builds of one
+name stay apart; a binary under no set is keyed by its name. Calls refused for their callee's declaration are counted by tag (D350). A callee is
+matched by name: two static functions of one name (census two_units `helper`) read as one.
 """
 
 from __future__ import annotations
@@ -85,8 +89,22 @@ class AnalysisFailed(Exception):
     """A binary or function the comparison could not read; exit 2."""
 
 
-def pairs(r2s: str, binary: str) -> tuple[int, list[dict]]:
-    """How many extern pairs `binary` holds, and those that differ; raises where analysis failed."""
+# Each refusal's tag and the texts `CallRefusal` spells it with (r2dec `ast.rs`).
+REFUSALS = {
+    "declaration-disagrees": ("another call disagrees with its declaration",),
+}
+
+
+def key(binary: str) -> str:
+    """`.../O2/grep/stripped/grep` -> `O2/grep`: the set's name where the path has one."""
+    parts = Path(binary).parts
+    sets = [part for part in parts if part in ("O2", "O2-noinline")]
+    return f"{sets[-1]}/{parts[-1]}" if sets else parts[-1]
+
+
+def pairs(r2s: str, binary: str, refused: dict[str, int]) -> tuple[int, list[dict], list[str]]:
+    """How many extern pairs `binary` holds, those that differ, and each callee two callers declare
+    differently (D350), counting refused calls into `refused`; raises where analysis failed."""
     run = subprocess.run([r2s, "-q", "-c", "aa; afl", binary], capture_output=True, text=True, timeout=3600)
     addrs = sorted({int(line.split()[0], 16) for line in run.stdout.splitlines() if line.startswith("0x")})
     if run.returncode != 0 or not addrs:
@@ -100,6 +118,8 @@ def pairs(r2s: str, binary: str) -> tuple[int, list[dict]]:
     for answer in report.answers:
         record = answer.record or {}
         signature, code = record.get("signature"), record.get("code") or ""
+        for tag, texts in REFUSALS.items():
+            refused[tag] = refused.get(tag, 0) + sum(code.count(text) for text in texts)
         found = signature and HEADER.match(signature.strip())
         if not found:
             continue
@@ -112,6 +132,10 @@ def pairs(r2s: str, binary: str) -> tuple[int, list[dict]]:
                 break
             if declared := EXTERN.match(line):
                 externs.append((caller, declared.group(2), shape(declared.group(1), declared.group(3))))
+    spelled: dict[str, set] = {}
+    for _, callee, extern in externs:
+        spelled.setdefault(callee, set()).add(extern)
+    split = sorted(callee for callee, found in spelled.items() if len(found) > 1)
     total, differ = 0, []
     for caller, callee, extern in externs:
         if callee not in headers or callee == caller:
@@ -119,7 +143,7 @@ def pairs(r2s: str, binary: str) -> tuple[int, list[dict]]:
         total += 1
         if extern != headers[callee]:
             differ.append({"caller": caller, "callee": callee, "extern": extern, "header": headers[callee]})
-    return total, differ
+    return total, differ, split
 
 
 def main() -> int:
@@ -129,21 +153,27 @@ def main() -> int:
     parser.add_argument("--max", type=int)
     parser.add_argument("binaries", nargs="*")
     args = parser.parse_args()
-    total, report = 0, {}
+    total, report, splits, refused = 0, {}, {}, {}
     for binary in args.binaries or [str(ROOT / path) for path in CENSUS]:
         try:
-            count, differ = pairs(args.r2s, binary)
+            count, differ, split = pairs(args.r2s, binary, refused)
         except AnalysisFailed as failed:
             print(f"analysis failed: {failed}", file=sys.stderr)
             return 2
         total += count
+        if split:
+            splits[key(binary)] = split
         if differ:
-            report[Path(binary).name] = differ
+            report[key(binary)] = differ
     differ = sum(len(found) for found in report.values())
     for binary, found in report.items():
         for pair in found:
             print(f"{binary} {pair['caller']} -> {pair['callee']}: {pair['extern']} | {pair['header']}")
-    print(f"{differ} of {total} differ")
+    for binary, split in splits.items():
+        print(f"{binary}: more than one extern for {', '.join(split)}")
+    two_ways = sum(map(len, splits.values()))
+    causes = ", ".join(f"{refused.get(tag, 0)} {tag}" for tag in REFUSALS)
+    print(f"{differ} of {total} differ; {two_ways} callees declared two ways; refused: {causes}")
     if args.json:
         args.json.write_text(json.dumps(report, indent=1) + "\n")
     return 1 if args.max is not None and differ > args.max else 0

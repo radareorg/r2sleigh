@@ -1521,3 +1521,10 @@ An indirect call may read every result byte, in a caller's site fates and inside
 - A dropped lane joins `killed`, so the call may write it and `clobbered()` lists it.
 - `ConventionParts.likely_trash` had no reader and is deleted. `killed` stays: `effect_on` answers `Clobbered` outside the preserved and reserved sets, and `clobbered()` has a test reader only, so no reader takes "outside `killed`" as survival.
 - Gate: `conventions::each_preserved_set_is_the_specification_s_or_names_each_difference`, over the 17 machine, compiler and id triples the engine selects. Red-first: `an_unaffected_lane_no_document_states_is_clobbered`, an x86-64-gcc profile listing RCX, red on 5373168f5.
+
+## rd12-prototypes-2 as built (2026-11-17, D520; D521, D350, D456 with D522 stopped)
+
+- D520: r2types `UnprovenCause::Ambiguous` is its own cause, read after `Unread` and before `Written`; r2ssa mints `SourceResultCause::Ambiguous` only where a body writes two result registers no caller's read chooses between. The proof line and `afi` spell it. 79 DecBench functions move `(Written)` to `(Ambiguous)`, no other text; 0 goldens.
+- D521 stopped before an edit: the raw call-site record is `RawCallSite` (`machine_context.rs:1960-1967`), read by `semantic/call_sites.rs` only through `BuildFacts` (`semantic/build_facts.rs:80-82`), and neither file was listed.
+- D350 stopped at its land gate. A caller's extern taken from `SourceOwnedCalleeSignature::declaration` (one per callee address, no site result, no site `...`) leaves 172 of 6,104 DecBench pairs unlike the header and refuses 6 calls whose parent extern equaled it (find `fcn_12370`, `fcn_13aa0`), so the gate stops it. 85 of the pairs are a tag the header spells through `tags.defines` and the patch through `tags.admits` (both in `render/values.rs`); the parameter, arity and result pairs and the 6 refusals are not traced. `scripts/extern_agree.py` keys DecBench builds per set and counts refused calls.
+- D456 with D522 stopped on its file map: r2dec spells no record by value (`render/calls.rs:325-350`), so a call's record value has no C type for `quot` and `rem`.
