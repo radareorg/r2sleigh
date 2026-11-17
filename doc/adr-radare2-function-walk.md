@@ -114,7 +114,7 @@ As built:
 - r2abi `runtime::PERSONALITIES` holds one cited row each for `__gxx_personality_v0` and
   `__gcc_personality_v0`. `UnwindFrame` carries `pads` (absolute call-site ranges, sorted) and
   `lsda` (`None`, `Read(row)`, `Refused(reason)`, `PersonalityUnstated`); `UnwindFrames::pad_for`
-  answers a call's pad from its last byte, the unwinder's `--ip`, in O(log F + log R).
+  answers a call's pad from its last byte, the unwinder's `--ip`.
 - r2image `lsda.rs` reads one table, O(table bytes), failing closed per frame: an encoding outside
   the list, a record past the stated length (`Length`), a range outside its frame, and, once every
   frame is read, a pad outside every frame are refused with the reason kept. The personality is the
@@ -128,10 +128,11 @@ As built:
   and the calls made only there.
 - Only a reader of pads walks them (D599): the survey walks each body's pads once its fixpoint
   has answered every return, so a call only a pad makes is answered (its extents and holders); the
-  reference index's listed walk walks them after its normal flow; the analysis' walk, a return's
-  trace and the dispatch rounds record the unwinds and walk none; `pdf`, `afb` and `afi` walk the
-  pads beside the analysis' body and its tables (`body::pads_beside`). `afi` counts an edge only to
-  a block's start, as `afb` lists it.
+  reference index's listed walk walks them after its normal flow; the analysis' walk records the
+  unwinds and walks none; a return's trace and the dispatch rounds look no pad up
+  (`Unwinds::Ignore`); `pdf`, `afb` and `afi` walk the pads beside the analysis' body and its
+  tables (`body::pads_beside`). `afi` counts an edge only to a block's start, as `afb` lists it.
+  `UnwindFrames::seal_pads` indexes every range with a pad once, so `pad_for` is O(log R).
 - Listing surfaces ask for both: `pdf`, `afb` (tag `u`, `EdgeKind::Unwind`), `afi`, `axt` and the
   survey's extents and holders. `pdd`, the seal and the lane passes read `Body::blocks`, and the
   proof line states `N landing pads not rendered: exceptional flow, a store read only there may be
