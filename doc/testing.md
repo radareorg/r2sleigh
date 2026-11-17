@@ -50,6 +50,7 @@ and `run_coverage.sh` builds and uses the release binary.
 | How much of each corpus binary renders, against a baseline? | `./tests/coverage/run_coverage.sh [--accept-baseline]` |
 | Does the rendered C compute what the binary computes (x86-64 Linux)? | `tests/equiv/run_equiv.py --r2s target/debug/r2s --baseline tests/equiv/baseline.json` |
 | The same for Win64 PEs, built by clang-cl against UCRT? | `EQUIV_XWIN=<xwin> bash tests/equiv/run_win64.sh <r2s>` (x86-64 Linux; setup below) |
+| Does the lift `pdd` reads compute what the machine runs, on recorded entry states (D467 step 1)? | `python3 scripts/run_refuter.py check --bins <DecBench binaries> --r2s <r2s>` replays `tests/refuter/*.json` through `pdie`, offline; `run_refuter.py record` makes them under `qemu-x86_64 -g` (Linux x86-64). It refutes the lift, `r2il::eval` and the body's extent on the paths run, never the rendered C (D532) |
 | What does DecBench score, on its own protocol? | `tests/decbench/run_decbench.sh` (see its README) |
 | Did any rendering move, base against head? | `python3 scripts/census.py run --r2s <r2s> --out <dir>` per side, then `census.py diff <base> <head> --report <file>` (CI: Census + Timing vs Base) |
 | Did a large function get slower? | `python3 scripts/census.py time --r2s <base> --r2s <head> --bins <radare2>/test/bins/elf` (fails above 1.3x in CI) |
