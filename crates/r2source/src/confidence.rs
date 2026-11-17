@@ -379,6 +379,12 @@ impl Mark {
             Self::Holds => ' ',
         }
     }
+
+    /// The order a line's notes take, weakest first: by mark, then the weaker confidence first;
+    /// `Confidence::cmp` is basis-first, so it cannot order marks (doc/adr-display.md).
+    pub fn weakest_first(a: (Self, &Confidence), b: (Self, &Confidence)) -> std::cmp::Ordering {
+        a.0.cmp(&b.0).then_with(|| b.1.cmp(a.1))
+    }
 }
 
 /// Why a fact about a program is believed, and what that belief assumes.
@@ -425,11 +431,6 @@ impl Confidence {
             Grade::Read => Mark::Read,
             Grade::Assumed => Mark::Assumed,
         }
-    }
-
-    /// The order a line's notes take, weakest first: by mark, then the weaker confidence first.
-    pub fn weakest_first(&self, other: &Self) -> std::cmp::Ordering {
-        (self.mark(), std::cmp::Reverse(self)).cmp(&(other.mark(), std::cmp::Reverse(other)))
     }
 
     /// What a fact derived from two others is believed on: the weaker basis,
@@ -672,7 +673,7 @@ mod tests {
             Confidence::of(Basis::Solved),
             assumed.clone(),
         ];
-        notes.sort_by(|a, b| a.weakest_first(b));
+        notes.sort_by(|a, b| Mark::weakest_first((a.mark(), a), (b.mark(), b)));
         assert_eq!(notes, [Confidence::of(Basis::Solved), assumed, certified]);
     }
 }

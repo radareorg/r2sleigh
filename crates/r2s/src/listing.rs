@@ -278,7 +278,7 @@ fn claimed_address(line: &r2engine::query::Line, number: r2engine::NumberSpan) -
     line.annotations
         .iter()
         .filter(|annotation| annotation.operand == Some(number) && annotation.reference)
-        .min_by_key(|annotation| annotation.support)
+        .min_by_key(|annotation| &annotation.confidence)
         .and_then(|annotation| annotation.kind.address())
 }
 
@@ -308,7 +308,7 @@ fn held(session: &Session, line: &r2engine::query::Line) -> String {
                 }
                 _ => note(session, line.address, &annotation.kind)?,
             };
-            Some(format!(" ; {said} ({})", rung(annotation.support)))
+            Some(format!(" ; {said} ({})", rung(annotation.confidence.basis)))
         })
         .collect()
 }
@@ -357,8 +357,8 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
         r2engine::query::AnnotationKind::Call {
             callee,
             ref arguments,
-            uncounted,
-        } => Some(called(session, at, callee, arguments.as_deref(), uncounted)),
+            ..
+        } => Some(called(session, at, callee, arguments.as_deref())),
         r2engine::query::AnnotationKind::ArgumentOf { call, index } => {
             Some(format!("arg{} of {call:#x}", index + 1))
         }
@@ -429,8 +429,7 @@ fn called(
     session: &Session,
     at: u64,
     callee: Option<u64>,
-    arguments: Option<&[r2engine::query::CallArgument]>,
-    uncounted: Option<&'static str>,
+    arguments: Result<&[r2engine::query::CallArgument], &r2engine::query::CallBoundaryRefusal>,
 ) -> String {
     let callee = callee.map_or_else(
         || "indirect call".to_owned(),
@@ -441,13 +440,13 @@ fn called(
         },
     );
     // A refused variadic count is why the arguments are unproven, so it is said there.
-    let Some(arguments) = arguments else {
-        return match uncounted {
-            Some(reason) => {
-                format!("{callee}: arguments unproven, variadic tail uncounted: {reason}")
-            }
-            None => format!("{callee}: arguments unproven"),
-        };
+    let arguments = match arguments {
+        Ok(arguments) => arguments,
+        Err(r2engine::query::CallBoundaryRefusal::VariadicCount(why)) => {
+            let reason = why.kind();
+            return format!("{callee}: arguments unproven, variadic tail uncounted: {reason}");
+        }
+        Err(_) => return format!("{callee}: arguments unproven"),
     };
     let spelled = arguments
         .iter()
@@ -595,7 +594,7 @@ mod tests {
                             address: u64::try_from(number.value).ok()?,
                             call: true,
                         },
-                        support: r2engine::discovery::Basis::Decoded,
+                        confidence: r2engine::discovery::Basis::Decoded.into(),
                         operand: Some(*number),
                         reference: true,
                     })
@@ -671,7 +670,7 @@ mod tests {
                 address: 0xffff_ffff_ffff_10e8,
                 width: 8,
             },
-            support: r2engine::discovery::Basis::Decoded,
+            confidence: r2engine::discovery::Basis::Decoded.into(),
             operand: Some(number),
             reference: true,
         });

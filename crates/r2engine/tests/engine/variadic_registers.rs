@@ -196,7 +196,7 @@ fn bounds_the_tail(vfold: &[u8], target: Target) {
     let dynamic = rendered(&mut open, BASE + DYNAMIC as u64);
     assert!(
         dynamic.contains(
-            "call to vfold: variadic, its argument count unproven (count_argument_not_constant)"
+            "call to vfold: variadic, its argument count unproven (the count argument is no constant)"
         ),
         "{dynamic}"
     );
@@ -1408,7 +1408,7 @@ fn leaves_the_count_unproven_when_the_caller_rewrites_it(vfold: &[u8], target: T
     code[at..at + now.len()].copy_from_slice(now);
     let mut open = program_over(Vec::leak(code), vfold.len(), target);
     let two = rendered(&mut open, BASE + TWO as u64);
-    assert!(two.contains("count_argument_not_constant"), "{two}");
+    assert!(two.contains("the count argument is no constant"), "{two}");
     assert!(!two.contains("vfold(2,"), "{two}");
 }
 

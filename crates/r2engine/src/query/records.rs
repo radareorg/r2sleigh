@@ -12,7 +12,7 @@ use r2sleigh_lift::{NumberSpan, Syntax};
 
 use super::references::Role;
 use crate::native::Program;
-use r2source::confidence::Basis;
+use r2source::confidence::{Basis, Confidence, Fact, Mark};
 
 /// Which decoder the code at an address is written in.
 ///
@@ -288,7 +288,8 @@ pub struct Register {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {
     pub kind: AnnotationKind,
-    pub support: Basis,
+    /// Why the claim is believed and what it assumes; a refusal or an unknown shows its kind's mark.
+    pub confidence: Confidence,
     /// Which number in the operand body this is about, where exactly one of
     /// them spells it. Two operands holding the same value leave this empty
     /// rather than guessing which was meant.
@@ -302,6 +303,31 @@ impl Annotation {
     pub fn role(&self) -> Option<Role> {
         self.reference.then(|| self.kind.role()).flatten()
     }
+
+    /// The cell a reader sees: the kind's for a refusal or an unknown, else the confidence's (D580).
+    pub fn mark(&self) -> Mark {
+        match self.kind.standing() {
+            Standing::Fact => self.confidence.mark(),
+            Standing::Refused => Mark::Refused,
+            Standing::Unknown => Mark::Unknown,
+        }
+    }
+
+    /// The order a line's notes take, weakest first: by mark, then the weaker confidence first.
+    pub fn weakest_first(&self, other: &Self) -> std::cmp::Ordering {
+        Mark::weakest_first(
+            (self.mark(), &self.confidence),
+            (other.mark(), &other.confidence),
+        )
+    }
+}
+
+/// Whether a claim states a fact, refuses one with a typed reason, or asked and holds no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Standing {
+    Fact,
+    Refused,
+    Unknown,
 }
 
 /// What one annotation claims.
@@ -358,12 +384,12 @@ pub enum AnnotationKind {
     ///
     /// Never at a transfer's target: a call or a jump there executes the bytes.
     Text { address: u64, text: String },
-    /// The call this line makes, and what its boundary proved it hands the callee; `None` where no mapping was proved.
+    /// The call this line makes: what its boundary proved it hands the callee, or why it proved no mapping.
     Call {
         callee: Option<u64>,
-        arguments: Option<Vec<CallArgument>>,
-        /// Why the variadic tail was not counted, where the callee takes one and its format refused.
-        uncounted: Option<&'static str>,
+        arguments: Result<Vec<CallArgument>, r2ssa::CallBoundaryRefusal>,
+        /// That the call never comes back, where the callee's or the site's `Never` proves it.
+        noreturn: Option<Fact<bool>>,
     },
     /// This line sets the argument `index` of the call at `call`.
     ArgumentOf { call: u64, index: usize },
@@ -429,6 +455,36 @@ pub enum Trips {
         constant: u64,
         width_bits: u32,
     },
+}
+
+impl AnnotationKind {
+    /// Whether the claim is a fact, a refusal or an unknown; every kind is named, so a new one decides.
+    pub const fn standing(&self) -> Standing {
+        match self {
+            Self::Call {
+                arguments: Err(_), ..
+            } => Standing::Refused,
+            Self::Unresolved => Standing::Unknown,
+            Self::Target { .. }
+            | Self::Reads { .. }
+            | Self::Writes { .. }
+            | Self::Computes { .. }
+            | Self::Bounds { .. }
+            | Self::Holds { .. }
+            | Self::Loaded { .. }
+            | Self::Points { .. }
+            | Self::Text { .. }
+            | Self::Call { .. }
+            | Self::ArgumentOf { .. }
+            | Self::Switch { .. }
+            | Self::Case { .. }
+            | Self::Default { .. }
+            | Self::Loop { .. }
+            | Self::Induction { .. }
+            | Self::Trips(_)
+            | Self::Returns { .. } => Standing::Fact,
+        }
+    }
 }
 
 impl AnnotationKind {

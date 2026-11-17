@@ -1191,8 +1191,9 @@ mod listing {
         assert!(listed.ok, "{}", listed.out);
         let mut lines = listed.out.lines();
         let call = lines.find(|line| line.trim_start().starts_with("0x100000e18"));
+        // An import's arity is its name-found declaration's (D579).
         let certified =
-            "bl sym.imp.memcpy ; sym.imp.memcpy(arg1@x0, arg2=0x100004008, arg3=0x50) (certified)";
+            "bl sym.imp.memcpy ; sym.imp.memcpy(arg1@x0, arg2=0x100004008, arg3=0x50) (declared)";
         assert!(
             call.is_some_and(|line| line.ends_with(certified)),
             "{}",

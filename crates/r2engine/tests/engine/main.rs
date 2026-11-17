@@ -28,6 +28,7 @@ mod machine;
 mod member_calls;
 mod names;
 mod native;
+mod notes;
 mod oracle;
 mod parameter_side;
 mod pass_through;

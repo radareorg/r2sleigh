@@ -540,7 +540,7 @@ fn claimed_at_caller(literal: Literal) -> (Option<Basis>, Option<Basis>) {
         .annotations
         .iter()
         .find(|annotation| annotation.kind == AnnotationKind::Computes { value: TEXT })
-        .map(|annotation| annotation.support);
+        .map(|annotation| annotation.confidence.basis);
     let index = program.references().expect("the index builds").value;
     let indexed = index
         .to(TEXT)

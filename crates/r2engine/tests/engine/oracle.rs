@@ -224,12 +224,12 @@ fn certified_cases() -> Vec<(Literal, u64, u64, Injected, Expected)> {
             HANDS + 7,
             Injected::Kind(AnnotationKind::Call {
                 callee: Some(BASE),
-                arguments: Some(vec![CallArgument {
+                arguments: Ok(vec![CallArgument {
                     index: 0,
                     slot: ArgumentSlot::Register(register(0x38)),
                     value: Some(HANDED + 1),
                 }]),
-                uncounted: None,
+                noreturn: None,
             }),
             Expected::Contradicted,
         ),
@@ -512,7 +512,7 @@ impl Ledger {
     fn slot_of(&self, call: u64, index: usize) -> Option<ArgumentSlot> {
         let call = self.find(call, |kind| matches!(kind, AnnotationKind::Call { .. }));
         let Some(AnnotationKind::Call {
-            arguments: Some(arguments),
+            arguments: Ok(arguments),
             ..
         }) = call
         else {

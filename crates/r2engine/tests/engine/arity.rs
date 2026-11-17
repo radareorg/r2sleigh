@@ -327,7 +327,7 @@ fn a_variadic_call_with_no_count_is_a_gap_naming_its_callee() {
     let text = slot_caller_in(darwin, "objc_msgSend", true);
     assert!(
         text.contains(
-            "call to objc_msgSend: variadic, its argument count unproven (missing_format_parameter) */"
+            "call to objc_msgSend: variadic, its argument count unproven (no format parameter or tail count is declared) */"
         ),
         "{text}"
     );

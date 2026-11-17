@@ -14,7 +14,7 @@ use super::Work;
 use super::decode::Lookahead;
 use super::records::{Annotation, AnnotationKind, Answered, Line, Memory, WalkedBody};
 use super::references::Role;
-use r2source::confidence::Basis;
+use r2source::confidence::{Basis, Confidence};
 
 /// How far on a run is lifted again to see which numbers move with it.
 ///
@@ -73,8 +73,8 @@ pub(super) fn over_run(
         let mut claims = named
             .touched
             .iter()
-            .map(|(kind, own)| (kind.clone(), folded_support(*own)))
-            .collect::<Vec<_>>();
+            .map(|(kind, own)| (kind.clone(), folded_support(*own).into()))
+            .collect::<Vec<(_, Confidence)>>();
         if work >= Work::BlockLocal
             && let Some(computed) = &named.computed
             // A number that stays put is an address candidate only where a section the program loads holds it: NULL and the header are not objects.
@@ -97,10 +97,11 @@ pub(super) fn over_run(
                 let kind = AnnotationKind::Computes {
                     value: computed.value,
                 };
-                claims.push((kind, support));
+                claims.push((kind, support.into()));
             }
         }
-        claims.extend(body.into_iter().flat_map(|body| arms_of(body, address)));
+        let arms = body.into_iter().flat_map(|body| arms_of(body, address));
+        claims.extend(arms.map(|(kind, rung)| (kind, rung.into())));
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
         if answered.holdings {
             let revision = revision_at(memory, &claims);
@@ -131,17 +132,17 @@ fn spell(answered: &Answered<'_>, run: &Run<'_>, lines: &mut [Line], index: usiz
 
 /// The claims of one line as annotations, each with the operand that spells its address.
 fn annotated(
-    claims: Vec<(AnnotationKind, Basis)>,
+    claims: Vec<(AnnotationKind, Confidence)>,
     syntax: Option<&Syntax>,
     memory: &Memory<'_>,
 ) -> Vec<Annotation> {
-    let annotate = |(kind, support): (AnnotationKind, Basis)| Annotation {
+    let annotate = |(kind, confidence): (AnnotationKind, Confidence)| Annotation {
         operand: syntax
             .zip(kind.address())
             .and_then(|(syntax, address)| sole_operand(syntax, address)),
         reference: referenced(memory, &kind),
         kind,
-        support,
+        confidence,
     };
     claims.into_iter().map(annotate).collect()
 }
@@ -364,11 +365,11 @@ fn relative_over(
 /// executed, so a string there would contradict the claim it hangs on.
 fn revision_at(
     memory: &Memory<'_>,
-    claims: &[(AnnotationKind, Basis)],
-) -> Vec<(AnnotationKind, Basis)> {
+    claims: &[(AnnotationKind, Confidence)],
+) -> Vec<(AnnotationKind, Confidence)> {
     let mut said = Vec::new();
     // Each address a claim uses as data, with how many bytes the claim itself accesses there.
-    let mut used = BTreeMap::<u64, Vec<(u32, Basis)>>::new();
+    let mut used = BTreeMap::<u64, Vec<(u32, &Confidence)>>::new();
     for (kind, support) in claims {
         if let AnnotationKind::Reads { address, width } = *kind
             && let Some(word) = memory.word(address, width)
@@ -385,14 +386,14 @@ fn revision_at(
                     value,
                 },
             };
-            said.push((kind, *support));
+            said.push((kind, support.clone()));
         }
         let (Some(address), Some(accessed)) =
             (kind.address(), kind.role().and_then(Role::data_access))
         else {
             continue;
         };
-        used.entry(address).or_default().push((accessed, *support));
+        used.entry(address).or_default().push((accessed, support));
     }
     for (address, uses) in used {
         let Some(text) = memory.text(address) else {
@@ -406,7 +407,7 @@ fn revision_at(
             .map(|(_, support)| *support)
             .min();
         if let Some(support) = support {
-            said.push((AnnotationKind::Text { address, text }, support));
+            said.push((AnnotationKind::Text { address, text }, support.clone()));
         }
     }
     said
