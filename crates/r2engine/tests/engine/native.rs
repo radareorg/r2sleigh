@@ -4959,7 +4959,7 @@ fn an_unmodelled_user_operation_is_a_gap_by_name() {
         "{text}"
     );
     assert!(
-        text.contains("return (uint64_t)((__uint128_t)r2sleigh_residual_u128("),
+        text.contains("return (uint64_t)r2sleigh_residual_u128("),
         "{text}"
     );
 }

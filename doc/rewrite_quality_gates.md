@@ -22,7 +22,7 @@ Phases
 | 2 | Dependencies | `cargo machete --with-metadata --skip-target-dir`; `cargo +nightly udeps --workspace --all-targets --all-features` |
 | 3 | Format and lint | `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cargo test -p r2rewrite` |
 | 4 | Dylint | `tools/dylints/r2sleigh_lints` over the workspace |
-| 5 | Kani | every crate whose `src` contains a `kani::proof` harness |
+| 5 | Kani | every crate whose `src` contains a `kani::proof` harness; r2dec's proves D540's shift fold (`render/terms.rs`) |
 | 6 | Mutants | `cargo mutants` on `crates/r2ssa/src/var.rs`, output in `target/quality-gate/mutants-r2ssa-var` |
 | 7 | Harness contracts | the Python unit tests of `tests/equiv` and `tests/decbench`, and `tests/test_no_plugin.py` |
 | 8 | Certification contracts | `scripts/test_certify_render.py` |
