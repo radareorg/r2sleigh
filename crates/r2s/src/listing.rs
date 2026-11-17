@@ -459,12 +459,18 @@ fn called(
                     format!("{name}@{}", carrier.unwrap_or_else(|| "?".to_owned()))
                 }
                 (None, r2engine::query::ArgumentSlot::Stack(offset)) => {
-                    format!("{name}@stack{offset:+#x}")
+                    format!("{name}@stack{}", signed(offset))
                 }
             }
         })
         .collect::<Vec<_>>();
     format!("{callee}({})", spelled.join(", "))
+}
+
+/// An offset with its sign and magnitude, as `afv` spells one: `-0x2c`, never its two's complement.
+fn signed(offset: i64) -> String {
+    let sign = if offset < 0 { '-' } else { '+' };
+    format!("{sign}{:#x}", offset.unsigned_abs())
 }
 
 /// A value a claim names, exactly or as what a register held on entry.
@@ -547,7 +553,7 @@ pub(crate) fn c_roles(roles: &[(std::ops::Range<usize>, r2engine::CRole)]) -> Ro
 
 #[cfg(test)]
 mod tests {
-    use super::{spelled, stopped};
+    use super::{signed, spelled, stopped};
     use r2engine::names::{Name, NameDb, Namespace};
     use r2engine::query::Line;
 
@@ -703,6 +709,14 @@ mod tests {
             spelled(&line("call", "0x1030"), &NameDb::new()),
             "call 0x1030"
         );
+    }
+
+    #[test]
+    fn a_negative_stack_offset_is_spelled_signed() {
+        // crackme0x05 0x80484e2 printed `arg1@stack+0xffffffffffffffd4` for the slot at -0x2c (D583).
+        assert_eq!(signed(-0x2c), "-0x2c");
+        assert_eq!(signed(0x8), "+0x8");
+        assert_eq!(signed(i64::MIN), "-0x8000000000000000");
     }
 
     #[test]
