@@ -1583,3 +1583,77 @@ fn an_exhausted_seal_is_refused_before_its_facts_are_read() {
         Some(SsaPrepareError::Exhausted(exhausted))
     );
 }
+
+/// `0x1000: if (reg 0x100 != 0) goto 0x1008`, `0x1004: reg 0x100 += 1; goto 0x1000`, `0x1008: return`:
+/// the back edge roots the graph at the entry edge, with a merge of reg 0x100 at the entry.
+fn looped_entry() -> SSAFunction {
+    let blocks = [
+        R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![R2ILOp::CBranch {
+                target: make_const(0x1008, 8),
+                cond: make_reg(0x100, 1),
+            }],
+            ..Default::default()
+        },
+        R2ILBlock {
+            addr: 0x1004,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntAdd {
+                    dst: make_reg(0x100, 8),
+                    a: make_reg(0x100, 8),
+                    b: make_const(1, 8),
+                },
+                R2ILOp::Branch {
+                    target: make_const(0x1000, 8),
+                },
+            ],
+            ..Default::default()
+        },
+        R2ILBlock {
+            addr: 0x1008,
+            size: 4,
+            ops: vec![R2ILOp::Return {
+                target: make_reg(0x108, 8),
+            }],
+            ..Default::default()
+        },
+    ];
+    SSAFunction::from_blocks_raw_no_arch(&blocks).expect("SSA for a looped entry")
+}
+
+/// A decided check that cuts the only back edge to the entry leaves no [`crate::cfg::ENTRY_EDGE`]
+/// root and no one-source merge: each folds into its source (D534).
+#[test]
+fn cutting_the_only_back_edge_to_the_entry_drops_the_entry_edge_and_its_merges() {
+    let mut function = looped_entry();
+    assert_eq!(function.root(), crate::cfg::ENTRY_EDGE);
+    let merges = |function: &SSAFunction| {
+        function
+            .get_block(0x1000)
+            .map_or(0, |block| block.phis().len())
+    };
+    assert!(merges(&function) > 0);
+    let mut cut = EditPlan::new();
+    cut.reshape(ShapeEdit::RemoveEdge {
+        from: 0x1004,
+        to: 0x1000,
+    });
+    cut.reshape(ShapeEdit::DropPhiSources {
+        block: 0x1000,
+        pred: 0x1004,
+    });
+    cut.reshape(ShapeEdit::RemoveEdge {
+        from: 0x1000,
+        to: 0x1004,
+    });
+    cut.reshape(ShapeEdit::RemoveBlock(0x1004));
+    cut.reorder();
+    function.apply_edits(cut);
+    assert_eq!(function.root(), 0x1000);
+    assert_eq!(function.block_addrs(), [0x1000, 0x1008]);
+    assert_eq!(merges(&function), 0);
+    validate_ssa_function(&function).expect("the function stays valid SSA");
+}
