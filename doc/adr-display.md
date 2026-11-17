@@ -1,7 +1,7 @@
 # ADR: display
 
-Status: proposed (ROADMAP D565 to D569, D574, and D579 to D583, which this ADR
-adds). Round 14 builds D580, D579, D583, D581 and D567 in that order.
+Status: D580, D579, D583, D581 and D567 built in round 14 ("Round 14 as
+built"); D565, D566, D568, D569, D574 and D582 proposed (ROADMAP).
 
 ## Problem
 
@@ -203,8 +203,8 @@ tests whether a setter's call is the next call line.
   edges.
 - Header: `O(1)` lookups of answers the query database holds.
 - Gap rows: one pass over the sorted block ranges, `O(B)`.
-- Memory: `Annotation` holds a `Confidence` (a basis and a premise set of at
-  most 4) in place of a `Basis`. No pass, cache or table.
+- Memory: `Annotation` holds a `Confidence` (a basis and a 4-bit premise
+  set, 2 bytes) in place of a `Basis`. No pass, cache or table.
 - Peak RSS of `aa; pdd @ 0x62ecf0` on 0pack must not rise.
 
 ## Rejected
@@ -227,3 +227,26 @@ tests whether a setter's call is the next call line.
   refusals read as proven.
 - A grade span on every operand: a mark per note, plus inline marks inside
   call arguments, carries the same states with one field on `Annotation`.
+
+## Round 14 as built (rd14-display-core)
+
+- D580: `Mark` and `Confidence::mark()` in r2source; `Mark::weakest_first`
+  is the one note order, read by `Annotation::weakest_first`.
+- D579: `Annotation.confidence`; `AnnotationKind::standing()`; a refused
+  `Call` carries its `CallBoundaryRefusal`, whose `Display` is the one
+  speller. Premises: a certificate note carries its function's recorded set
+  past the decoded and folded rungs. No owner states `ClosedWorld` per call
+  (step 0 on 0pack 0x62ee83), so a call to a function of the image and its
+  setters carry it (default-deny over-mark, D592). A call to an import and
+  its setters stand on `declared`: the arity is the name-found declaration's.
+  `Call.noreturn` reads the walk's closed site only where the callee's own
+  `Never` proves (`ExitSite.callee`); a halting argument is no callee fact.
+  A premise set is `Premises(u8)`, one bit per `Premise`: the
+  `BTreeSet<Premise>` raised peak RSS of `aa; pdd @ 0x62ecf0` on 0pack by
+  368 kB; four bits lower it 2.6% below the base (Mac).
+- D583: `stack-0x2c`.
+- D581: the contract is a test; `ANNOTATION` widened.
+- D567: `e asm.proof`; the call note names its callee only where no operand
+  names it, so no line loses a name; the `afi` `noreturn:` row is unchanged
+  because `diff_r2_judged.toml` matches it whole-line; notes are unpainted
+  until D569's proof roles land, so colour adds nothing yet.
