@@ -727,7 +727,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
         self.db.inputs().control.clone()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.view().name_at(vaddr)
     }
 
@@ -755,7 +755,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
         self.view().load_base()
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.view().import_at(vaddr)
     }
 

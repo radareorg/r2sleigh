@@ -40,14 +40,14 @@ use crate::{
 /// program calls one. Whoever opened the binary answers them.
 pub trait Program: crate::body::Program {
     /// What the program calls this address, where it names it at all.
-    fn name_at(&self, vaddr: u64) -> Option<String>;
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName>;
 
     /// The import this address stands for, where the binary says it is one.
     ///
     /// Asked of the binary rather than guessed from a name: a program that
     /// defines its own `strlen` carries a body there, and rendering that
     /// against the library's declaration would be a claim it never made.
-    fn import_at(&self, vaddr: u64) -> Option<String>;
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName>;
 
     /// The control for the request in hand: its cancellation, its deadline and
     /// the work it has spent.
@@ -1147,6 +1147,10 @@ pub fn decompile(
 }
 
 /// Whether a body that transfers to these callees and reads these import slots calls anything declared to take a function.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 pub(crate) fn hands_a_function(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -1157,10 +1161,11 @@ pub(crate) fn hands_a_function(
     let direct = callees
         .into_iter()
         .filter_map(|callee| program.import_at(callee));
-    let sealed = |slot: &u64| crate::stated::sealed_import(program, *slot).map(str::to_owned);
+    let sealed =
+        |slot: &u64| crate::stated::sealed_import(program, *slot).map(r2abi::SymbolName::new);
     let through_a_slot = loads.iter().filter_map(sealed);
     direct.chain(through_a_slot).any(|name| {
-        let declared = Declared::import(target, &name);
+        let declared = Declared::import(target, name.text());
         declared.is_some_and(|declared| {
             let code = |parameter: &r2abi::Parameter| parameter.code_returns(declared.graph);
             (declared.prototype.parameters.iter()).any(|parameter| code(parameter).is_some())
@@ -1203,6 +1208,10 @@ pub(crate) fn handed(
 
 /// Whether control comes back from the import at `address`, as its own declaration says, or from a
 /// body the binary's debug information states never returns; `None` where neither says.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 pub(crate) fn declared_return(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -1222,11 +1231,11 @@ pub(crate) fn declared_return(
         return (go && accepted_premises().contains(&premise))
             .then(|| program.name_at(address))
             .flatten()
-            .and_then(|name| Citation::runtime(&name))
+            .and_then(|name| Citation::runtime(name.text()))
             .map(|citation| Return::Never(Never::cited(citation)));
     };
     // Only a cited row states a "never" (D485); every other call comes back.
-    let row = target.imports.row(&name).filter(|row| row.noreturn);
+    let row = target.imports.row(name.text()).filter(|row| row.noreturn);
     Some(match row.and_then(Citation::of) {
         Some(citation) => Return::Never(Never::cited(citation)),
         None => Return::Comes,
@@ -1317,6 +1326,10 @@ struct Read {
 /// An import has no body here to read an interface off, so its declared
 /// prototype goes in the convention's own slots and stands in for one, and the
 /// same declaration states the C signature the call renders with.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 fn declare_imports(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
@@ -1335,7 +1348,7 @@ fn declare_imports(
         if let Some(import) = crate::declared::import_call(target) {
             callees.imports.insert(*address, import);
         }
-        let Some(declared) = Declared::import(target, &name) else {
+        let Some(declared) = Declared::import(target, name.text()) else {
             callees
                 .unstated
                 .insert(*address, r2ssa::UnstatedImport::Undeclared);
@@ -2599,8 +2612,15 @@ impl<'a> Native<'a> {
     }
 
     /// What the program calls the function at `entry`.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "handed to an output contract")
+    )]
     fn name_of(&self, entry: u64) -> String {
-        (self.program.name_at(entry)).unwrap_or_else(|| r2source::unnamed_function(entry))
+        (self.program.name_at(entry)).map_or_else(
+            || r2source::unnamed_function(entry),
+            |name| name.text().to_owned(),
+        )
     }
 
     /// The tables the dispatches in a prepared body read, fetched.
@@ -2781,12 +2801,16 @@ impl<'a> Native<'a> {
     }
 
     /// The table as the snapshot carries it: where it lies, the dispatch that reads it, each target and its name.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "handed to an output contract")
+    )]
     fn captured(
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
         targets: &[u64],
     ) -> Option<r2source::SourceCodePointerTable> {
-        let name = |target: &u64| self.program.name_at(*target).map(Into::into);
+        let name = |target: &u64| (self.program.name_at(*target)).map(|name| name.text().into());
         Some(r2source::SourceCodePointerTable::new(
             read.address,
             read.size,
@@ -3128,6 +3152,10 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
 }
 
 /// Where each transfer to another function is made and what it reaches, as the walk read it.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "handed to an output contract")
+)]
 fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
@@ -3138,7 +3166,7 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
             sites.push(NativeCall {
                 instruction,
                 target: transfer.target,
-                name: program.name_at(transfer.target),
+                name: (program.name_at(transfer.target)).map(|name| name.text().to_owned()),
                 transfer: transfer.kind,
                 linkage: match program.import_at(transfer.target) {
                     Some(_) => r2source::AdvisoryCalleeLinkage::Imported,
@@ -3152,6 +3180,10 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
 
 /// The summary each import a body calls states through the row it binds (D383); an unbound import,
 /// or one whose row states no effects, has none.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 fn library_evidence(
     program: &dyn Program,
     imports: &crate::imports::Imports,
@@ -3162,7 +3194,7 @@ fn library_evidence(
         .filter(|call| call.linkage == r2source::AdvisoryCalleeLinkage::Imported)
         .filter_map(|call| {
             let name = program.import_at(call.target)?;
-            let summary = crate::library::import_summary(call.target, &name, imports)?;
+            let summary = crate::library::import_summary(call.target, name.text(), imports)?;
             Some((call.target, summary))
         })
         .collect()
@@ -3238,6 +3270,10 @@ impl Native<'_> {
 
     /// The named program data this body points at, each with the type the
     /// binary's debug information declares at its address, and their graph.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "handed to an output contract")
+    )]
     fn data_symbols(
         &self,
         body: &crate::body::Body,
@@ -3261,7 +3297,7 @@ impl Native<'_> {
             std::iter::once(address).chain(start.filter(|start| *start != address))
         });
         let named = (starts.collect::<BTreeSet<_>>().into_iter())
-            .filter_map(|address| Some((address, self.program.name_at(address)?)))
+            .filter_map(|address| Some((address, self.program.name_at(address)?.text().to_owned())))
             .collect::<Vec<_>>();
         let types = (named.iter())
             .map(|(address, _)| declarations.object_at(*address).map(|object| object.ty))
@@ -3275,6 +3311,10 @@ impl Native<'_> {
 
     /// What one call operation calls, as the walk's transfer names it: a direct call its
     /// target, a call through a sealed import slot that import (`CallSlot`, audit W8).
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "table lookup by C identifier")
+    )]
     fn called_name(
         &self,
         sites: &[NativeCall],
@@ -3283,7 +3323,10 @@ impl Native<'_> {
         let instruction = op.call()?.instruction?;
         let site = sites.iter().find(|site| site.instruction == instruction)?;
         // A row applies to an import only, never to a body by its name.
-        Some((instruction, self.program.import_at(site.target)?))
+        Some((
+            instruction,
+            self.program.import_at(site.target)?.text().to_owned(),
+        ))
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.
@@ -4140,12 +4183,12 @@ mod tests {
             NONE
         }
 
-        fn name_at(&self, vaddr: u64) -> Option<String> {
+        fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
             self.import_at(vaddr)
         }
 
-        fn import_at(&self, vaddr: u64) -> Option<String> {
-            (vaddr == 0x1018).then(|| "on_double".to_owned())
+        fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+            (vaddr == 0x1018).then(|| r2abi::SymbolName::new("on_double"))
         }
     }
 

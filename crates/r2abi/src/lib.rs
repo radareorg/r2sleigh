@@ -17,6 +17,7 @@ pub mod prototypes;
 pub mod runtime;
 mod spelling;
 pub mod statement;
+pub mod symbol;
 pub mod syscalls;
 pub mod types;
 
@@ -39,6 +40,7 @@ pub use platform::{
     platform_registers,
 };
 pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled, StatedConvention};
+pub use symbol::SymbolName;
 pub use syscalls::Syscalls;
 pub use types::{
     Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind, Signature, Type,

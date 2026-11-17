@@ -497,6 +497,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
     /// The newest rendering, which a redraw reads; another function's is drawn again.
     const RETENTION: Retention = Retention::Newest;
 
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "printed")
+    )]
     fn compute(db: &Db<ProgramInputs<S>>, key: &Key) -> Render {
         let entry = key.0;
         let control = db.inputs().control.clone();
@@ -505,7 +509,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
         let refused = |refusal: NativeRefusal| {
             let stopped = control.stopped() || refusal.stopped();
             let name = crate::native::Program::name_at(&View::new(db, true), entry);
-            let name = name.unwrap_or_else(|| r2source::unnamed_function(entry));
+            let name = name.map_or_else(
+                || r2source::unnamed_function(entry),
+                |name| name.text().to_owned(),
+            );
             let rendering = super::Rendering::refused(&name, entry, language, refusal);
             Render(Rc::new(Drawn { rendering, stopped }))
         };
