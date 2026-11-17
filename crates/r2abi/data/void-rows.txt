@@ -8,7 +8,8 @@
 # types.sdb.txt, the portable table.
 srandomdev | void | FreeBSD random(3): void srandomdev(void)
 free | void | C11 7.22.3.3
-longjmp | void | C11 7.13.2.1 (_Noreturn)
+longjmp | void | glibc 2.39 <setjmp.h>: extern void longjmp (struct __jmp_buf_tag __env[1], int __val) (noreturn); C17 7.13.2.1 (_Noreturn)
+_longjmp | void | glibc 2.39 <setjmp.h>: extern void _longjmp (struct __jmp_buf_tag __env[1], int __val) (noreturn)
 srand | void | C11 7.22.2.2
 srandom | void | POSIX.1-2017 <stdlib.h> srandom; glibc, bionic and Darwin <stdlib.h>
 quick_exit | void | C11 7.22.4.7 (_Noreturn)

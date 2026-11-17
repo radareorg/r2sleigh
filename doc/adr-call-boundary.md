@@ -1509,3 +1509,15 @@ An indirect call may read every result byte, in a caller's site fates and inside
 - Equivalence: contabo, time-graded: x86-64 743 equal and 2 `slow`, shapes.c clang-O1 `shape_mutual_even` and review.c clang-O2 `fact`, each rendering byte-identical C at b30b59eef and here, so 745 held; aarch64 749 equal, every baseline record held. `void_soundness`: 0 false voids, 0 externs void.
 - Open: one owner of the indirect-call read across r2engine `Effects` and r2ssa `CallUse`.
 - Test (`result_lanes`): `a_result_left_to_an_indirect_call_keeps_the_bits_above_a_narrow_callee`, `call f; call g` with `g` = `call *%rbx; ret`, red on b30b59eef ("inside a walked callee"); the direct `call f; call *%rbx` case was already green there (the count register at `Depth::Deep`).
+
+## D476 as built (2026-11-17, rd11-prototypes)
+
+"This register survives a call" is stated only by a cited row. The cspec `unaffected` list is a lower bound that proves no survival.
+
+- Owner: r2abi `ConventionRow.preserved: Option<PreservedSet>`, registers with `bits` as a `PlatformRegister` has, and the document's words. All 13 ids state a set: System V AMD64 3.2.1 and Figure 3.4; Microsoft x64 "Caller/callee saved registers" (cpp-docs af4947c4); i386 psABI register table (i386-ABI 9137bb3d); AAPCS64 6.1.1 and 6.1.2 and Apple's "adhere to the rest"; AAPCS32 6.1.1 and 6.1.2.1; RISC-V psABI 1.0 register tables and its hardware float convention; Go `abi-internal.md` at go1.22.0 for the 6 Go ids.
+- `duties` (r2engine `native.rs`) builds `preserved` from the row and the platform's callee-saved rows only. Each cspec lane outside them is dropped with one `convention-model` evidence line.
+- `SpecOverride::Preserved { register, kept, citation }` names each difference between a cspec list and its document: Windows' `GS_OFFSET` and `FS_OFFSET` (no document), AAPCS32 `r9` (platform-specific) and `pc`, the link register where a Windows cspec names no return address, Go amd64 `R15` and `X15` (scratch in dynlink and Plan 9 builds). Microsoft's and i386's x87 control word and MXCSR control bits are named `kept: false`: their owner is `r2abi::platform`, which states them for x86-64 only. Lanes a document adds beyond the cspec are not added here.
+- ABI0 amd64 keeps RSP, RBP and R14 as a call finds them: R14 is undefined inside ABI0 code, but a call reaches ABI0 only through a wrapper that restores it ("will have to be restored on transitions from ABI0 code to ABIInternal code"). The row refuses every ABI0 body, so it is read only by `AnyCall`'s join at such a call.
+- A dropped lane joins `killed`, so the call may write it and `clobbered()` lists it.
+- `ConventionParts.likely_trash` had no reader and is deleted. `killed` stays: `effect_on` answers `Clobbered` outside the preserved and reserved sets, and `clobbered()` has a test reader only, so no reader takes "outside `killed`" as survival.
+- Gate: `conventions::each_preserved_set_is_the_specification_s_or_names_each_difference`, over the 17 machine, compiler and id triples the engine selects. Red-first: `an_unaffected_lane_no_document_states_is_clobbered`, an x86-64-gcc profile listing RCX, red on 5373168f5.

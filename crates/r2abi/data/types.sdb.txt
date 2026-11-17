@@ -217,12 +217,6 @@ func.isunordered.arg.0=arithmetic,x
 func.isunordered.arg.1=arithmetic,y
 func.isunordered.ret=bool
 
-longjmp=func
-func.longjmp.args=2
-func.longjmp.arg.0=jmp_buf,env
-func.longjmp.arg.1=int,val
-func.longjmp.ret=void
-
 div=func
 func.div.args=2
 func.div.arg.0=int,numer
@@ -310,11 +304,6 @@ func.humanize_number.arg.3=const char *,suffix
 func.humanize_number.arg.4=int,scale
 func.humanize_number.arg.5=int,flags
 func.humanize_number.ret=int
-
-setjmp=func
-func.setjmp.args=1
-func.setjmp.arg.0=jmpbuf,env
-func.setjmp.ret=int
 
 swift_bridgeObjectRelease=func
 func.swift_bridgeObjectRelease.args=1

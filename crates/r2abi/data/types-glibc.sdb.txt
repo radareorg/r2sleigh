@@ -1256,3 +1256,50 @@ func.wcsftime.arg.2=const wchar_t *,format
 func.wcsftime.arg.3=const struct tm *,tp
 func.wcsftime.ret=size_t
 func.wcsftime.include=wchar.h
+
+# setjmp.h line 32: glibc 2.39 declares `typedef struct __jmp_buf_tag jmp_buf[1];`, and a parameter of
+# array type is a pointer to its element (ISO C17 6.7.6.3p7). setjmp.h line 36:
+# `extern int setjmp (jmp_buf __env) __THROWNL;`.
+setjmp=func
+func.setjmp.args=1
+func.setjmp.arg.0=struct __jmp_buf_tag *,env
+func.setjmp.ret=int
+func.setjmp.include=setjmp.h
+
+# setjmp.h line 45: glibc 2.39 declares `extern int _setjmp (struct __jmp_buf_tag __env[1]) __THROWNL;`,
+# a pointer parameter (ISO C17 6.7.6.3p7).
+_setjmp=func
+func._setjmp.args=1
+func._setjmp.arg.0=struct __jmp_buf_tag *,env
+func._setjmp.ret=int
+func._setjmp.include=setjmp.h
+
+# setjmp.h lines 54-55: glibc 2.39 declares `extern void longjmp (struct __jmp_buf_tag __env[1],
+# int __val) __THROWNL __attribute__ ((__noreturn__));` (ISO C17 7.13.2.1: `_Noreturn`).
+longjmp=func
+func.longjmp.args=2
+func.longjmp.arg.0=struct __jmp_buf_tag *,env
+func.longjmp.arg.1=int,val
+func.longjmp.ret=void
+func.longjmp.include=setjmp.h
+func.longjmp.noreturn=true
+
+# setjmp.h lines 61-62: glibc 2.39 declares `extern void _longjmp (struct __jmp_buf_tag __env[1],
+# int __val) __THROWNL __attribute__ ((__noreturn__));`.
+_longjmp=func
+func._longjmp.args=2
+func._longjmp.arg.0=struct __jmp_buf_tag *,env
+func._longjmp.arg.1=int,val
+func._longjmp.ret=void
+func._longjmp.include=setjmp.h
+func._longjmp.noreturn=true
+
+# setjmp.h lines 70 and 80-81: glibc 2.39 declares `typedef struct __jmp_buf_tag sigjmp_buf[1];` and
+# `extern void siglongjmp (sigjmp_buf __env, int __val) __THROWNL __attribute__ ((__noreturn__));`.
+siglongjmp=func
+func.siglongjmp.args=2
+func.siglongjmp.arg.0=struct __jmp_buf_tag *,env
+func.siglongjmp.arg.1=int,val
+func.siglongjmp.ret=void
+func.siglongjmp.include=setjmp.h
+func.siglongjmp.noreturn=true

@@ -242,11 +242,10 @@ pub struct ConventionParts {
     /// does or the set is refused, and then no result of the convention is `void`.
     pub results_complete: Option<&'static str>,
     pub owned: Box<[OwnedRange]>,
-    /// What a call leaves as it found it: the specification's `unaffected`, less the return
-    /// address, and the ABI's callee-saved control bits.
+    /// What a call leaves as it found it: the ABI row's cited set and the platform's callee-saved
+    /// rows; never the specification's `unaffected` list (D476).
     pub preserved: Box<[LaneSet]>,
     pub killed: Box<[LaneSet]>,
-    pub likely_trash: Box<[LaneSet]>,
     /// What the platform reserves to the system, which no call writes.
     pub reserved: Box<[LaneSet]>,
     /// The register a call leaves the return address in, where the machine uses one.
@@ -677,7 +676,6 @@ impl ConventionModel {
                 .cloned()
                 .collect(),
             killed: union(&self.killed, &other.killed),
-            likely_trash: union(&self.likely_trash, &other.likely_trash),
             reserved: union(&self.reserved, &other.reserved),
             forms: BoundaryForms {
                 count_register: self.forms.count_register.or(other.forms.count_register),
@@ -714,7 +712,6 @@ pub mod testing {
             owned: Box::default(),
             preserved: Box::default(),
             killed: Box::default(),
-            likely_trash: Box::default(),
             reserved: Box::default(),
             link: None,
             forms: BoundaryForms {
@@ -897,7 +894,6 @@ mod tests {
             owned: Box::default(),
             preserved: lanes(preserved),
             killed: Box::default(),
-            likely_trash: Box::default(),
             reserved: lanes(reserved),
             link: None,
             forms: BoundaryForms {

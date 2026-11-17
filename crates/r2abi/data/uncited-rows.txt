@@ -26,7 +26,6 @@ isless | a macro of ISO C17 <math.h>, no function
 islessequal | a macro of ISO C17 <math.h>, no function
 islessgreater | a macro of ISO C17 <math.h>, no function
 isunordered | a macro of ISO C17 <math.h>, no function
-longjmp | takes `jmp_buf`, filed with the records by value, a class with no rendered witness (D449)
 div | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
 ldiv | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
 lldiv | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
@@ -40,7 +39,6 @@ inet_ntoa | takes a record by value, a class with no rendered witness: a cited `
 strmode | no glibc 2.39 header declares it
 tgoto | no glibc 2.39 header declares it
 humanize_number | no glibc 2.39 header declares it
-setjmp | takes `jmp_buf`, filed with the records by value, a class with no rendered witness (D449)
 swift_bridgeObjectRelease | no glibc 2.39 header declares it
 swift_endAccess | no glibc 2.39 header declares it
 swift_release | no glibc 2.39 header declares it

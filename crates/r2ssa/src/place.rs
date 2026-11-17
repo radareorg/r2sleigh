@@ -266,7 +266,6 @@ mod tests {
             owned: Box::new([OwnedRange::ReturnAddress(0..8)]),
             preserved: Box::default(),
             killed: Box::default(),
-            likely_trash: Box::default(),
             reserved: Box::default(),
             link: None,
             forms: BoundaryForms {
