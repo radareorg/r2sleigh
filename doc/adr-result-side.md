@@ -844,6 +844,13 @@ The open part, built 2026-11-16 (rd10-load-base): `resolved_alone` asks first to
 - Gate: the same test, `f` read as `caller`'s callee under `aa`: 3 build recoveries over the undecided twin on the parent, 2 after (one build, one seal).
 - Cost: pumasim `aa; pdd @ 0x3b6b20` 73.795 G to 72.158 G (-2.219%), bash `aa; pdd @ 0x2e630` -0.080%, cold commands 0.000% (contabo `instructions:u`, median of 3).
 
+## D458 and D525 as built (2026-11-17, rd13-prototypes-3)
+
+- D458 is round 12's patch: `SourceResultCarriers.float_unwritten`, witnessed at the handed-back producer by `written_at_returns` over the direct returns' float live-out; `call_lanes` states `Unstated` at the integer carrier where `hold_no_value`; the callee check accepts it; `semantic/boundaries.rs` gives such a call no value at the carrier.
+- D525: a tail keeps the caller's return address, so a forwarder's lanes at return are its tail callees' lanes at theirs. `tails_hold_no_value` reads each owned tail's site contract: `Unstated` at one carrier, its callee's carriers `hold_no_value`. That contract's `result_kind` is `None` (D330), so the producer runs under `TailResult::Unproven`.
+- `forwarded_carriers`: `float_unwritten` is `written_at_returns` over the float live-out with the tail blocks kept as exits. `integer_undefined` holds only where `direct_returns_beside_void_tails` answers `(Void, None)`; elsewhere the integer lane is stated open, no negative fact: the tails leave it undefined, a direct return leaves data, and undefined joined with data is data (doc/adr-scratch-result.md, "As built"). grep O2-noinline `fcn_9670` is that case: `0x96a2` returns `lseek`'s RAX. The ruling's other reading, no carriers there, keeps `0x9d30`'s wrong extern.
+- Gate: DecBench moves the 50 functions round 12 listed, 4 of them in C (grep `0x9670`, `0x9d30`; xmlwf `0x3a30`; bzip2 `0xee90`), each extern equal to its callee header's result type.
+
 ## Open questions
 
 1. The register effect is computed on ask or deposited by `SiteFates` ("S31b as built", ruled). pumasim `0x3b6b20` does not meet the note's gate (-0.07 G against -0.08 G, run spread 0.014 G); the next lever is D354.

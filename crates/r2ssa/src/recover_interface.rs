@@ -2205,6 +2205,21 @@ fn recover_interface_inner(
             });
         }
     }
+    // A tail keeps the caller's return address, so a forwarder's lanes at return are its tail
+    // callees' lanes at theirs: none holds a value where each callee's carriers hold none (D525).
+    if tail_unproven
+        && result_carriers.is_none()
+        && let (Some(context), Some(float)) = (machine_context, slots.results().float)
+        && let Some(carrier) = tails_hold_no_value(func, &facts, lanes, context)
+    {
+        result_carriers = Some(forwarded_carriers(
+            func,
+            graph,
+            &facts,
+            slots,
+            (carrier, float),
+        ));
+    }
     // The lane after the float one, written at a return, makes a float result one group with it.
     if let Some(carriers) = &mut result_carriers
         && let (Some(_), Some(context)) = (carriers.float, machine_context)
@@ -3429,6 +3444,57 @@ fn owned_tails<'f>(
         .filter(move |call| !call.direct_target.is_some_and(passes))
 }
 
+/// The carrier every owned tail's contract states `Unstated` at, each callee's carriers holding no
+/// value (D458, D525 in doc/adr-result-side.md). O(tails).
+fn tails_hold_no_value(
+    func: &SSAFunction,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    lanes: r2source::convention::TypedResults,
+    context: &crate::SourceMachineContext,
+) -> Option<CanonicalStorageId> {
+    let mut carriers = owned_tails(func, facts, lanes).map(|call| {
+        let interface = context.call_site_interface(call.raw_identity?)?;
+        let SourceCallResult::Unstated { carrier } = interface.result() else {
+            return None;
+        };
+        let callee = interface.exact_callee_interface()?.result_carriers()?;
+        (callee.hold_no_value() && callee.integer == carrier).then_some(carrier)
+    });
+    let first = carriers.next()??;
+    carriers
+        .all(|carrier| carrier == Some(first))
+        .then_some(first)
+}
+
+/// A forwarder's carriers over tails whose callees hold no value, tail blocks kept as lane returns
+/// (D525 in doc/adr-result-side.md). O(blocks + values reaching a return) per lane.
+fn forwarded_carriers(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    slots: &ConventionModel,
+    (integer, float): (CanonicalStorageId, CanonicalStorageId),
+) -> r2source::SourceResultCarriers {
+    let direct = direct_returns_beside_void_tails(func, graph, facts, slots);
+    if direct != (RecoveredFunctionResult::Void, None) {
+        r2il::refusal_evidence!(
+            "forwarded-carriers",
+            "{:#x}: a direct return beside tails holding no value leaves {direct:?} in {integer:?}: \
+             the integer lane is stated open",
+            func.entry
+        );
+    }
+    let float_live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[float]);
+    r2source::SourceResultCarriers {
+        integer,
+        float: Some(float),
+        second: None,
+        integer_undefined: direct == (RecoveredFunctionResult::Void, None),
+        float_second: None,
+        float_unwritten: !written_at_returns(graph, Some(facts), &float_live_out, (true, true)),
+    }
+}
+
 /// The blocks that leave by a tail transfer whose callee may change `lane`; one that passes it
 /// hands it back as a return does (`liveout::passing_tail`).
 fn owned_tail_blocks(
@@ -4333,9 +4399,8 @@ mod tests {
         assert_eq!(lanes.unproven, vec![x1]);
     }
 
-    /// D458: a float lane whose every return byte is its entry value or a call's leftover states no
-    /// result. With the integer lane undefined the call states none at the integer carrier; defined,
-    /// the integer register is the result and the float lane is unproven; a passed lane passes.
+    /// D458: an unwritten float lane states no result; the call states none at the integer carrier
+    /// where that lane is undefined, else the integer register; a passed lane passes.
     #[test]
     fn an_unwritten_float_lane_states_no_result_at_a_call() {
         let (x0, x1, q0) = (register(0, 8), register(8, 8), register(0x5000, 16));
