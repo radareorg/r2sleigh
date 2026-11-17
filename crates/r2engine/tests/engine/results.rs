@@ -521,3 +521,18 @@ fn one_condensation_answers_every_member_of_a_cycle() {
     );
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
+
+/// P7 gap probe: `f` writes both result registers; its proof line names the cause it states.
+#[test]
+fn a_body_writing_both_result_registers_names_that_cause_on_its_proof_line() {
+    const CODE: [u8; 0x30] = beside_both_registers([]);
+    let mut open = OpenProgram::of(Literal::of_code(&CODE, &BOTH));
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    let proof = (text.lines())
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_default();
+    assert!(
+        proof.contains("the result is unproven (Ambiguous)"),
+        "{text}"
+    );
+}

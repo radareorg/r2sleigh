@@ -35,6 +35,8 @@ pub enum ReturnTypeFact {
 pub enum UnprovenCause {
     /// A defined value reaches a return, and no declaration and no reading caller decide it.
     Written,
+    /// The body writes two result registers, and no caller's read chooses between them.
+    Ambiguous,
     /// A return hands back the entry byte of an input location.
     EntryInput,
     /// No call reads the result, under the closed world.
@@ -50,6 +52,7 @@ impl UnprovenCause {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Written => "Written",
+            Self::Ambiguous => "Ambiguous",
             Self::EntryInput => "EntryInput",
             Self::Unread => "Unread",
             Self::ForwardCycle => "ForwardCycle",
@@ -66,6 +69,9 @@ impl UnprovenCause {
         }
         if causes.contains(&Cause::Unread) {
             return Some(Self::Unread);
+        }
+        if causes.contains(&Cause::Ambiguous) {
+            return Some(Self::Ambiguous);
         }
         let written = causes.iter().any(|cause| {
             !matches!(
