@@ -1,6 +1,4 @@
-//! One call-site table of a language-specific data area, as the cited personality reads it.
-//!
-//! The format is GCC's `parse_lsda_header` and the call-site loop of `PERSONALITY_FUNCTION`
+//! One call-site table of an LSDA, as GCC's `parse_lsda_header` and `PERSONALITY_FUNCTION` read it
 //! (doc/adr-radare2-function-walk.md, "Unwind edges as built"); it fails closed per table.
 
 use std::ops::Range;

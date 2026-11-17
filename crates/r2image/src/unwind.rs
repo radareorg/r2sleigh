@@ -24,9 +24,6 @@
 //! A relocatable object's frames are read at the placed section base, and an
 //! FDE's start is where the record at its `pc_begin` field resolves: the field
 //! holds zero until a static link fills it. An FDE no record resolves is refused.
-//!
-//! An FDE's LSDA is read only where its CIE's personality is the import a cited r2abi row names
-//! (`r2abi::runtime::personality`); a relocatable object's personality is left unstated.
 
 use std::collections::BTreeMap;
 
@@ -68,8 +65,8 @@ pub(crate) struct Relocated<'a> {
     pub targets: &'a [(u64, u64)],
 }
 
-/// What an FDE's LSDA is read against: the loader's writes, which name the personality an
-/// indirect pointer reaches, and the file's sections, which hold the table.
+/// What an FDE's LSDA is read against (D570): the loader's writes, which name the personality an
+/// indirect pointer reaches; a relocatable object states none, so its frames read no table.
 struct Tables<'a> {
     writes: &'a [LoaderWrite],
     sections: Vec<(u64, &'a [u8])>,
