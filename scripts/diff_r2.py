@@ -27,8 +27,9 @@ Two comparison modes, because the two tools do not yet fill the same columns:
           headers name the column. A value r2s reports and radare2 does not is
           a disagreement; a value radare2 reports and r2s does not is unfilled,
           counted per corpus and command and ratcheted (`diff_r2_baseline.json`):
-          the count may fall, never rise. It is a floor, not a to-do list: it
-          also counts values judged radare2's defect. Used for the listings.
+          the count may fall, never rise. A value a `[[missed]]` entry lists, with
+          radare2's line or an open row, is judged and leaves the count (D541).
+          Used for the listings.
 
 The analysis verbs (ROADMAP D490) run after one `aa` per file per tool, in one session each,
 on the corpora ANALYSED_CORPORA names and the architectures GRADED_ARCHES names (`i`'s arch):
@@ -83,6 +84,11 @@ import time
 import tomllib
 
 VERDICTS = ("r2s-right", "r2-right", "unfilled", "deliberate")
+# A judged radare2-only value names radare2's line (6.2.4) when radare2 is wrong, an open row otherwise.
+MISSED_WITNESS = {"r2s-right": "r2_line", "r2-right": "row", "unfilled": "row"}
+R2_LINE = re.compile(r"[\w./-]+\.\w+:\d+(-\d+)?")
+ROW = re.compile(r"[A-Z]+\d+(\.\d+)*[a-z]?")
+VALUE = re.compile(r"0x[0-9a-f]+|[a-z]+")
 
 # The analysis verbs, each with its mode; the corpora and architectures they grade.
 ANALYSIS = [("afl", "entries"), ("afb", "blocks"), ("afi", "noreturn"), ("afv", "frame"), ("axt", "references")]
@@ -448,6 +454,60 @@ def load_judgments(path, table=None):
         judgment["fields"] = set(judgment.get("fields", []))
         judgment["matched"] = 0
     return judged
+
+
+def load_missed(path, table=None):
+    """The judged radare2-only values (`[[missed]]`), indexed by binary, verb and value."""
+    if table is None:
+        if not path.exists():
+            return Misses({})
+        table = tomllib.loads(path.read_text())
+    index = {}
+    for entry in table.get("missed", []):
+        witness = MISSED_WITNESS.get(entry.get("verdict"))
+        if witness is None:
+            raise ValueError("a missed value's verdict is one of {}: {!r}".format(sorted(MISSED_WITNESS), entry))
+        pattern = R2_LINE if witness == "r2_line" else ROW
+        if not entry.get("reason") or pattern.fullmatch(entry.get(witness, "")) is None:
+            raise ValueError("a {} missed value states its reason and `{}`: {!r}".format(entry["verdict"], witness, entry))
+        verbs, binaries = entry["command"], entry["binaries"]
+        for verb, binary, value in (
+            (verb, binary, value)
+            for verb in ([verbs] if isinstance(verbs, str) else verbs)
+            for binary in ([binaries] if isinstance(binaries, str) else binaries)
+            for value in entry["values"]
+        ):
+            if VALUE.fullmatch(value) is None or any(c in binary for c in "*?["):
+                raise ValueError("a missed value is listed, never a pattern: {} {}".format(binary, value))
+            key = (verb, binary, int(value, 16) if value.startswith("0x") else value)
+            if key in index:
+                raise ValueError("a missed value is judged once: {} {} {}".format(*key))
+            index[key] = entry
+    return Misses(index)
+
+
+class Misses:
+    """The judged radare2-only values, the ones a run reported, and the binaries and verbs it graded."""
+
+    def __init__(self, index):
+        self.index, self.matched, self.ran = index, set(), set()
+
+    def __len__(self):
+        return len(self.index)
+
+    def judged(self, binary, command, item):
+        """Whether an entry lists this radare2-only value; O(1)."""
+        column, value = item
+        key = (command.split()[0], binary, column if value is None else value)
+        if key not in self.index:
+            return False
+        self.matched.add(key)
+        return True
+
+
+def unmatched_misses(misses):
+    """Each listed value of a graded binary and verb that its run did not report."""
+    return sorted((key for key in misses.index if key[:2] in misses.ran and key not in misses.matched), key=str)
 
 
 def release(banner):
@@ -1226,9 +1286,13 @@ def compare(name, command, mode, left, right, judgments, corpus=None):
     return found, unjudged, missed
 
 
-def grade(corpus, binaries, commands, r2, r2s, judgments, args):
-    """One corpus: per command, binaries agreeing, judged, unjudged, and radare2-only values."""
-    tally = {command: {"agree": 0, "judged": 0, "unjudged": 0, "r2-only": 0} for command, _ in commands}
+def grade(corpus, binaries, commands, r2, r2s, judgments, args, misses=None):
+    """One corpus: per command, binaries agreeing, judged, unjudged, and radare2-only values,
+    unjudged (`r2-only`, ratcheted) and listed in `[[missed]]` (`r2-judged`)."""
+    misses = Misses({}) if misses is None else misses
+    tally = {
+        command: {"agree": 0, "judged": 0, "unjudged": 0, "r2-only": 0, "r2-judged": 0} for command, _ in commands
+    }
     unsupported, skipped = {}, []
     facts = {
         command: {"files": 0, "equal": 0, "r2s": 0, "r2": 0, "unplaced": 0}
@@ -1269,7 +1333,11 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
                     continue
 
                 found, unjudged, missed = compare(binary.name, command, mode, left, right, judgments, corpus)
+                misses.ran.add((command.split()[0], binary.name))
+                judged = [item for item in missed if misses.judged(binary.name, command, item)]
+                missed = [item for item in missed if item not in judged]
                 tally[command]["r2-only"] += len(missed)
+                tally[command]["r2-judged"] += len(judged)
                 if not found:
                     tally[command]["agree"] += 1
                 elif not unjudged:
@@ -1379,6 +1447,7 @@ def main():
         corpora[directory.name] = binaries
 
     pinned, judgments = load_table(pathlib.Path(args.judged))
+    misses = load_missed(pathlib.Path(args.judged))
     banner, _, _ = run([str(r2), "-v"], args.timeout)
     if pinned and release(banner) != pinned:
         print(
@@ -1392,14 +1461,14 @@ def main():
     unjudged, measured = 0, {}
     for corpus, binaries in corpora.items():
         print("== {} ({} binaries)".format(corpus, len(binaries)))
-        tally, unsupported, skipped, facts = grade(corpus, binaries, commands, r2, r2s, judgments, args)
-        print("\n{:<8} {:>8} {:>8} {:>8} {:>8}".format("command", "agree", "judged", "unjudged", "r2-only"))
-        print("-" * 44)
+        tally, unsupported, skipped, facts = grade(corpus, binaries, commands, r2, r2s, judgments, args, misses)
+        print("\n{:<8} {:>8} {:>8} {:>8} {:>8} {:>9}".format("command", "agree", "judged", "unjudged", "r2-only", "r2-judged"))
+        print("-" * 54)
         for command, _ in commands:
             row = tally[command]
             print(
-                "{:<8} {:>8} {:>8} {:>8} {:>8}".format(
-                    command, row["agree"], row["judged"], row["unjudged"], row["r2-only"]
+                "{:<8} {:>8} {:>8} {:>8} {:>8} {:>9}".format(
+                    command, row["agree"], row["judged"], row["unjudged"], row["r2-only"], row["r2-judged"]
                 )
             )
             unjudged += row["unjudged"]
@@ -1446,12 +1515,23 @@ def main():
             print("  {} {}: {}".format(judgment["command"], judgment["binaries"], judgment["reason"]))
         print()
 
+    # A listed radare2-only value its graded run no longer reports fails, so the table cannot outlive it.
+    gone = unmatched_misses(misses)
+    for verb, binary, value in gone:
+        print("missed value nothing reported: {} {} {}".format(verb, binary, value if isinstance(value, str) else hex(value)))
+
     # A partial corpus says nothing about the whole one's count.
     risen = []
     if args.limit is None:
         path = pathlib.Path(args.baseline)
         baseline = json.loads(path.read_text()) if path.exists() else {}
         if args.bless:
+            # A count is blessed upward only beside a refused binary r2s now opens (its misses arrive).
+            for corpus, command, before, now in ratchet(baseline, measured):
+                fell = measured[corpus]["refused"] < baseline.get(corpus, {}).get("refused", 0)
+                if before is not None and now > before and command != "refused" and not fell:
+                    print("{} {}: {} rose to {}; a rise is judged in [[missed]], never blessed".format(corpus, command, before, now))
+                    return 1
             for corpus, counts in measured.items():
                 baseline.setdefault(corpus, {}).update(counts)
             path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
@@ -1468,7 +1548,7 @@ def main():
                     print("{} {}: {} rose to {} (refused {} to {})".format(corpus, command, before, now, *refused))
                 else:
                     print("{} {}: {} fell to {}; --bless to keep it".format(corpus, command, before, now))
-    return 1 if unjudged or risen else 0
+    return 1 if unjudged or risen or gone else 0
 
 
 if __name__ == "__main__":

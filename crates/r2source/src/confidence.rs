@@ -210,6 +210,12 @@ impl Citation {
         r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).map(|_| Self(Cited::Kernel))
     }
 
+    /// The kernel source stating system call `number` never comes back under `kernel` (D505).
+    pub fn syscall(kernel: r2abi::Kernel, arch: &str, bits: u32, number: u64) -> Option<Self> {
+        r2abi::syscalls::syscall_never_returns(kernel, arch, bits, number)
+            .map(|_| Self(Cited::Kernel))
+    }
+
     /// The Go runtime model naming `name` among the routines its compiler ends a block at; what it
     /// states holds under [`Premise::GoRuntime`].
     pub fn runtime(name: &str) -> Option<Self> {

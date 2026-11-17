@@ -123,6 +123,22 @@ pub trait Walker {
         None
     }
 
+    /// Whether a finished body may end at a supervisor call its seal proves halting: it holds one,
+    /// reads no table and is not yet ended at one. `O(1)`.
+    fn may_halt(&self, _walk: &Self::Walk) -> bool {
+        false
+    }
+
+    /// Walk again a finished body that reaches no return, ending it at each supervisor call its seal
+    /// proves halting (D505); what the walk reaches, or `None` where nothing halts.
+    fn halt(
+        &self,
+        _walk: &mut Self::Walk,
+        _returns: &dyn Fn(u64, bool) -> bool,
+    ) -> Option<Transfers> {
+        None
+    }
+
     /// Where a finished body hands a function to a parameter declared to take one, and whether each is Thumb.
     fn handed(&self, walk: &Self::Walk, returns: &dyn Fn(u64, bool) -> bool) -> Vec<(u64, bool)>;
 
@@ -134,6 +150,16 @@ pub trait Walker {
     /// does; a walker that cannot say reports one unproven end.
     fn ends<'a>(&self, _walk: &'a Self::Walk) -> (Vec<&'a Never>, usize) {
         (Vec::new(), 1)
+    }
+
+    /// The function whose stated extent holds `address` past its start, where the container sizes one.
+    fn within(&self, _address: u64) -> Option<u64> {
+        None
+    }
+
+    /// Whether the walk decoded an instruction that begins at `address`.
+    fn begins(&self, _walk: &Self::Walk, _address: u64) -> bool {
+        false
     }
 }
 
@@ -235,10 +261,16 @@ pub fn functions<W: Walker>(
         fixpoint.run();
     }
     let returns = fixpoint.keyed(fixpoint.answers(fixpoint.believed.keys().copied()));
+    // An entry inside a stated extent is its owner's: walked for its callers, listed as none (D506).
+    let alternates = fixpoint.alternates();
+    fixpoint
+        .walks
+        .retain(|entry, _| !alternates.contains(entry));
     Discovery {
         functions: fixpoint
             .believed
             .into_iter()
+            .filter(|(address, _)| !alternates.contains(address))
             .map(|(address, (confidence, thumb))| Discovered {
                 address,
                 confidence,
@@ -300,6 +332,8 @@ struct Fixpoint<'w, W: Walker> {
     waiting: BTreeMap<u64, BTreeSet<(u64, Wait)>>,
     /// Bodies already read for the functions they hand on.
     read: BTreeSet<u64>,
+    /// Bodies already read for the supervisor calls that halt them.
+    halted: BTreeSet<u64>,
 }
 
 impl<'w, W: Walker> Fixpoint<'w, W> {
@@ -322,6 +356,7 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             joined: Vec::new(),
             waiting: BTreeMap::new(),
             read: BTreeSet::new(),
+            halted: BTreeSet::new(),
         }
     }
 
@@ -331,7 +366,7 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 self.tell(callee);
             } else if let Some(address) = self.pending.pop() {
                 self.walk(address);
-            } else if !self.hand_on() {
+            } else if !self.hand_on() && !self.halt_on() {
                 return;
             }
         }
@@ -479,6 +514,23 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             }
         }
         composed
+    }
+
+    /// Entries only a call or a jump offers that lie past the start of a stated extent, at an
+    /// instruction its function's walk decoded. Read once the fixpoint is done, so in any order.
+    fn alternates(&self) -> BTreeSet<u64> {
+        let offered = (self.believed.iter())
+            .filter(|(_, (held, _))| matches!(held.basis, Basis::Called | Basis::Reached));
+        let enters = |address: u64| {
+            let owner = self.walker.within(address)?;
+            let Some(Ok(walk)) = self.walks.get(&owner) else {
+                return None;
+            };
+            self.walker.begins(walk, address).then_some(address)
+        };
+        offered
+            .filter_map(|(address, _)| enters(*address))
+            .collect()
     }
 
     fn comes_back(&self, address: u64) -> bool {
@@ -644,6 +696,47 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             }
         }
         !self.pending.is_empty()
+    }
+}
+
+impl<W: Walker> Fixpoint<'_, W> {
+    /// Walk again, once each, the finished bodies that reach no return where a supervisor call
+    /// halts them (D505); whether any moved. Each body is read once, so this ends.
+    fn halt_on(&mut self) -> bool {
+        let candidates = (self.walks.iter())
+            .filter(|(_, walk)| matches!(walk, Ok(walk) if self.walker.may_halt(walk)))
+            .map(|(address, _)| *address)
+            .filter(|address| !self.returning.contains(address) && !self.halted.contains(address))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return false;
+        }
+        // A body still waiting on a callee may grow past its seal once that callee comes back.
+        let waiting = (self.waiting.values().flatten())
+            .filter(|(_, wait)| *wait == Wait::Fallthrough)
+            .map(|(caller, _)| *caller)
+            .collect::<BTreeSet<_>>();
+        let asked = (candidates.into_iter())
+            .filter(|address| !waiting.contains(address) && self.settled(*address).is_none())
+            .collect::<Vec<_>>();
+        self.halted.extend(&asked);
+        let mut moved = false;
+        for address in asked {
+            let transfers = {
+                let (walker, known, returning) = (self.walker, self.known, &self.returning);
+                let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
+                let Some(Ok(walk)) = self.walks.get_mut(&address) else {
+                    continue;
+                };
+                walker.halt(walk, &returns)
+            };
+            if let Some(transfers) = transfers {
+                let thumb = self.thumb(address);
+                self.absorb(address, thumb, transfers);
+                moved = true;
+            }
+        }
+        moved
     }
 }
 

@@ -42,6 +42,8 @@ pub(crate) struct View<'a, S: Source + 'static> {
     modes: Rc<super::requests::ModeMap>,
     /// Whether the body walked through this view is Thumb, where the query's key states it.
     walking: Option<bool>,
+    /// Whether a body's supervisor calls are sealed for the ones that halt; discovery decides its own.
+    halts: bool,
 }
 
 impl<S: Source + 'static> Clone for View<'_, S> {
@@ -53,6 +55,7 @@ impl<S: Source + 'static> Clone for View<'_, S> {
             starts: Rc::clone(&self.starts),
             modes: Rc::clone(&self.modes),
             walking: self.walking,
+            halts: self.halts,
         }
     }
 }
@@ -90,6 +93,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
             starts,
             modes,
             walking: None,
+            halts: with_modes,
         }
     }
 
@@ -356,6 +360,15 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
 
     fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
         r2source::Citation::interrupt(super::kernel(self.source().container()), arch, vector)
+    }
+
+    fn supervisor_halts(&self, entry: u64, instruction: u64) -> Option<r2source::Citation> {
+        let thumb = self.walking.unwrap_or_else(|| self.thumb_at(entry));
+        let halts = self.halts.then(|| {
+            self.db
+                .get::<super::analysis::SupervisorHalts>(&(entry, thumb))
+        });
+        halts?.ok()?.0.get(&instruction).copied()
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {

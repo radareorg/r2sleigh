@@ -142,7 +142,7 @@ impl Own {
         };
         Self {
             entry: input.function().root(),
-            name: super::rendered_name_of(input.name(), input.function().root()),
+            name: super::rendered_name_of(input.name(), input.function().cfg().entered_at()),
             params: None,
             result,
         }

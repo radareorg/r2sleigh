@@ -35,6 +35,41 @@ pub(super) fn read(
     }
 }
 
+/// One `DT_SYMTAB` entry, as the dynamic table states it (D542).
+pub(crate) struct DynamicSymbol {
+    pub index: usize,
+    pub name: String,
+    pub value: u64,
+    pub size: u64,
+    pub kind: object::SymbolKind,
+    pub section: object::SymbolSection,
+    pub weak: bool,
+    pub binding: Binding,
+    pub visibility: Visibility,
+}
+
+/// The dynamic symbols of an image no `SHT_DYNSYM` section header lists, read through the dynamic
+/// table (ELF gABI "Dynamic Section"); none where no hash table states their count.
+pub(crate) fn unsectioned_dynamic_symbols(file: &object::File<'_>) -> Vec<DynamicSymbol> {
+    match file {
+        object::File::Elf32(file) => Elf::of(file, 4).unsectioned_symbols(),
+        object::File::Elf64(file) => Elf::of(file, 8).unsectioned_symbols(),
+        _ => Vec::new(),
+    }
+}
+
+/// A symbol's kind by its `st_type`, as `object` reads a sectioned table's.
+fn symbol_kind(st_type: elf::SymbolType) -> object::SymbolKind {
+    match st_type {
+        elf::STT_OBJECT | elf::STT_COMMON => object::SymbolKind::Data,
+        elf::STT_FUNC | elf::STT_GNU_IFUNC => object::SymbolKind::Text,
+        elf::STT_SECTION => object::SymbolKind::Section,
+        elf::STT_FILE => object::SymbolKind::File,
+        elf::STT_TLS => object::SymbolKind::Tls,
+        _ => object::SymbolKind::Unknown,
+    }
+}
+
 /// Tags Android's linker reads beside the standard ones.
 const DT_ANDROID_REL: elf::DynamicTag = elf::DynamicTag(0x6000_000f);
 const DT_ANDROID_RELSZ: elf::DynamicTag = elf::DynamicTag(0x6000_0010);
@@ -517,22 +552,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 let symbol = table.symbol(object::SymbolIndex(index as usize)).ok()?;
                 (symbol, table.symbol_name(endian, symbol).ok()?)
             }
-            Symbols::Dynamic => {
-                let entry = self.tag(elf::DT_SYMENT)?;
-                let address = self
-                    .tag(elf::DT_SYMTAB)?
-                    .checked_add(u64::from(index).checked_mul(entry)?)?;
-                let offset = self.offset_of(address, entry)?;
-                let (symbol, _) =
-                    object::pod::from_bytes::<E::Sym>(self.bytes(offset, entry)).ok()?;
-                let strings = self.tag(elf::DT_STRTAB)?;
-                let length = self.tag(elf::DT_STRSZ)?;
-                let start = u64::from(symbol.st_name(endian));
-                let table = self.offset_of(strings, length)?;
-                let text = self.bytes(table, length).get(start as usize..)?;
-                let end = text.iter().position(|byte| *byte == 0)?;
-                (symbol, &text[..end])
-            }
+            Symbols::Dynamic => self.dynamic_symbol(&self.dynamic_table()?, index)?,
         };
         let name = core::str::from_utf8(name).ok()?.to_owned();
         let defined = symbol.st_shndx(endian) != elf::SHN_UNDEF;
@@ -543,6 +563,93 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             binding: binding(symbol.st_bind(), self.file.elf_header().e_ident().os_abi),
             visibility: visibility(symbol.st_visibility()),
         })
+    }
+
+    /// Where `DT_SYMTAB` begins and its entry size, and `DT_STRTAB`'s bytes, read once.
+    fn dynamic_table(&self) -> Option<(u64, u64, &'data [u8])> {
+        let (symbols, entry) = (self.tag(elf::DT_SYMTAB)?, self.tag(elf::DT_SYMENT)?);
+        let length = self.tag(elf::DT_STRSZ)?;
+        let strings = self.offset_of(self.tag(elf::DT_STRTAB)?, length)?;
+        Some((symbols, entry, self.bytes(strings, length)))
+    }
+
+    /// Entry `index` of `DT_SYMTAB` and its name in `DT_STRTAB`, as the loader reads them.
+    fn dynamic_symbol(
+        &self,
+        &(symbols, entry, strings): &(u64, u64, &'data [u8]),
+        index: u32,
+    ) -> Option<(&'data E::Sym, &'data [u8])> {
+        let address = symbols.checked_add(u64::from(index).checked_mul(entry)?)?;
+        let offset = self.offset_of(address, entry)?;
+        let (symbol, _) = object::pod::from_bytes::<E::Sym>(self.bytes(offset, entry)).ok()?;
+        let text = strings.get(symbol.st_name(self.endian) as usize..)?;
+        let end = text.iter().position(|byte| *byte == 0)?;
+        Some((symbol, &text[..end]))
+    }
+
+    /// `DT_SYMTAB`'s entries: `DT_HASH`'s `nchain`, else one past `DT_GNU_HASH`'s last chain (ends at
+    /// an odd hash); `None` where neither states it. `O((buckets + symbols) · P)`, P program headers.
+    fn dynamic_count(&self) -> Option<u32> {
+        let word = |vaddr: u64| self.file_word(vaddr, 4).map(|word| word as u32);
+        if let Some(hash) = self.tag(elf::DT_HASH) {
+            return word(hash.checked_add(4)?);
+        }
+        let gnu = self.tag(elf::DT_GNU_HASH)?;
+        let (buckets, offset, blooms) = (word(gnu)?, word(gnu + 4)?, word(gnu + 8)?);
+        let bloom = if self.file.is_64() { 8 } else { 4 };
+        let first = gnu + 16 + u64::from(blooms) * bloom;
+        let chains = first + u64::from(buckets) * 4;
+        let mut last = None;
+        for bucket in 0..u64::from(buckets) {
+            last = last.max(Some(word(first + bucket * 4)?).filter(|start| *start != 0));
+        }
+        let Some(mut index) = last else {
+            return Some(offset);
+        };
+        // The walk stops at the odd hash closing the last chain, or where no loaded word is left.
+        while word(chains + u64::from(index.checked_sub(offset)?) * 4)? & 1 == 0 {
+            index = index.checked_add(1)?;
+        }
+        index.checked_add(1)
+    }
+
+    /// Every `DT_SYMTAB` entry past the null one, where no `SHT_DYNSYM` section header lists them.
+    fn unsectioned_symbols(&self) -> Vec<DynamicSymbol> {
+        let sectioned = (self.file.elf_section_table().iter())
+            .any(|section| section.sh_type(self.endian) == elf::SHT_DYNSYM);
+        let count = (!sectioned).then(|| self.dynamic_count()).flatten();
+        let table = self.dynamic_table();
+        let os_abi = self.file.elf_header().e_ident().os_abi;
+        // A table that cannot be read whole states none of its entries.
+        (1..count.unwrap_or(0))
+            .map(|index| {
+                let (symbol, name) = self.dynamic_symbol(table.as_ref()?, index)?;
+                Some(DynamicSymbol {
+                    index: index as usize,
+                    name: String::from_utf8_lossy(name).into_owned(),
+                    value: symbol.st_value(self.endian).into(),
+                    size: symbol.st_size(self.endian).into(),
+                    kind: symbol_kind(symbol.st_type()),
+                    section: match symbol.st_shndx(self.endian) {
+                        elf::SHN_UNDEF => object::SymbolSection::Undefined,
+                        elf::SHN_ABS if symbol.st_type() == elf::STT_FILE => {
+                            object::SymbolSection::None
+                        }
+                        elf::SHN_ABS => object::SymbolSection::Absolute,
+                        elf::SHN_COMMON => object::SymbolSection::Common,
+                        // An extended index needs `SHT_SYMTAB_SHNDX`, a section this image lacks.
+                        elf::SHN_XINDEX => object::SymbolSection::None,
+                        index => {
+                            object::SymbolSection::Section(object::SectionIndex(index.0.into()))
+                        }
+                    },
+                    weak: symbol.st_bind() == elf::STB_WEAK,
+                    binding: binding(symbol.st_bind(), os_abi),
+                    visibility: visibility(symbol.st_visibility()),
+                })
+            })
+            .collect::<Option<_>>()
+            .unwrap_or_default()
     }
 
     /// The words of the global offset table the loader fills with no relocation naming them, as each psABI reserves them.

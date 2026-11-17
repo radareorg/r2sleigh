@@ -606,6 +606,18 @@ impl CFG {
         self.entered_at
     }
 
+    /// Drop the [`ENTRY_EDGE`] root once no other edge reaches the entered address, which roots
+    /// the graph there again; whether it did (D534). One predecessor query.
+    pub(crate) fn unroot_entry_edge(&mut self) -> bool {
+        let alone = self.predecessors(self.entered_at) == [ENTRY_EDGE];
+        if !self.has_entry_edge() || !alone {
+            return false;
+        }
+        self.remove_block(ENTRY_EDGE);
+        self.entry = self.entered_at;
+        true
+    }
+
     /// Whether the root is the synthetic [`ENTRY_EDGE`] block.
     pub const fn has_entry_edge(&self) -> bool {
         self.entry == ENTRY_EDGE && self.entered_at != ENTRY_EDGE

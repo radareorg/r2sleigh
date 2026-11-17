@@ -268,6 +268,46 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ConventionSeal {
     }
 }
 
+/// The supervisor calls of one body that never come back, by instruction, and the kernel source for
+/// each (D505): sealed only where the body reaches no return and holds one. Discovery decides its own.
+pub(super) struct SupervisorHalts;
+
+/// One body's halting supervisor calls; compared by identity, as an analysis is.
+#[derive(Clone, Default)]
+pub(super) struct Halting(pub(super) Arc<std::collections::BTreeMap<u64, r2source::Citation>>);
+
+impl PartialEq for Halting {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for SupervisorHalts {
+    type Key = (u64, bool);
+    type Value = Halting;
+    const NAME: &'static str = "supervisor-halts";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Halting {
+        // Lifted as discovery reads it, so this body's own walk asks for no halts and no cycle forms.
+        let view = View::new(db, false).walking(thumb);
+        let comes = crate::body::Program::returns(&view, entry, false);
+        let (false, Ok(target)) = (comes, target(&view, entry, thumb)) else {
+            return Halting::default();
+        };
+        let container = view.source().container();
+        let arch = (container.arch.name.as_str(), container.arch.bits);
+        let kernel = super::kernel(container);
+        let read = crate::isolation::isolated(|| {
+            let walk = crate::body::Lifting::start(entry, target.disasm, &view).ok()?;
+            let none = walk.supervisor_calls().is_empty();
+            let body = walk.into_body();
+            (!none).then(|| crate::native::supervisor_halts(&target, &view, kernel, arch, body))
+        });
+        Halting(Arc::new(read.ok().flatten().unwrap_or_default()))
+    }
+}
+
 /// The tables read for a body; a cycle reads as none, which is a walk following no table.
 pub(super) fn dispatch_tables<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
