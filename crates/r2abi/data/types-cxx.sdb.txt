@@ -276,12 +276,6 @@ __cxa_end_catch=func
 func.__cxa_end_catch.args=0
 func.__cxa_end_catch.ret=void
 
-__cxa_call_unexpected=func
-func.__cxa_call_unexpected.args=1
-func.__cxa_call_unexpected.arg.0=void *,exception_object
-func.__cxa_call_unexpected.noreturn=true
-func.__cxa_call_unexpected.ret=void
-
 # `std::terminate`, [[noreturn]] by [except.terminate]; and libstdc++'s
 # `std::__throw_*` (bits/functexcept.h), each __attribute__((__noreturn__)).
 # Only libstdc++ exports these; the mangling states each parameter, and

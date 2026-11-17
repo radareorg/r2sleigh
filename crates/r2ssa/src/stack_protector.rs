@@ -317,7 +317,7 @@ pub(crate) fn inserted_addresses(
             }
             if let SSAOp::IntAdd { dst, .. } | SSAOp::IntSub { dst, .. } | SSAOp::Copy { dst, .. } =
                 op
-                && func.var(*dst).is_temp()
+                && crate::var::is_lifted_temporary(func.var(*dst), func.storage_of(*dst))
             {
                 arithmetic.insert(*dst, (id, op.sources().into_iter().copied().collect()));
             }

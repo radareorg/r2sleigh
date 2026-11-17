@@ -62,11 +62,9 @@ getbsize | no glibc 2.39 header declares it
 fflagtostr | no glibc 2.39 header declares it
 
 # types-linux.sdb.txt, glibc's own.
-xalloc_die | no glibc 2.39 header declares it
 ctype_b_loc | no glibc 2.39 header declares it
 ctype_toupper_loc | no glibc 2.39 header declares it
 ctype_tolower_loc | no glibc 2.39 header declares it
-__longjmp_chk | glibc declares it only inside its fortify headers
 
 # types-cxx.sdb.txt, the C++ runtime's, read from the Itanium C++ ABI and the standard.
 _Znwm | no row names the header that declares it on `.include=`
@@ -111,11 +109,9 @@ __cxa_free_exception | no row names the header that declares it on `.include=`
 __cxa_get_exception_ptr | no row names the header that declares it on `.include=`
 __cxa_begin_catch | no row names the header that declares it on `.include=`
 __cxa_end_catch | no row names the header that declares it on `.include=`
-__cxa_call_unexpected | no installed header declares it: GCC 13's and libc++abi's cxxabi.h name it nowhere
 
 # types-darwin.sdb.txt, libSystem's own.
 tputs | no libSystem header is read for it yet
-xalloc_die | gnulib's, which no macOS SDK header declares
 access | no libSystem header is read for it yet
 prctl | no libSystem header is read for it yet
 sigaction | no libSystem header is read for it yet
@@ -128,7 +124,6 @@ waitpid | no libSystem header is read for it yet
 wait | no libSystem header is read for it yet
 waitid | no libSystem header is read for it yet
 __bzero | no libSystem header is read for it yet
-__stack_chk_fail | no macOS SDK header declares it
 acl_free | no libSystem header is read for it yet
 recvfrom | no libSystem header is read for it yet
 __maskrune | no libSystem header is read for it yet

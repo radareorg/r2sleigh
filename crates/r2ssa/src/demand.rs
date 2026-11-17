@@ -411,10 +411,8 @@ mod tests {
             r2source::Citation::runtime("runtime.gopanic").expect("the model names gopanic");
         function.record_assumed_exits(&closed(&r2source::Never::cited(cited)));
         assert!(exits_are_named(&function, &live_out));
-        for bound in [r2source::Never::unreached(), r2source::Never::uncited()] {
-            function.record_assumed_exits(&closed(&bound));
-            assert!(!exits_are_named(&function, &live_out));
-        }
+        function.record_assumed_exits(&closed(&r2source::Never::unreached()));
+        assert!(!exits_are_named(&function, &live_out));
     }
 
     /// The target of a jump out of the body may take RDX as an argument, and

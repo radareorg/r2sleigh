@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import audit_abi_rows as audit  # noqa: E402
@@ -137,6 +139,24 @@ class Prototypes(unittest.TestCase):
     def test_a_redirected_name_is_probed_as_the_function_the_header_declares(self) -> None:
         row = audit.CitedRow("__isoc23_strtol", " stdlib.h: glibc. ", "long", "stdlib.h", {0: "const char *,s"})
         self.assertIn("__typeof__(strtol)", audit.assertion(row))
+
+    def test_a_fortified_entry_point_is_probed_as_the_public_name_its_header_redirects(self) -> None:
+        row = audit.CitedRow(
+            "__longjmp_chk", " glibc. ", "void", "bits/setjmp2.h",
+            {0: "struct __jmp_buf_tag *,env", 1: "int,val"},
+        )
+        self.assertEqual(audit.headers_of(row)[-1], "setjmp.h")
+        self.assertIn("__typeof__(longjmp)", audit.assertion(row))
+        self.assertNotIn("bits/", audit.assertion(row))
+
+    def test_the_redirect_probe_reads_the_asm_label(self) -> None:
+        row = audit.CitedRow("__longjmp_chk", " glibc. ", "void", "bits/setjmp2.h", {0: "int,val"})
+        declared = 'extern void longjmp (struct __jmp_buf_tag __env[1], int __val) __asm__ ("" "{}");'
+        for linked, expected in (("__longjmp_chk", True), ("longjmp", False)):
+            preprocessed = subprocess.CompletedProcess([], 0, stdout=declared.format(linked), stderr="")
+            with mock.patch.object(audit.subprocess, "run", return_value=preprocessed) as run:
+                self.assertEqual(audit.redirected("cc", "-O2 -D_FORTIFY_SOURCE=2", row), expected)
+            self.assertIn("-E", run.call_args.args[0])
 
     def test_a_posix_type_brings_sys_types(self) -> None:
         row = audit.CitedRow("mmap64", " sys/mman.h: glibc. ", "void *", "sys/mman.h", {0: "off64_t,offset"})

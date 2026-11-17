@@ -5,11 +5,6 @@ func.tputs.arg.1=int,affcnt
 func.tputs.arg.2=void *,putc
 func.tputs.ret=int
 
-xalloc_die=func
-func.xalloc_die.args=0
-func.xalloc_die.noreturn=true
-func.xalloc_die.ret=void
-
 access=func
 func.access.args=2
 func.access.arg.0=const char *,path
@@ -97,11 +92,6 @@ func.__bzero.args=2
 func.__bzero.arg.0=void *,s
 func.__bzero.arg.1=size_t,n
 func.__bzero.ret=void
-
-__stack_chk_fail=func
-func.__stack_chk_fail.args=0
-func.__stack_chk_fail.noreturn=true
-func.__stack_chk_fail.ret=void
 
 acl_free=func
 func.acl_free.args=1

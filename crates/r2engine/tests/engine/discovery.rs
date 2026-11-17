@@ -638,16 +638,49 @@ fn a_switch_arm_that_calls_a_cited_cxx_noreturn_names_its_exit() {
     }
 }
 
-/// radare2's uncited row states `xalloc_die` noreturn; no cited source does, so the arm's call is a
-/// bound: no `noreturn` to C and no named exit (D395).
+/// gnulib's `xalloc_die` has no row (D406): the arm's call comes back, so it states no `noreturn`
+/// and names no exit.
 #[test]
-fn a_switch_arm_that_calls_an_uncited_noreturn_names_no_exit() {
+fn a_switch_arm_that_calls_an_import_no_row_states_names_no_exit() {
     let text = switch_rendered_importing(common::STUB, "xalloc_die");
-    assert!(text.contains("xalloc_die("), "{text}");
-    assert!(!text.contains("noreturn"), "{text}");
     assert!(
-        text.contains("1 call ends where only an uncited row says it never returns (unproven)"),
+        text.contains("call to xalloc_die: the import has no declaration"),
         "{text}"
+    );
+    assert!(!text.contains("noreturn"), "{text}");
+    assert!(!text.contains("never returns"), "{text}");
+}
+
+/// `caller: call import; mov eax, 7; ret`, then the import's stub at [`common::STUB`].
+fn calling_then_seven() -> &'static [u8] {
+    let mut code = vec![0xcc; 0xa0];
+    let call = (common::STUB - (BASE + 5)) as u32;
+    code[0] = 0xe8;
+    code[1..5].copy_from_slice(&call.to_le_bytes());
+    code[5..0x0b].copy_from_slice(&[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..0xa0].fill(0);
+    Box::leak(code.into_boxed_slice())
+}
+
+/// No cited row says gnulib's `xalloc_die` ends (D406), so its call comes back and the block after
+/// it is the caller's.
+#[test]
+fn code_past_a_call_no_cited_row_ends_is_in_the_body() {
+    let literal = Literal::of_code(calling_then_seven(), &[("caller", BASE, 0x0b)])
+        .importing("xalloc_die")
+        .running_on(GLIBC);
+    let mut open = OpenProgram::of(literal);
+    let info = open.function_info(BASE).expect("it is described");
+    assert!(info.noreturn.is_none(), "{:?}", info.noreturn);
+    let after = BASE + 5;
+    let blocks = (info.blocks.iter()).map(|block| (block.addr, block.size));
+    let blocks = blocks.collect::<Vec<_>>();
+    assert!(
+        blocks
+            .iter()
+            .any(|(addr, size)| (*addr..addr + size).contains(&after)),
+        "{blocks:x?}"
     );
 }
 

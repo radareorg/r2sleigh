@@ -1225,13 +1225,11 @@ pub(crate) fn declared_return(
             .and_then(|name| Citation::runtime(&name))
             .map(|citation| Return::Never(Never::cited(citation)));
     };
-    // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
-    Some(match target.imports.row(&name) {
-        Some(row) if row.noreturn => Return::Never(match Citation::of(row) {
-            Some(citation) => Never::cited(citation),
-            None => Never::uncited(),
-        }),
-        _ => Return::Comes,
+    // Only a cited row states a "never" (D485); every other call comes back.
+    let row = target.imports.row(&name).filter(|row| row.noreturn);
+    Some(match row.and_then(Citation::of) {
+        Some(citation) => Return::Never(Never::cited(citation)),
+        None => Return::Comes,
     })
 }
 

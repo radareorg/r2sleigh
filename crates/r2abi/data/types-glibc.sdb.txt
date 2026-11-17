@@ -463,6 +463,18 @@ func.__stack_chk_fail.noreturn=true
 func.__stack_chk_fail.ret=void
 func.__stack_chk_fail.cite=LSB-Core-generic 5.0, libc: void __stack_chk_fail(void)
 
+# bits/setjmp2.h lines 25-27, glibc 2.39 (setjmp/bits/setjmp2.h at tag glibc-2.39), reached through
+# setjmp.h under _FORTIFY_SOURCE: `extern void __REDIRECT_NTHNL (longjmp, (struct __jmp_buf_tag
+# __env[1], int __val), __longjmp_chk) __attribute__ ((__noreturn__));`, so a fortified `longjmp`
+# links `__longjmp_chk`, and the array parameter is a pointer.
+__longjmp_chk=func
+func.__longjmp_chk.args=2
+func.__longjmp_chk.arg.0=struct __jmp_buf_tag *,env
+func.__longjmp_chk.arg.1=int,val
+func.__longjmp_chk.noreturn=true
+func.__longjmp_chk.ret=void
+func.__longjmp_chk.include=bits/setjmp2.h
+
 # LSB 5.0 Core, generic: __libc_start_main is in the binary standard only, so no header declares
 # it. "If the main() function returns, its return value shall be passed to the exit() function":
 # the slot reads main's int. glibc passes init three arguments, so init and fini stay `func`.

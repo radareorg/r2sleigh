@@ -1,9 +1,4 @@
 
-xalloc_die=func
-func.xalloc_die.args=0
-func.xalloc_die.noreturn=true
-func.xalloc_die.ret=void
-
 off64_t=typedef
 typedef.off64_t=int64_t
 
@@ -18,13 +13,3 @@ func.ctype_toupper_loc.ret=const int **
 ctype_tolower_loc=func
 func.ctype_tolower_loc.args=0
 func.ctype_tolower_loc.ret=const int **
-
-# glibc's own fortified `__longjmp_chk`, which no header declares under its name; the
-# fortified rows a header declares cite it in types-glibc.sdb.txt (D449).
-
-__longjmp_chk=func
-func.__longjmp_chk.args=2
-func.__longjmp_chk.arg.0=void *,env
-func.__longjmp_chk.arg.1=int,val
-func.__longjmp_chk.noreturn=true
-func.__longjmp_chk.ret=void

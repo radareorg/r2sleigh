@@ -71,6 +71,17 @@ func.__cxa_rethrow.noreturn=true
 func.__cxa_rethrow.ret=void
 func.__cxa_rethrow.include=cxxabi.h
 
+# GCC 13.2 libstdc++-v3/libsupc++/unwind-cxx.h line 169 (tag releases/gcc-13.2.0), a header no
+# package installs, so no installed header declares it: `extern "C" void __cxa_call_unexpected
+# (void *) __attribute__((__noreturn__));`. LLVM 18.1.8 libcxxabi/src/cxa_personality.cpp lines
+# 1170-1173 define it `__attribute__((noreturn))` alike.
+__cxa_call_unexpected=func
+func.__cxa_call_unexpected.args=1
+func.__cxa_call_unexpected.arg.0=void *,exception_object
+func.__cxa_call_unexpected.noreturn=true
+func.__cxa_call_unexpected.ret=void
+func.__cxa_call_unexpected.cite=libstdc++-v3/libsupc++/unwind-cxx.h:169: extern "C" void __cxa_call_unexpected (void *) __attribute__((__noreturn__))
+
 # exception, GCC 13's libstdc++: `void terminate() noexcept __attribute__ ((__noreturn__))`,
 # [except.terminate]'s `[[noreturn]] void terminate() noexcept`.
 _ZSt9terminatev=func

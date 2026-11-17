@@ -1888,7 +1888,7 @@ fn substitute_constant_temporaries(
         let (temporary, literal, size) = {
             let spelled = values.var(*var);
             (
-                spelled.is_temp(),
+                crate::var::is_lifted_temporary(spelled, values.storage(*var)),
                 spelled.constant_bits().is_some(),
                 spelled.size,
             )
@@ -1947,7 +1947,8 @@ fn fold_through_definition(
     match producer {
         // A Sleigh temporary's copy is plumbing (GP-5581 reads its piece in place); a register's stays a statement.
         SSAOp::Copy { src: value, .. }
-            if const_value(values, *value).is_some() || values.var(src).is_temp() =>
+            if const_value(values, *value).is_some()
+                || crate::var::is_lifted_temporary(values.var(src), values.storage(src)) =>
         {
             subpiece(*value, u64::from(offset))
         }
@@ -2125,7 +2126,20 @@ mod sccp_tests {
         definitions: &[SSAOp],
         rule: impl FnOnce(&Op, &IdMap<VarId, Op>, &mut Minting<'_>) -> Option<Op>,
     ) -> Option<SSAOp> {
+        through_ids_stating(op, definitions, &[], rule)
+    }
+
+    /// As [`through_ids`], with `stated` variables interned at their lifted storage first.
+    fn through_ids_stating(
+        op: &SSAOp,
+        definitions: &[SSAOp],
+        stated: &[(&SSAVar, crate::CanonicalStorageId)],
+        rule: impl FnOnce(&Op, &IdMap<VarId, Op>, &mut Minting<'_>) -> Option<Op>,
+    ) -> Option<SSAOp> {
         let mut table = ValueTable::default();
+        for (var, storage) in stated {
+            table.intern_with_storage(var, *storage);
+        }
         let definitions = definitions
             .iter()
             .map(|op| op.map(&mut |var| table.intern(var)))
@@ -2148,6 +2162,33 @@ mod sccp_tests {
 
     fn fold(op: &SSAOp, definitions: &[SSAOp]) -> Option<SSAOp> {
         through_ids(op, definitions, fold_through_definition)
+    }
+
+    /// A variable spelled `tmp:` whose lifted storage is a register is a register: its copy is a
+    /// statement, not plumbing to read through (D459).
+    #[test]
+    fn a_temporary_spelling_with_register_storage_is_a_register() {
+        use crate::{CanonicalStorageId, CanonicalStorageSpace};
+        let older = SSAVar::new("RAX", 0, 8);
+        let spelled = SSAVar::new("tmp:b300", 1, 8);
+        let piece = SSAOp::Subpiece {
+            dst: SSAVar::new("tmp:22808", 1, 2),
+            src: spelled.clone(),
+            offset: 0,
+        };
+        let held = [SSAOp::Copy {
+            dst: spelled.clone(),
+            src: older,
+        }];
+        let (space, offset, size) = (CanonicalStorageSpace::Register, 0, 8);
+        let register = CanonicalStorageId {
+            space,
+            offset,
+            size,
+        };
+        let stated = [(&spelled, register)];
+        let folded = through_ids_stating(&piece, &held, &stated, fold_through_definition);
+        assert_eq!(folded, None);
     }
 
     /// A binary operation, its machine operation, and whether it yields a boolean byte.
@@ -3156,11 +3197,18 @@ mod sccp_tests {
             offset: 0,
         };
         let held = defined_by(SSAOp::Copy {
-            dst: temporary,
+            dst: temporary.clone(),
             src: older.clone(),
         });
+        let space = crate::CanonicalStorageSpace::Unique;
+        let unique = crate::CanonicalStorageId {
+            space,
+            offset: 0xb300,
+            size: 8,
+        };
+        let stated = [(&temporary, unique)];
         assert_eq!(
-            fold(&piece, &held),
+            through_ids_stating(&piece, &held, &stated, fold_through_definition),
             Some(SSAOp::Subpiece {
                 dst: SSAVar::new("tmp:22808", 1, 2),
                 src: older,

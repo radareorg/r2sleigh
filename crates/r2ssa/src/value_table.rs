@@ -266,6 +266,14 @@ impl<'t> Minting<'t> {
         }
     }
 
+    /// The lifted storage of `id`, whether the table or this minting numbered it.
+    pub(crate) fn storage(&self, id: VarId) -> Option<CanonicalStorageId> {
+        match (id.0 as usize).checked_sub(self.table.len()) {
+            Some(minted) => self.storage[minted],
+            None => self.table.storage(id),
+        }
+    }
+
     /// Everything numbered past the table, for the plan to carry.
     pub(crate) fn finish(self) -> Minted {
         Minted {
