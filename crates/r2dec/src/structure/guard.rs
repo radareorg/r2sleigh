@@ -861,6 +861,7 @@ mod tests {
         let case = |body| crate::ast::SwitchCase {
             value: CExpr::int(1),
             body,
+            test: None,
         };
         for (cases, default) in [
             (vec![case(vec![a_guard()])], None),

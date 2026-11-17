@@ -253,10 +253,12 @@ impl Writer<'_, '_> {
             switch_cases.extend(leading.iter().map(|value| SwitchCase {
                 value: CExpr::IntLit(*value as i64),
                 body: Vec::new(),
+                test: None,
             }));
             switch_cases.push(SwitchCase {
                 value: CExpr::IntLit(*last as i64),
                 body,
+                test: None,
             });
         }
         let stmt = CStmt::Switch {

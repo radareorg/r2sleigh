@@ -3,6 +3,7 @@
 //! text against the CFG, and the rewrites that shape it afterwards.
 
 pub(crate) mod certify;
+pub(crate) mod chain;
 pub(crate) mod condition;
 pub(crate) mod guard;
 pub(crate) mod latch;

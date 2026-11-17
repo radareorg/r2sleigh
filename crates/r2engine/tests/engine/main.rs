@@ -10,6 +10,7 @@ mod body;
 mod builds;
 mod call_boundary;
 mod call_tables;
+mod chain_switch;
 mod control;
 mod conventions;
 mod declared_types;

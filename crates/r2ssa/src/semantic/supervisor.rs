@@ -67,7 +67,7 @@ impl crate::SsaArtifact {
     }
 
     /// The one value `value` can hold, where the analysis proves it.
-    fn proven_constant(&self, value: ValueId) -> Option<u64> {
+    pub fn proven_constant(&self, value: ValueId) -> Option<u64> {
         let values = self.values();
         match (values.lower_bound(value), values.upper_bound(value)) {
             (Some(low), Some(high)) if low == high => Some(low),

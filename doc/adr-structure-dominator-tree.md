@@ -168,6 +168,44 @@ The unguarded form (any `return` after a conditional with two falling arms, `ret
 measured and not shipped: the CFG does not say a source wrote two returns where it wrote one, and
 `return a || b` compiles to the same merge of `1` and `b` as `if (a) return 1; return b`.
 
+### Chained switch (ROADMAP D474)
+
+An `if` chain `if (v == c1) A1 else if (v == c2) A2 ... else if (v == ck) Ak else D`, k at least 3,
+is written `switch (v) { case c1: A1 break; ... default: D }` by the last stage
+(`structure/chain.rs`), and only when all five hold:
+
+1. Each test block's branch is an equality (or an inequality with its arms swapped) of one value
+   against a constant, as r2types states it: `FunctionControlFacts::branch_for_block` gives the
+   block's `BranchPredicateFact`, whose comparison names one `ValueId` that `SsaArtifact::proven_constant`
+   does not fold and one it proves is a constant; the written literal is that constant at the
+   comparison's width. The `ValueId` is the same in every test. No fact, no rewrite.
+2. The constants are pairwise distinct at that width.
+3. Each `else` arm is exactly the next `if`: no statement stands between two tests, so nothing
+   writes the value or memory between them.
+4. `v` is written as a variable or a cast of one, so evaluating it once reads what the chain read k
+   times.
+5. No arm holds a `break` that binds outside it, which inside the new `switch` would bind there.
+
+Under these the first test that matches is the only one, so the two statements run the same arm
+for every value of `v`. A case body that can fall off its end gets a `break`; an unmarked empty
+default is dropped. The table switch path is not touched.
+
+The certificate reads the chained form from `SwitchCase::test`, the case's `if` condition carrying
+the `if`'s own statement markers. Case i's test block is entered as its `if` was: case 1 from the
+switch's arrival, case i + 1 on test i's other edge; the case is entered on the edge where the test
+says `v == ci` (`True` for `==`, `False` for `!=`), the default on test k's other edge, and the
+walker checks that each test compares the switch's expression against its case's literal and that
+the literals are distinct, else `Violation::SwitchValue`. A switch with some cases tested and some
+not is the same violation. Cost: one pass over the tree, O(statements); the certificate stays
+O(edges).
+
+As built (round 14, rd14-output-2): DecBench `switch` 132 to 147 in 13 functions; 24 of the 39
+chains a reading of the rendered tree finds stay `if` chains: 6 end in a `test r, r` branch that
+states its comparison on `r & r`, a value of its own (ROADMAP D604), 3 hold a loop `break`
+(condition 5), and 15 never reach the reader as equality links (ROADMAP D605). A case literal
+must fit the scrutinee's type below `int`, since `switch` promotes; `chain::case_literal` is the
+one reader of that, for the pass and the certificate.
+
 ### §6 Decided branches
 
 Preparation runs sparse conditional constants in `SccpMode::Decide`

@@ -873,7 +873,7 @@ r2sleigh_word_u32 fcn_401680(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
     uint32_t tmp_lane_401708_3_0_1;
     uint32_t tmp_lane_401715_3_0_1;
 
-    /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 44 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 45 statements rendered; a call reads the result (assuming closed-world) */
     {
         rcx_1 = (uint64_t)(uint32_t)arg2;
         rax_2 = (uint64_t)((uint64_t)arg1 >> (uint64_t)(uint32_t)2U);
@@ -902,31 +902,31 @@ r2sleigh_word_u32 fcn_401680(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
         {
             rdi_1 = (uint64_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x4) + (uint64_t)arg0);
             rax_11 = (uint64_t)(uint32_t)((uint32_t)arg1 & (uint32_t)3U);
-            if ((uint8_t)((uint64_t)rax_11 == (uint64_t)2U)) {
+            switch ((uint64_t)rax_11) {
+            case 2U:
                 rax_26 = 0;
                 {
                     tmp_40172f_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)1U * 1U));
                     rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U) ^ (uint32_t)rax_26);
                 }
-            } else {
-                if ((uint8_t)((uint64_t)rax_11 == (uint64_t)3U)) {
-                    tmp_401728_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)2U * 1U));
-                    rax_26 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401728_8_1 << (uint32_t)16U);
-                    {
-                        tmp_40172f_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)1U * 1U));
-                        rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U) ^ (uint32_t)rax_26);
-                    }
-                } else {
-                    if ((uint8_t)((uint64_t)rax_11 != (uint64_t)1U)) {
-                        rcx_6 = rcx_4;
-                        tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_6 ^ (uint32_t)arg1);
-                        tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU);
-                        tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U);
-                        return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401715_3_0_1);
-                    } else {
-                        rdx_6 = 0;
-                    }
+                break;
+            case 3U:
+                tmp_401728_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)2U * 1U));
+                rax_26 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401728_8_1 << (uint32_t)16U);
+                {
+                    tmp_40172f_8_1 = r2sleigh_load_u8((void*)((uint64_t)rdi_1 + (uint64_t)1U * 1U));
+                    rdx_6 = (uint64_t)(uint32_t)((uint32_t)((uint32_t)(uint8_t)tmp_40172f_8_1 << (uint32_t)8U) ^ (uint32_t)rax_26);
                 }
+                break;
+            case 1U:
+                rdx_6 = 0;
+                break;
+            default:
+                rcx_6 = rcx_4;
+                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_6 ^ (uint32_t)arg1);
+                tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU);
+                tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U);
+                return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401715_3_0_1);
             }
             {
                 tmp_4016e8_0_1 = r2sleigh_load_u8((void*)rdi_1);
