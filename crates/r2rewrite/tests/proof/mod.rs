@@ -259,6 +259,13 @@ impl<'a> Encoder<'a> {
                     }
                 }
             }
+            // Z3's own rotate, an oracle independent of `eval`'s shift-or definition.
+            TermKind::Rotate { value, count } => {
+                let v = self.encode(value);
+                let c = self.encode(count);
+                let c = c.bvurem(BV::from_u64(u64::from(width), c.get_size()));
+                v.bvrotl(resize(&c, width))
+            }
             TermKind::Compare {
                 op,
                 interpretation,

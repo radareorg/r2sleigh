@@ -293,6 +293,7 @@ pub static RULES: &[&Rule] = &[
     &shift::ASHR_ASHR,
     &shift::SHL_OVERWIDTH,
     &shift::LSHR_OVERWIDTH,
+    &shift::ROTATE,
     &mask::AND_AND,
     &mask::OR_OR,
     &mask::XOR_XOR,
