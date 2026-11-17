@@ -45,6 +45,7 @@ mod staged;
 mod start;
 mod stated_convention;
 mod structure;
+mod supervisor_calls;
 mod variadic;
 mod variadic_registers;
 mod walk;

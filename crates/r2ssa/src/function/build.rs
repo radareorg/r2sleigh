@@ -31,6 +31,7 @@ impl SSAFunction {
         Self {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
+            system_calls: BTreeSet::new(),
             callee_passes: Arc::default(),
             frame_points: None,
             promoted_slots: std::collections::BTreeSet::new(),
@@ -590,6 +591,9 @@ impl SSAFunction {
             call_preserved_carriers: None,
             supervisor_calls: arch
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
+                .unwrap_or_default(),
+            system_calls: arch
+                .map(|arch| arch.system_calls.iter().copied().collect())
                 .unwrap_or_default(),
             callee_passes: Arc::default(),
             frame_points: None,
