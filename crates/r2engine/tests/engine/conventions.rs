@@ -587,6 +587,66 @@ fn selectable(sleigh: &str, bits: u32) -> std::collections::BTreeSet<ConventionI
     picks.flatten().collect()
 }
 
+/// The bytes a model keeps and its cspec's `unaffected` list states (less the link) that differ,
+/// where no platform row speaks and no `SpecOverride::Preserved` names them: `<side> <register>`.
+fn unnamed_differences(
+    arch: &r2il::serialize::ArchSpec,
+    bits: u32,
+    kernel: Kernel,
+    profile: &LanguageProfile,
+    row: &r2abi::ConventionRow,
+) -> Option<Vec<String>> {
+    use std::collections::BTreeSet;
+    let at = (kernel, library(kernel), Default::default());
+    let model = convention_model(arch, bits, at, profile, row).ok()?;
+    let lanes = model.preserved.iter().chain(model.reserved.iter());
+    let kept = (lanes.map(|lanes| lanes.narrowed()))
+        .flat_map(|at| at.offset..at.offset + u64::from(at.size))
+        .collect::<BTreeSet<_>>();
+    let platform = r2abi::architecture_registers(&arch.name)
+        .iter()
+        .chain(r2abi::platform_registers(&arch.name, bits, kernel));
+    let spoken =
+        (platform.flat_map(|row| register_bytes(arch, row.register))).collect::<BTreeSet<_>>();
+    let link = (profile.return_address.as_deref())
+        .map_or_else(Vec::new, |name| register_bytes(arch, name));
+    let prototype = profile.default_prototype().expect("a prototype");
+    let stated = (prototype.unaffected.iter())
+        .filter_map(|storage| match storage {
+            r2sleigh_lift::profile::SpecStorage::Register(name) => Some(name),
+            r2sleigh_lift::profile::SpecStorage::Address { .. } => None,
+        })
+        .flat_map(|name| register_bytes(arch, name))
+        .filter(|byte| !link.contains(byte))
+        .collect::<BTreeSet<_>>();
+    let named = |byte: u64, side: bool| {
+        row.overrides.iter().any(|item| match *item {
+            r2abi::SpecOverride::Preserved { register, kept, .. } => {
+                kept == side && register_bytes(arch, register.0).contains(&byte)
+            }
+            _ => false,
+        })
+    };
+    let dropped = stated
+        .difference(&kept)
+        .filter(|byte| !named(**byte, false));
+    let added = kept.difference(&stated).filter(|byte| !named(**byte, true));
+    let sides = dropped
+        .map(|b| ("dropped", b))
+        .chain(added.map(|b| ("added", b)));
+    let spelled = sides
+        .filter(|(_, byte)| !spoken.contains(byte))
+        .map(|(side, byte)| {
+            let at = |reg: &&r2il::serialize::RegisterDef| {
+                reg.offset <= *byte && *byte < reg.offset + u64::from(reg.size)
+            };
+            let register = arch.registers.iter().filter(at).min_by_key(|reg| reg.size);
+            let register = register.map_or("?", |reg| reg.name.as_str());
+            format!("{side} {register}")
+        });
+    Some(spelled.collect())
+}
+
 /// D476 gate: each model keeps its cspec's `unaffected` less the link, but where a platform row
 /// speaks or a `SpecOverride::Preserved` names the difference (doc/adr-call-boundary.md, D476).
 #[test]
@@ -606,66 +666,28 @@ fn each_preserved_set_is_the_specification_s_or_names_each_difference() {
             continue;
         };
         let arch = &machine.arch;
-        for id in selectable(sleigh, bits) {
+        let models = selectable(sleigh, bits).into_iter().flat_map(|id| {
+            let specs = specifications(&machine, id.row());
+            specs
+                .into_iter()
+                .map(move |(compiler, spec)| (id, compiler, spec))
+        });
+        for (id, compiler, spec) in models {
             let row = id.row();
-            for (compiler, spec) in specifications(&machine, row) {
-                let Some(profile) = profile_of(spec, row) else {
-                    continue;
-                };
-                let kernel = match compiler {
-                    "windows" => Kernel::Windows,
-                    "apple" => Kernel::Darwin,
-                    _ => Kernel::Linux,
-                };
-                let at = (kernel, library(kernel), Default::default());
-                let Ok(model) = convention_model(arch, bits, at, &profile, row) else {
-                    continue;
-                };
-                checked.insert(format!("{sleigh}/{compiler}/{id:?}"));
-                let lanes = model.preserved.iter().chain(model.reserved.iter());
-                let kept = (lanes.map(|lanes| lanes.narrowed()))
-                    .flat_map(|at| at.offset..at.offset + u64::from(at.size))
-                    .collect::<BTreeSet<_>>();
-                let platform = r2abi::architecture_registers(&arch.name)
-                    .iter()
-                    .chain(r2abi::platform_registers(&arch.name, bits, kernel));
-                let spoken = (platform.flat_map(|row| register_bytes(arch, row.register)))
-                    .collect::<BTreeSet<_>>();
-                let link = (profile.return_address.as_deref())
-                    .map_or_else(Vec::new, |name| register_bytes(arch, name));
-                let prototype = profile.default_prototype().expect("a prototype");
-                let stated = (prototype.unaffected.iter())
-                    .filter_map(|storage| match storage {
-                        r2sleigh_lift::profile::SpecStorage::Register(name) => Some(name),
-                        r2sleigh_lift::profile::SpecStorage::Address { .. } => None,
-                    })
-                    .flat_map(|name| register_bytes(arch, name))
-                    .filter(|byte| !link.contains(byte))
-                    .collect::<BTreeSet<_>>();
-                let named = |byte: u64, side: bool| {
-                    row.overrides.iter().any(|item| match *item {
-                        r2abi::SpecOverride::Preserved { register, kept, .. } => {
-                            kept == side && register_bytes(arch, register.0).contains(&byte)
-                        }
-                        _ => false,
-                    })
-                };
-                let dropped = stated
-                    .difference(&kept)
-                    .filter(|byte| !named(**byte, false));
-                let added = kept.difference(&stated).filter(|byte| !named(**byte, true));
-                let sides = dropped
-                    .map(|b| ("dropped", b))
-                    .chain(added.map(|b| ("added", b)));
-                for (side, byte) in sides.filter(|(_, byte)| !spoken.contains(byte)) {
-                    let at = |reg: &&r2il::serialize::RegisterDef| {
-                        reg.offset <= *byte && *byte < reg.offset + u64::from(reg.size)
-                    };
-                    let register = arch.registers.iter().filter(at).min_by_key(|reg| reg.size);
-                    let register = register.map_or("?", |reg| reg.name.as_str());
-                    unnamed.insert(format!("{sleigh}/{compiler}/{id:?}: {side} {register}"));
-                }
-            }
+            let Some(profile) = profile_of(spec, row) else {
+                continue;
+            };
+            let kernel = match compiler {
+                "windows" => Kernel::Windows,
+                "apple" => Kernel::Darwin,
+                _ => Kernel::Linux,
+            };
+            let Some(differences) = unnamed_differences(arch, bits, kernel, &profile, row) else {
+                continue;
+            };
+            checked.insert(format!("{sleigh}/{compiler}/{id:?}"));
+            let at = |difference| format!("{sleigh}/{compiler}/{id:?}: {difference}");
+            unnamed.extend(differences.into_iter().map(at));
         }
     }
     for pair in [

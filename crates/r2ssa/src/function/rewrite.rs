@@ -233,10 +233,8 @@ impl SSAFunction {
             (CanonicalStorageId, u32, u32),
             (Option<SSAVar>, Vec<(u64, usize, u32)>),
         >::new();
-        // The entry registers the renamer read whole: a formal inside one of
-        // them is a lane of that root, whatever width the convention names
-        // it at -- `d1` is a lane of `z1` as much as `edi` is one of `rdi`.
-        // In variable order, which picks the first root holding a lane. O(n + k log k).
+        // A formal inside an entry register the renamer read whole is its lane (`d1` of `z1`,
+        // `edi` of `rdi`); variable order picks the first root holding one. O(n + k log k).
         let mut entry_roots = (self.values.stored())
             .filter(|(_, var, storage)| {
                 var.version == 0
@@ -350,9 +348,8 @@ impl SSAFunction {
         // Each root's declared lanes, to rebuild the root from them below.
         let mut lanes_by_root = BTreeMap::<SSAVar, (CanonicalStorageId, Vec<(SSAVar, u32)>)>::new();
         for ((root, offset, width), (root_var, reads)) in lanes {
-            // The root's entry value is the renamer's, when it named one; a
-            // fresh name would enter the family a second time.
-            // Live, not a snapshot: a root an earlier lane named is the one this lane must name too.
+            // The renamer's entry value, else the one an earlier lane named (live, not a
+            // snapshot): a fresh name would enter the family a second time.
             let root_var = root_var
                 .or_else(|| (root_vars.get(&root)).map(|held| self.var(*held).clone()))
                 .unwrap_or_else(|| {
@@ -376,15 +373,13 @@ impl SSAFunction {
             // body defines it, so it is version zero with no definition.
             let projection = SSAVar::new(name, 0, width);
             let held = self.values.intern(&root_var);
-            if self.values.storage(held).is_none() {
+            let unset = self.values.storage(held).is_none();
+            if unset {
                 self.values.set_storage(held, root);
-                if root_var.version == 0
-                    && root_vars
-                        .get(&root)
-                        .is_none_or(|least| root_var < *self.var(*least))
-                {
-                    root_vars.insert(root, held);
-                }
+            }
+            let least = (root_vars.get(&root)).is_none_or(|least| root_var < *self.var(*least));
+            if unset && root_var.version == 0 && least {
+                root_vars.insert(root, held);
             }
             let projection_id = self.values.intern(&projection);
             self.formal_projections.insert(projection_id, lane_storage);

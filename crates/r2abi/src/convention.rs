@@ -897,10 +897,12 @@ mod tests {
                 !set.citation.is_empty() && !set.registers.is_empty(),
                 "{id:?}"
             );
-            for item in row.overrides {
-                if let SpecOverride::Preserved { register, kept, .. } = *item {
-                    assert_eq!(set.holds(register), kept, "{id:?}: {register:?}");
-                }
+            let named = row.overrides.iter().filter_map(|item| match *item {
+                SpecOverride::Preserved { register, kept, .. } => Some((register, kept)),
+                _ => None,
+            });
+            for (register, kept) in named {
+                assert_eq!(set.holds(register), kept, "{id:?}: {register:?}");
             }
         }
         let sysv = ConventionId::SysVAmd64.row().preserved.expect("SysV's set");
