@@ -610,7 +610,7 @@ impl Walk {
         disasm: &r2sleigh_lift::Disassembler,
         program: &dyn crate::body::Program,
     ) -> crate::body::Pads {
-        crate::body::pads_beside(&self.root.body, disasm, program)
+        crate::body::pads_beside(&self.root.body, &dispatched(&self.tables), disasm, program)
     }
 }
 

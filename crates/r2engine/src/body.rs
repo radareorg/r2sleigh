@@ -196,15 +196,14 @@ pub struct Body {
     pub pads: Pads,
 }
 
-/// What a body's calls unwind to (D570): the blocks reached only through a landing pad.
+/// What a body's calls unwind to (D570): the blocks reached only through a landing pad. A call made
+/// only there is in no `Body::calls`; `axt` reads it from the pads' lines.
 #[derive(Debug, Clone, Default)]
 pub struct Pads {
     /// Each block no normal edge reaches, in address order; a block both flows reach is in `blocks`.
     pub blocks: Vec<BodyBlock>,
     /// Each call instruction of either flow and the pad it unwinds to, sorted.
     pub unwinds: Vec<(u64, u64)>,
-    /// The direct call targets of `blocks`, in address order; never in `Body::calls`.
-    pub calls: Vec<u64>,
 }
 
 /// One basic block: what it lifts to, the bytes it is, and where it goes.
@@ -619,15 +618,28 @@ impl Lifting {
 pub struct Trace(Walk);
 
 impl Trace {
-    /// Walk the body at `entry`, past every call the program says returns, and its calls' pads
-    /// where `pads` says (D599).
+    /// Walk the body at `entry`, past every call the program says returns.
     pub fn start(
         entry: u64,
         disasm: &Disassembler,
         program: &dyn Program,
-        pads: bool,
     ) -> Result<Self, BodyError> {
-        Walk::start(entry, disasm, program, BTreeMap::new(), Keep::Nothing, pads).map(Self)
+        Walk::start(
+            entry,
+            disasm,
+            program,
+            BTreeMap::new(),
+            Keep::Nothing,
+            false,
+        )
+        .map(Self)
+    }
+
+    /// Walk the pads of the calls walked, once the walk is done and `program` says which callees
+    /// return (D570, D599): their bytes join `spans` and `extent`.
+    pub fn walk_pads(&mut self, disasm: &Disassembler, program: &dyn Program) {
+        self.0.walks_pads = true;
+        self.0.walk_pads(disasm, program);
     }
 
     /// Continue past every call to `callee`, visiting only what is not yet decoded.
@@ -918,14 +930,6 @@ impl Walk {
             self.continues(Some(next), &mut pending, program);
         }
         self.run(pending, None, disasm, program);
-        if let Some(pads) = self.pads.as_mut() {
-            let mut pending = Vec::new();
-            for (_, next) in pads.gated.remove(&callee).unwrap_or_default() {
-                pads.continues(Some(next), &mut pending, program);
-            }
-            pads.run_beside(pending, &self.decoded, disasm, program);
-        }
-        self.walk_pads(disasm, program);
     }
 
     /// Walk every landing pad not yet decoded, where this walk walks pads at all (D599).
@@ -1030,11 +1034,6 @@ impl Walk {
     ) {
         let pending = self.told(arms, program);
         self.run(pending, None, disasm, program);
-        if let Some(pads) = self.pads.as_mut() {
-            let pending = pads.told(arms, program);
-            pads.run_beside(pending, &self.decoded, disasm, program);
-        }
-        self.walk_pads(disasm, program);
     }
 
     /// Take the arms of `arms`, and answer where the walk goes on: the arms of each dispatch it stopped at.
@@ -1787,24 +1786,22 @@ fn finish_pads(
     (pads.lifted.iter_mut()).for_each(|lifted| lifted.retain(|addr, _| !normal.contains_key(addr)));
     pads.decoded.retain(|addr, _| !normal.contains_key(addr));
     unwinds.extend(std::mem::take(&mut pads.unwinds));
-    let calls = (pads.lifted.iter().flatten())
-        .filter_map(|(_, lift)| match lift.terminator {
-            BlockTerminator::Call { target, .. } => Some(target),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
     let (walked, decodes) = pads.normal_body();
     let held = Pads {
         blocks: walked.blocks,
         unwinds: unwinds.into_iter().collect(),
-        calls: calls.into_iter().collect(),
     };
     (held, decodes)
 }
 
 /// The pads of `body`, a walk that recorded its calls' unwinds and walked none (D599): what a
 /// listing reads beside the blocks. O(body instructions + pad instructions).
-pub fn pads_beside(body: &Body, disasm: &Disassembler, program: &dyn Program) -> Pads {
+pub fn pads_beside(
+    body: &Body,
+    dispatched: &BTreeMap<u64, Vec<u64>>,
+    disasm: &Disassembler,
+    program: &dyn Program,
+) -> Pads {
     let normal = (body.blocks.iter())
         .flat_map(|block| block.lifted.instructions.iter().map(|run| (run.addr, 0)))
         .collect::<BTreeMap<_, _>>();
@@ -1815,7 +1812,7 @@ pub fn pads_beside(body: &Body, disasm: &Disassembler, program: &dyn Program) ->
         .copied()
         .collect::<BTreeMap<_, _>>();
     let link = program.return_address_register();
-    let mut walk = Walk::beside(body.entry, &BTreeMap::new(), link, Keep::Lifts, program);
+    let mut walk = Walk::beside(body.entry, dispatched, link, Keep::Lifts, program);
     walk.grow(&normal, &unwinds, disasm, program);
     finish_pads(Some(Box::new(walk)), &normal, unwinds).0
 }

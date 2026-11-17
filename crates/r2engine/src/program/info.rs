@@ -144,11 +144,19 @@ impl FunctionInfo {
     /// The same function with its landing pads' blocks and each call's unwind edge, as `afb` lists
     /// them (D570); the analysis reads neither. O((b + p) log b).
     pub(crate) fn hold_pads(&mut self, pads: &crate::body::Pads) {
-        self.blocks.extend(pads.blocks.iter().map(|block| Block {
-            addr: block.lifted.addr,
-            size: u64::from(block.lifted.size),
-            instructions: block.lifted.instructions.iter().count(),
-            successors: block.successors.len(),
+        let starts = (self.blocks.iter().map(|block| block.addr))
+            .chain(pads.blocks.iter().map(|block| block.lifted.addr))
+            .collect::<BTreeSet<_>>();
+        // An edge to no block's start is none `afb` lists: a pad rejoining inside a normal block (D598).
+        self.blocks.extend(pads.blocks.iter().map(|block| {
+            Block {
+                addr: block.lifted.addr,
+                size: u64::from(block.lifted.size),
+                instructions: block.lifted.instructions.iter().count(),
+                successors: (block.successors.iter())
+                    .filter(|(_, target)| starts.contains(target))
+                    .count(),
+            }
         }));
         self.blocks.sort_unstable_by_key(|block| block.addr);
         for &(call, pad) in &pads.unwinds {

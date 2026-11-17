@@ -8452,8 +8452,8 @@ fn a_call_through_a_folded_target_takes_the_callees_interface() {
     let calls = text.matches("fcn_1030(").count();
     assert_eq!(calls, 3, "{text}");
     // The survey walk, which keeps no lifts, folds the same call.
-    let trace = r2engine::body::Trace::start(BASE, &machine.embedded.disasm, &program, false)
-        .expect("trace");
+    let trace =
+        r2engine::body::Trace::start(BASE, &machine.embedded.disasm, &program).expect("trace");
     assert!(trace.calls().contains(&0x1030), "{:?}", trace.calls());
 }
 

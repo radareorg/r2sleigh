@@ -1008,11 +1008,19 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 unwinding: 0,
             })));
         }
-        let walker = super::returns::Walking::new(view.clone(), true)?.walking_pads();
-        let found = crate::discovery::functions(&view, seeds, &walker);
-        let keyed = (found.returns.into_iter())
+        let walker = super::returns::Walking::new(view.clone(), true)?;
+        let mut found = crate::discovery::functions(&view, seeds, &walker);
+        let keyed = (std::mem::take(&mut found.returns).into_iter())
             .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer));
         db.deposit::<super::returns::ComesBack>(keyed);
+        // Pads are walked once every return is known, so a call only a pad makes is answered (D570).
+        let returns = |callee: u64, thumb: bool| {
+            let answer = db.get::<super::returns::ComesBack>(&view.returns_key(callee, thumb));
+            answer.map_or(true, |answer| answer.comes())
+        };
+        for walk in found.walks.values_mut().flatten() {
+            walker.walk_pads(walk, &returns);
+        }
         for (vaddr, confidence) in found.placeless {
             placeless.entry(vaddr).or_insert(confidence);
         }

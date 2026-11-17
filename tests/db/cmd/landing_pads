@@ -25,10 +25,10 @@ name: sym._Z7guardedi
 size: 279
 realsz: 279
 callconv: amd64
-cyclomatic-complexity: 12
+cyclomatic-complexity: 11
 num-bbs: 12
 num-instrs: 71
-edges: 12
+edges: 11
 signature: r2sleigh_result_u32 sym._Z7guardedi (r2sleigh_word_u32 arg0);
 result: unproven (rax, Written)
 minaddr: 0x000012f0

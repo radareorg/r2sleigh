@@ -126,11 +126,12 @@ As built:
   decoded. An instruction both flows reach is the normal flow's. `Body::blocks`, `successors` and
   `calls` are byte for byte what they were; `Body::pads` holds the pad blocks, every unwind edge,
   and the calls made only there.
-- Only a reader of pads walks them (D599): the survey's trace (its extents and holders) and the
-  reference index's listed walk walk them with the normal flow, resuming with it (`open`, `follow`);
-  the analysis' walk, a return's trace and the dispatch rounds record the unwinds and walk none;
-  `pdf`, `afb` and `afi` walk the pads beside the analysis' body (`body::pads_beside`), from its
-  instructions and recorded unwinds.
+- Only a reader of pads walks them (D599): the survey walks each body's pads once its fixpoint
+  has answered every return, so a call only a pad makes is answered (its extents and holders); the
+  reference index's listed walk walks them after its normal flow; the analysis' walk, a return's
+  trace and the dispatch rounds record the unwinds and walk none; `pdf`, `afb` and `afi` walk the
+  pads beside the analysis' body and its tables (`body::pads_beside`). `afi` counts an edge only to
+  a block's start, as `afb` lists it.
 - Listing surfaces ask for both: `pdf`, `afb` (tag `u`, `EdgeKind::Unwind`), `afi`, `axt` and the
   survey's extents and holders. `pdd`, the seal and the lane passes read `Body::blocks`, and the
   proof line states `N landing pads not rendered: exceptional flow, a store read only there may be
