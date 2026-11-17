@@ -71,6 +71,8 @@ pub enum EdgeKind {
     Case,
     /// A dispatch's default.
     Default,
+    /// A call's unwind to its landing pad, as a cited personality's table states it (D570).
+    Unwind,
 }
 
 /// Each block's extent and successors, as the walk that the lines came from
@@ -81,15 +83,26 @@ type ShapeBlock = (u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>);
 struct Shape {
     blocks: Vec<ShapeBlock>,
     dispatches: std::collections::BTreeSet<u64>,
+    /// Each call and its landing pad, sorted.
+    unwinds: Vec<(u64, u64)>,
 }
 
+/// The shape of `blocks` and of the pad blocks of `pads`, with its unwind edges.
 fn shape_of(
     blocks: impl Iterator<Item = (u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>)>,
     dispatches: impl Iterator<Item = u64>,
+    pads: Option<&crate::body::Pads>,
 ) -> Shape {
+    let pad_blocks = (pads.into_iter())
+        .flat_map(|pads| &pads.blocks)
+        .map(|block| {
+            let successors = block.successors.clone();
+            (block.lifted.addr, u64::from(block.lifted.size), successors)
+        });
     Shape {
-        blocks: blocks.collect(),
+        blocks: blocks.chain(pad_blocks).collect(),
         dispatches: dispatches.collect(),
+        unwinds: pads.map(|pads| pads.unwinds.clone()).unwrap_or_default(),
     }
 }
 
@@ -224,6 +237,8 @@ pub(super) struct Survey {
     tail_callers: BTreeMap<u64, Vec<u64>>,
     /// The address after each call a walk ended at because its callee never comes back, ascending.
     after_exits: Vec<u64>,
+    /// How many walked bodies hold a call that unwinds to a landing pad (D570).
+    pub(super) unwinding: usize,
 }
 
 impl Survey {
@@ -413,8 +428,12 @@ impl<S: Source + 'static> OpenProgram<S> {
             }
         };
         let artifact = prepared.artifact().artifact();
+        let walk = self.body_of(entry).ok();
         let read = |sealed: &SealedFunctionAnalysis| {
-            super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
+            let mut info =
+                super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn);
+            (walk.as_deref()).inspect(|walk| info.hold_pads(walk.pads()));
+            info
         };
         // The frame's locals are the frame model's, whichever pipeline renders (ADR frame-model).
         self.read_sealed(entry, &prepared, read)?
@@ -504,6 +523,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let Shape {
             blocks: mut walked,
             dispatches,
+            unwinds,
         } = shape;
         walked.sort_by_key(|(address, _, _)| *address);
         for (address, size, successors) in walked {
@@ -515,11 +535,23 @@ impl<S: Source + 'static> OpenProgram<S> {
             let dispatch = held
                 .last()
                 .is_some_and(|line| dispatches.contains(&line.address));
+            let mut edges = edges_of(&successors, dispatch, |target| starts.contains(&target));
+            let calls = unwinds.partition_point(|(call, _)| *call < address)
+                ..unwinds.partition_point(|(call, _)| *call < address + size);
+            for &(_, pad) in &unwinds[calls] {
+                let edge = GraphEdge {
+                    target: pad,
+                    kind: EdgeKind::Unwind,
+                };
+                if starts.contains(&pad) && !edges.contains(&edge) {
+                    edges.push(edge);
+                }
+            }
             blocks.push(GraphBlock {
                 address,
                 size,
                 lines: held,
-                edges: edges_of(&successors, dispatch, |target| starts.contains(&target)),
+                edges,
             });
         }
         Ok(FunctionGraph {
@@ -543,7 +575,9 @@ impl<S: Source + 'static> OpenProgram<S> {
                         let successors = block.successors.clone();
                         (block.addr, u64::from(block.size), successors)
                     });
-                    let shape = shape_of(blocks, prepared.dispatches());
+                    let walk = self.body_of(entry).ok();
+                    let pads = walk.as_deref().map(crate::native::Walk::pads);
+                    let shape = shape_of(blocks, prepared.dispatches(), pads);
                     return Ok((listing, shape));
                 }
                 Err(panicked) => NativeRefusal::from(panicked),
@@ -570,7 +604,10 @@ impl<S: Source + 'static> OpenProgram<S> {
         let key = (entry, self.view().thumb_at(entry));
         let walking = (self.db.get::<super::analysis::Walked>(&key))
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
-        let lifted = walking.0.as_ref().map_err(Clone::clone)?.lifted();
+        let walk = walking.0.as_ref().map_err(Clone::clone)?;
+        let mut lifted = walk.lifted();
+        lifted.extend(walk.pads().blocks.iter().map(|block| block.lifted.clone()));
+        lifted.sort_by_key(|block| block.addr);
         let body = WalkedBody::new(entry, &lifted, target.arch);
         let proved = Proved::new(prepared);
         let answered = Answered {
@@ -612,7 +649,8 @@ impl<S: Source + 'static> OpenProgram<S> {
                         unresolved: Vec::new(),
                     }),
                 };
-                return Ok((listing, shape_of(std::iter::empty(), std::iter::empty())));
+                let shape = shape_of(std::iter::empty(), std::iter::empty(), None);
+                return Ok((listing, shape));
             }
         };
         let body = walk.body();
@@ -622,15 +660,18 @@ impl<S: Source + 'static> OpenProgram<S> {
             .filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
-        let lifted = walk.lifted();
+        let mut lifted = walk.lifted();
         let dispatches = lifted
             .iter()
-            .filter_map(|block| Some(block.switch_info.as_ref()?.switch_addr));
+            .filter_map(|block| Some(block.switch_info.as_ref()?.switch_addr))
+            .collect::<Vec<_>>();
         let blocks = (body.blocks.iter()).map(|block| {
             let successors = block.successors.clone();
             (block.lifted.addr, u64::from(block.lifted.size), successors)
         });
-        let shape = shape_of(blocks, dispatches);
+        let shape = shape_of(blocks, dispatches.into_iter(), Some(&body.pads));
+        lifted.extend(body.pads.blocks.iter().map(|block| block.lifted.clone()));
+        lifted.sort_by_key(|block| block.addr);
         let walked = WalkedBody::new(entry, &lifted, target.arch);
         let answered = Answered {
             body: Some(&walked),
@@ -961,6 +1002,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 callers: BTreeMap::new(),
                 tail_callers: BTreeMap::new(),
                 after_exits: Vec::new(),
+                unwinding: 0,
             })));
         }
         let walker = super::returns::Walking::new(view.clone(), true)?;
@@ -1001,6 +1043,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             .collect::<Vec<_>>();
         after_exits.sort_unstable();
         after_exits.dedup();
+        let unwinding = (found.walks.values())
+            .filter(|walk| walk.as_ref().is_ok_and(super::returns::BodyWalk::unwinds))
+            .count();
         let holders =
             crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
                 let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
@@ -1021,6 +1066,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             callers,
             tail_callers,
             after_exits,
+            unwinding,
         })))
     }
 }

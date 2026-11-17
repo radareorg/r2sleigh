@@ -19,6 +19,48 @@ pub struct UnwindFrame {
     pub saves: BTreeMap<u16, i64>,
     /// How control enters the frame's first address, as its first row states it.
     pub entry: FrameEntry,
+    /// Each call-site range of the frame's LSDA, absolute and sorted by start (doc/adr-radare2-function-walk.md, "Unwind edges as built").
+    pub pads: Box<[CallSiteRange]>,
+    /// Whether that table was read, and why not.
+    pub lsda: LsdaRead,
+}
+
+/// One record of a call-site table: a call whose last byte lies in `start..end` unwinds to `pad`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallSiteRange {
+    pub start: u64,
+    pub end: u64,
+    /// The landing pad; `None` where the record states 0, no cleanup and no handler.
+    pub pad: Option<u64>,
+}
+
+/// What a frame's language-specific data area states, as read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LsdaRead {
+    /// The frame names no LSDA, or its CIE states no personality.
+    #[default]
+    None,
+    /// Read under the personality row named, a declaration of the import the CIE's pointer resolves to.
+    Read(&'static crate::runtime::Personality),
+    /// The personality has a row but the table does not read.
+    Refused(LsdaRefusal),
+    /// The CIE's personality resolves to no cited row: the table's format is unstated.
+    PersonalityUnstated,
+}
+
+/// Why a table under a cited personality was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsdaRefusal {
+    /// The LSDA pointer is not mapped, or names no byte the file holds.
+    Unmapped,
+    /// An encoding the personality's reader does not state, or a field past the table's end.
+    Malformed,
+    /// The records do not end at the call-site table's stated length.
+    Length,
+    /// A call-site range outside its frame.
+    RangeOutsideFrame,
+    /// A landing pad outside every frame of the image.
+    PadOutsideFrames,
 }
 
 /// The state the call-frame information states at a frame's first address.
@@ -59,8 +101,34 @@ impl UnwindFrames {
             .filter(|frame| address < frame.end)
     }
 
+    /// The landing pad of a call whose last byte is `last`, as the unwinder looks it up from the
+    /// return address less one (GCC `eh_personality.cc`: `--ip`). O(log F + log R).
+    pub fn pad_for(&self, last: u64) -> Option<u64> {
+        let pads = &self.covering(last)?.pads;
+        let at = pads.partition_point(|range| range.start <= last);
+        let range = pads.get(at.checked_sub(1)?)?;
+        (last < range.end).then_some(range.pad).flatten()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_start.is_empty()
+    }
+
+    /// Refuse each frame's table where a landing pad lies outside every frame. O(F R log F).
+    pub fn refuse_stray_pads(&mut self) {
+        let stray = (self.frames())
+            .filter(|frame| {
+                (frame.pads.iter().filter_map(|range| range.pad))
+                    .any(|pad| self.covering(pad).is_none())
+            })
+            .map(|frame| frame.start)
+            .collect::<Vec<_>>();
+        for start in stray {
+            if let Some(frame) = self.by_start.get_mut(&start) {
+                frame.pads = Box::default();
+                frame.lsda = LsdaRead::Refused(LsdaRefusal::PadOutsideFrames);
+            }
+        }
     }
 
     /// Record a frame, keeping the first one stated at its start.

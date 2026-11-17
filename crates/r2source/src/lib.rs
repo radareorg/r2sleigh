@@ -391,6 +391,8 @@ pub struct OwnedFunctionImage {
     /// container's call-frame information states it: a fact about the frame
     /// the code builds, read from the binary rather than from the code.
     frame_saves: Box<[SourceFrameSave]>,
+    /// How many landing pads the function's calls unwind to, held apart from `blocks` (D570).
+    landing_pads: u32,
     total_source_bytes: usize,
 }
 
@@ -530,6 +532,11 @@ impl OwnedFunctionImage {
     /// offset. Empty where the container states none.
     pub fn frame_saves(&self) -> &[SourceFrameSave] {
         &self.frame_saves
+    }
+
+    /// How many landing pads no block of the image holds: exceptional flow no analysis reads (D570).
+    pub const fn landing_pads(&self) -> u32 {
+        self.landing_pads
     }
 
     pub const fn blocks(&self) -> &[OwnedFunctionBlock] {
@@ -1246,6 +1253,7 @@ mod tests {
                 data_types: None,
                 code_pointer_tables: Box::new([]),
                 frame_saves: Box::new([]),
+                landing_pads: 0,
                 entry_address: 0x1000,
                 blocks: vec![OwnedFunctionBlock {
                     address: 0x1000,

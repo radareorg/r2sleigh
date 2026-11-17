@@ -260,6 +260,7 @@ fn rendered_returning_object(declared: bool) -> String {
         signature: None,
         closed_result: None,
         frame_saves: Vec::new(),
+        landing_pads: 0,
         member_calls: Vec::new(),
     };
     let snapshot = r2source::native::capture(&machine, function).expect("a capture");

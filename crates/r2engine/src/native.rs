@@ -603,6 +603,11 @@ impl Walk {
             .collect::<Vec<_>>();
         switched(blocks, &self.tables)
     }
+
+    /// What the body's calls unwind to, held apart from its blocks (D570).
+    pub fn pads(&self) -> &crate::body::Pads {
+        &self.root.body.pads
+    }
 }
 
 /// Blocks with the cases each dispatch's table read set on the block that makes it.
@@ -731,8 +736,15 @@ pub(crate) fn listed_walk(
         tables = all;
     }
     let (mut body, decodes) = walked;
-    let blocks = std::mem::take(&mut body.blocks).into_iter();
-    let lifted = switched(blocks.map(|block| block.lifted).collect(), &tables.read);
+    // The index reads the pads' lines too: a call made only there is referenced (D570).
+    let pads = std::mem::take(&mut body.pads.blocks);
+    let mut blocks = std::mem::take(&mut body.blocks);
+    blocks.extend(pads);
+    blocks.sort_by_key(|block| block.lifted.addr);
+    let lifted = switched(
+        blocks.into_iter().map(|block| block.lifted).collect(),
+        &tables.read,
+    );
     Ok(ListedWalk {
         body,
         lifted,
@@ -2103,6 +2115,7 @@ impl Walked {
                 tail_calls: self.body.tail_calls.clone(),
                 unresolved: self.body.unresolved.clone(),
                 exits: self.body.exits.clone(),
+                pads: crate::body::Pads::default(),
             },
         }
     }
@@ -3119,6 +3132,10 @@ impl<'a> Native<'a> {
             interface,
             closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
+            landing_pads: {
+                let pads = walked.body.pads.unwinds.iter().map(|(_, pad)| *pad);
+                u32::try_from(pads.collect::<BTreeSet<_>>().len()).unwrap_or(u32::MAX)
+            },
             load: self.program.load_base(),
             member_calls,
         };

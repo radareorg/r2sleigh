@@ -12,6 +12,7 @@ mod debug;
 mod held;
 mod language;
 mod loader;
+mod lsda;
 mod pe;
 mod platform;
 mod posture;
@@ -956,7 +957,7 @@ impl Image {
             placed: &placed,
             targets: &targets,
         };
-        let unwind = unwind::read(&file, relocatable.then_some(&relocated));
+        let unwind = unwind::read(&file, relocatable.then_some(&relocated), &loader_writes);
         let languages = language::read(&file, &symbols);
 
         let mut entries = Vec::new();

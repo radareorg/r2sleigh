@@ -142,6 +142,12 @@ pub trait Program {
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         None
     }
+
+    /// The landing pad a call whose last byte is `last` unwinds to, where a cited personality's
+    /// table states one (D570); `None` where nothing does.
+    fn landing_pad(&self, _last: u64) -> Option<u64> {
+        None
+    }
 }
 
 /// One run of addresses a program maps, and what it permits there.
@@ -186,6 +192,19 @@ pub struct Body {
     pub unresolved: Vec<Unresolved>,
     /// The calls the walk ended a block at on a model's word that the callee never returns.
     pub exits: r2ssa::AssumedExits,
+    /// The exceptional flow, held apart from `blocks`: no flow reader joins it until D598.
+    pub pads: Pads,
+}
+
+/// What a body's calls unwind to (D570): the blocks reached only through a landing pad.
+#[derive(Debug, Clone, Default)]
+pub struct Pads {
+    /// Each block no normal edge reaches, in address order; a block both flows reach is in `blocks`.
+    pub blocks: Vec<BodyBlock>,
+    /// Each call instruction of either flow and the pad it unwinds to, sorted.
+    pub unwinds: Vec<(u64, u64)>,
+    /// The direct call targets of `blocks`, in address order; never in `Body::calls`.
+    pub calls: Vec<u64>,
 }
 
 /// One basic block: what it lifts to, the bytes it is, and where it goes.
@@ -668,6 +687,11 @@ impl Trace {
         (walk.gated.values().flatten().map(|(_, after)| *after)).chain(through)
     }
 
+    /// Whether a call of the body, or of its pads, unwinds to a landing pad (D570).
+    pub fn unwinds(&self) -> bool {
+        !self.0.unwinds.is_empty()
+    }
+
     /// Whether the walk decoded an instruction that begins at `address`. `O(log n)`.
     pub fn begins(&self, address: u64) -> bool {
         self.0.decoded.contains_key(&address)
@@ -683,7 +707,7 @@ impl Trace {
     /// instruction of the body and lies in no range. O(instructions).
     pub fn spans(&self) -> Vec<std::ops::Range<u64>> {
         let mut spans: Vec<std::ops::Range<u64>> = Vec::new();
-        for (&at, &size) in &self.0.decoded {
+        for (at, size) in self.0.instructions() {
             let end = at.saturating_add(u64::from(size));
             match spans.last_mut() {
                 Some(last) if last.end >= at => last.end = last.end.max(end),
@@ -698,15 +722,21 @@ impl Trace {
     /// the walk could not follow reaches nothing, so its arms are not
     /// counted either. O(instructions).
     pub fn extent(&self) -> TraceExtent {
-        let decoded = &self.0.decoded;
+        let walk = &self.0;
+        let leaders = |walk: &Walk| {
+            (walk.leaders.iter())
+                .filter(|leader| walk.decoded.contains_key(leader))
+                .count()
+        };
+        let pads = (walk.pads.as_deref()).map_or(0, |pads| {
+            (pads.leaders.iter())
+                .filter(|leader| pads.decoded.contains_key(leader))
+                .filter(|leader| !walk.decoded.contains_key(leader))
+                .count()
+        });
         TraceExtent {
-            blocks: self
-                .0
-                .leaders
-                .iter()
-                .filter(|leader| decoded.contains_key(leader))
-                .count(),
-            bytes: decoded.values().map(|size| u64::from(*size)).sum(),
+            blocks: leaders(walk) + pads,
+            bytes: walk.instructions().map(|(_, size)| u64::from(size)).sum(),
         }
     }
 }
@@ -795,6 +825,12 @@ struct Walk {
     leaving: bool,
     /// How many of `unresolved` the last ask reported.
     asked: usize,
+    /// Each call and the landing pad it unwinds to.
+    unwinds: BTreeMap<u64, u64>,
+    /// The walk of the pads, which never writes this walk's state; `None` until a call unwinds.
+    pads: Option<Box<Walk>>,
+    /// The pads this walk, as a pads' walk, was started from: each once.
+    seeded: BTreeSet<u64>,
 }
 
 impl Walk {
@@ -837,6 +873,9 @@ impl Walk {
             reached: Reached::default(),
             leaving: false,
             asked: 0,
+            unwinds: BTreeMap::new(),
+            pads: None,
+            seeded: BTreeSet::new(),
         };
         let Some(first) = walk.decode(entry, disasm, program) else {
             return Err(match walk.unresolved.last().map(|stop| stop.reason) {
@@ -849,6 +888,7 @@ impl Walk {
         };
         let (pending, previous) = walk.record(first, None, program);
         walk.run(pending, previous, disasm, program);
+        walk.walk_pads(disasm, program);
         Ok(walk)
     }
 
@@ -858,6 +898,97 @@ impl Walk {
             self.continues(Some(next), &mut pending, program);
         }
         self.run(pending, None, disasm, program);
+        if let Some(pads) = self.pads.as_mut() {
+            let mut pending = Vec::new();
+            for (_, next) in pads.gated.remove(&callee).unwrap_or_default() {
+                pads.continues(Some(next), &mut pending, program);
+            }
+            pads.run_beside(pending, &self.decoded, disasm, program);
+        }
+        self.walk_pads(disasm, program);
+    }
+
+    /// Walk every landing pad not yet decoded, and what it reaches, in the pad walk: it stops where
+    /// the normal flow decoded, which it never writes. A worklist over the pads, each walked once.
+    fn walk_pads(&mut self, disasm: &Disassembler, program: &dyn Program) {
+        loop {
+            let pads = self.pads.as_deref();
+            let held = |pad: &u64| {
+                self.decoded.contains_key(pad) || pads.is_some_and(|w| w.seeded.contains(pad))
+            };
+            let mut fresh = (self.unwinds.values())
+                .chain(pads.into_iter().flat_map(|w| w.unwinds.values()))
+                .filter(|pad| !held(pad))
+                .copied()
+                .collect::<Vec<_>>();
+            if fresh.is_empty() {
+                return;
+            }
+            fresh.sort_unstable();
+            fresh.dedup();
+            let keep = match (&self.lifted, self.decodes) {
+                (None, _) => Keep::Nothing,
+                (Some(_), false) => Keep::Lifts,
+                (Some(_), true) => Keep::Decodes,
+            };
+            let walk = self.pads.get_or_insert_with(|| {
+                Box::new(Walk::beside(
+                    self.entry,
+                    &self.dispatched,
+                    self.link.clone(),
+                    keep,
+                    program,
+                ))
+            });
+            walk.leaders.extend(fresh.iter().copied());
+            walk.seeded.extend(fresh.iter().copied());
+            walk.run_beside(fresh, &self.decoded, disasm, program);
+        }
+    }
+
+    /// An empty walk of the pads of the body at `entry`, with that body's tables.
+    fn beside(
+        entry: u64,
+        dispatched: &BTreeMap<u64, Vec<u64>>,
+        link: Option<r2il::Varnode>,
+        keep: Keep,
+        program: &dyn Program,
+    ) -> Self {
+        Self {
+            entry,
+            dispatched: dispatched.clone(),
+            link,
+            decoded: BTreeMap::new(),
+            return_addresses: BTreeMap::new(),
+            lifted: (keep != Keep::Nothing).then(BTreeMap::new),
+            decodes: keep == Keep::Decodes,
+            last: None,
+            leaders: BTreeSet::new(),
+            arms: BTreeSet::new(),
+            direct: BTreeSet::new(),
+            calls: BTreeSet::new(),
+            loads: BTreeSet::new(),
+            tail_calls: BTreeSet::new(),
+            slot_calls: BTreeMap::new(),
+            halting: BTreeSet::new(),
+            handles: Handles::default(),
+            proven: Vec::new(),
+            ends_unproven: 0,
+            holds_values: program.holds_values(),
+            falls_into: BTreeSet::new(),
+            target_contexts: BTreeMap::new(),
+            unresolved: Vec::new(),
+            gated: BTreeMap::new(),
+            nevers: BTreeMap::new(),
+            supervisor: BTreeSet::new(),
+            context: None,
+            reached: Reached::default(),
+            leaving: false,
+            asked: 0,
+            unwinds: BTreeMap::new(),
+            pads: None,
+            seeded: BTreeSet::new(),
+        }
     }
 
     /// Go on through the arms of dispatches the walk stopped at, as a walk told them from the start would.
@@ -867,6 +998,17 @@ impl Walk {
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
+        let pending = self.told(arms, program);
+        self.run(pending, None, disasm, program);
+        if let Some(pads) = self.pads.as_mut() {
+            let pending = pads.told(arms, program);
+            pads.run_beside(pending, &self.decoded, disasm, program);
+        }
+        self.walk_pads(disasm, program);
+    }
+
+    /// Take the arms of `arms`, and answer where the walk goes on: the arms of each dispatch it stopped at.
+    fn told(&mut self, arms: &BTreeMap<u64, Vec<u64>>, program: &dyn Program) -> Vec<u64> {
         let arms = arms.iter().filter(|(_, targets)| !targets.is_empty());
         // Every arm is told first, so a dispatch first reached through an arm is followed too.
         (self.dispatched).extend(arms.clone().map(|(addr, targets)| (*addr, targets.clone())));
@@ -884,14 +1026,37 @@ impl Walk {
                 self.transfer(*target, &mut pending, program);
             }
         }
-        self.run(pending, None, disasm, program);
+        pending
+    }
+
+    /// Walk on from `pending` as the pads' walk, stopping where `normal` decoded.
+    fn run_beside(
+        &mut self,
+        pending: Vec<u64>,
+        normal: &BTreeMap<u64, u32>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        self.run_outside(pending, None, Some(normal), disasm, program);
     }
 
     /// Walk on from `pending`; `previous` is the lift recorded last where `lifted` keeps none.
     fn run(
         &mut self,
+        pending: Vec<u64>,
+        previous: Option<Instruction>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        self.run_outside(pending, previous, None, disasm, program);
+    }
+
+    /// Walk on from `pending`, never into an instruction `outside` holds.
+    fn run_outside(
+        &mut self,
         mut pending: Vec<u64>,
         mut previous: Option<Instruction>,
+        outside: Option<&BTreeMap<u64, u32>>,
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
@@ -905,7 +1070,7 @@ impl Walk {
                     None => break,
                 },
             };
-            if self.decoded.contains_key(&addr) {
+            if self.decoded.contains_key(&addr) || outside.is_some_and(|o| o.contains_key(&addr)) {
                 continue;
             }
             let arm = self.arms.contains(&addr) && !self.direct.contains(&addr);
@@ -951,6 +1116,21 @@ impl Walk {
                 .next()
                 .map(|(start, _)| *start)
         })
+    }
+
+    /// Every instruction of the body and of its pads, by address; the normal flow's where both decoded.
+    /// O(instructions) without pads, O(n log n) with.
+    fn instructions(&self) -> Box<dyn Iterator<Item = (u64, u32)> + '_> {
+        let normal = self.decoded.iter().map(|(at, size)| (*at, *size));
+        let Some(pads) = self.pads.as_deref() else {
+            return Box::new(normal);
+        };
+        let pads = (pads.decoded.iter())
+            .filter(|(at, _)| !self.decoded.contains_key(at))
+            .map(|(at, size)| (*at, *size));
+        let mut all = normal.chain(pads).collect::<Vec<_>>();
+        all.sort_unstable_by_key(|(at, _)| *at);
+        Box::new(all.into_iter())
     }
 
     /// Refuse an instruction that overlaps one decoded, once per pair.
@@ -1165,6 +1345,13 @@ impl Walk {
             };
         }
 
+        // The unwinder looks a call up by its return address less one (D570), whether or not it returns.
+        if let BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } =
+            instruction.terminator
+            && let Some(pad) = program.landing_pad(next - 1)
+        {
+            self.unwinds.insert(addr, pad);
+        }
         match instruction.terminator {
             // A supervisor call or an interrupt a kernel document says never comes back (D229, D505).
             BlockTerminator::IndirectCall { .. } | BlockTerminator::Fallthrough { .. }
@@ -1385,6 +1572,39 @@ impl Walk {
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
     fn into_body(mut self) -> (Body, Vec<Decoded>) {
+        let pads = self.pads.take();
+        let unwinds = std::mem::take(&mut self.unwinds);
+        let (mut body, mut decodes) = self.normal_body();
+        if let Some(mut pads) = pads {
+            // An instruction both flows decoded is the normal flow's.
+            (pads.lifted.iter_mut())
+                .for_each(|lifted| lifted.retain(|addr, _| !self.decoded.contains_key(addr)));
+            pads.decoded
+                .retain(|addr, _| !self.decoded.contains_key(addr));
+            let mut unwinds = unwinds;
+            unwinds.extend(std::mem::take(&mut pads.unwinds));
+            let calls = (pads.lifted.iter().flatten())
+                .filter_map(|(_, lift)| match lift.terminator {
+                    BlockTerminator::Call { target, .. } => Some(target),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            let (walked, pad_decodes) = pads.normal_body();
+            decodes.extend(pad_decodes);
+            decodes.sort_by_key(|decoded| decoded.lift.addr);
+            body.pads = Pads {
+                blocks: walked.blocks,
+                unwinds: unwinds.into_iter().collect(),
+                calls: calls.into_iter().collect(),
+            };
+        } else {
+            body.pads.unwinds = unwinds.into_iter().collect();
+        }
+        (body, decodes)
+    }
+
+    /// The body of this walk's own blocks, its pads aside.
+    fn normal_body(&mut self) -> (Body, Vec<Decoded>) {
         let closed = self.closed();
         let lifted = self.lifted.take().unwrap_or_default();
         let spans = self.spans(lifted.iter().map(|(addr, lift)| (*addr, lift)), &closed);
@@ -1535,6 +1755,7 @@ impl Walk {
             tail_calls: self.tail_calls.iter().copied().collect(),
             unresolved: self.unresolved.clone(),
             exits,
+            pads: Pads::default(),
         }
     }
 }

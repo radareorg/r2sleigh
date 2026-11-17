@@ -74,3 +74,62 @@ upstream pull requests, one idea each.
    payoff, not taken: `anal.depth` 128 or 4096 finds the same functions (`aa`:
    vim 4706, ls-linux64 121; `af @ main` with `anal.calls`: vim 215, 0pack 282);
    only 8 truncated anything (0pack 273).
+
+## Unwind edges as built (D570)
+
+A call inside a call-site range of its frame's LSDA unwinds to the range's landing pad. r2abi
+states which personalities read that table, r2image reads it, and the body walk holds the pads
+apart from the normal flow (`r2engine::body::Pads`), which every analysis keeps reading alone
+until D598 states a pad's entry.
+
+Sources, quoted at the tags named:
+
+- LSB Core 5.0, generic part, 10.6 "Exception Frames", the CIE augmentation: "'P' ... indicates
+  the presence of two arguments in the Augmentation Data of the CIE. The first argument is 1-byte
+  and represents the pointer encoding used for the second argument, which is the address of a
+  personality routine handler." and "'L' ... The argument in the Augmentation Data of the CIE is
+  1-byte and represents the pointer encoding used for the argument in the Augmentation Data of the
+  FDE, which is the address of a language-specific data area (LSDA)."
+- GCC 14.2.0 `libstdc++-v3/libsupc++/eh_personality.cc`, `parse_lsda_header`:
+  `info->Start = (context ? _Unwind_GetRegionStart (context) : 0);`,
+  `if (lpstart_encoding != DW_EH_PE_omit) p = read_encoded_value (context, lpstart_encoding, p, &info->LPStart); else info->LPStart = info->Start;`,
+  `if (info->ttype_encoding != DW_EH_PE_omit) { ... p = read_uleb128 (p, &tmp); info->TType = p + tmp; }`,
+  `info->call_site_encoding = *p++; p = read_uleb128 (p, &tmp); info->action_table = p + tmp;`.
+- The same file, `PERSONALITY_FUNCTION`: `if (! ip_before_insn) --ip;`, then for each record
+  `// Note that all call-site encodings are "absolute" displacements.` `cs_start`, `cs_len`, `cs_lp`
+  read in the call-site encoding and `cs_action` as uleb128;
+  `else if (ip < info.Start + cs_start + cs_len) { if (cs_lp) landing_pad = info.LPStart + cs_lp;`.
+  GCC 14.2.0 `libgcc/unwind-c.c` (`__gcc_personality_v0`) reads the same header and loop.
+- GCC 14.2.0 `libgcc/unwind-pe.h`: `DW_EH_PE_omit 0xff`, `DW_EH_PE_uleb128 0x01`,
+  `DW_EH_PE_udata2 0x02`, `DW_EH_PE_udata4 0x03`, `DW_EH_PE_udata8 0x04`, `DW_EH_PE_sleb128 0x09`,
+  `DW_EH_PE_sdata2 0x0A`, `DW_EH_PE_sdata4 0x0B`, `DW_EH_PE_sdata8 0x0C`, `DW_EH_PE_pcrel 0x10`,
+  `DW_EH_PE_indirect 0x80`.
+- LLVM 19.1.0 `llvm/lib/CodeGen/AsmPrinter/EHStreamer.cpp`, `emitExceptionTable`: "The call-site
+  table is a list of all call sites that may throw an exception ... Each record indicates: * The
+  position of the call-site. * The position of the landing pad. * The first action record for that
+  call site. A missing entry in the call-site table indicates that a call is not supposed to throw."
+
+As built:
+
+- r2abi `runtime::PERSONALITIES` holds one cited row each for `__gxx_personality_v0` and
+  `__gcc_personality_v0`. `UnwindFrame` carries `pads` (absolute call-site ranges, sorted) and
+  `lsda` (`None`, `Read(row)`, `Refused(reason)`, `PersonalityUnstated`); `UnwindFrames::pad_for`
+  answers a call's pad from its last byte, the unwinder's `--ip`, in O(log F + log R).
+- r2image `lsda.rs` reads one table, O(table bytes), failing closed per frame: an encoding outside
+  the list, a record past the stated length (`Length`), a range outside its frame, and, once every
+  frame is read, a pad outside every frame are refused with the reason kept. The personality is the
+  import the loader writes at the CIE's indirect pointer (`DW.ref.__gxx_personality_v0`); an import's
+  name is a declaration, so pad facts rest on `Basis::Declared`. A direct pointer, an unrowed import
+  and a relocatable object's personality state no pad (`PersonalityUnstated`).
+- r2engine `body.rs`: each call, returning or not, records its pad. After the normal walk the pads
+  are walked by a second `Walk` that never writes the first and stops wherever the normal flow
+  decoded; a resumed walk (`open`, `follow`) resumes the pads' walk too. An instruction both flows
+  reach is the normal flow's. `Body::blocks`, `successors` and `calls` are byte for byte what they
+  were; `Body::pads` holds the pad blocks, every unwind edge, and the calls made only there.
+- Listing surfaces ask for both: `pdf`, `afb` (tag `u`, `EdgeKind::Unwind`), `afi`, `axt` and the
+  survey's extents and holders. `pdd`, the seal and the lane passes read `Body::blocks`, and the
+  proof line states `N landing pads not rendered: exceptional flow, a store read only there may be
+  elided`. `Escapes` refuses the closed world of an image where any body unwinds
+  (`closed-world: unwind flow unread (D598)`): no lane pass reads a call made in a pad.
+- A pad's edge back into the normal flow (a `catch` that returns) lands inside a normal block,
+  which is not split: `afb` lists no edge there. Splitting it is D598's, with the pad's entry state.

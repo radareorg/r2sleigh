@@ -926,6 +926,30 @@ impl Literal {
             end: range.end,
             saves: BTreeMap::new(),
             entry,
+            pads: Box::default(),
+            lsda: r2abi::frames::LsdaRead::None,
+        });
+        self
+    }
+
+    /// The same program with one more frame entered as a call leaves it, whose LSDA, read as
+    /// `lsda` says, states `pads` as `(start, end, pad)` call-site ranges (D570).
+    pub fn unwinding_to(
+        mut self,
+        range: Range<u64>,
+        pads: &[(u64, u64, Option<u64>)],
+        lsda: r2abi::frames::LsdaRead,
+    ) -> Self {
+        let pads = (pads.iter())
+            .map(|&(start, end, pad)| r2abi::frames::CallSiteRange { start, end, pad })
+            .collect();
+        self.container.unwind.insert(r2abi::frames::UnwindFrame {
+            start: range.start,
+            end: range.end,
+            saves: BTreeMap::new(),
+            entry: r2abi::frames::FrameEntry::Called,
+            pads,
+            lsda,
         });
         self
     }

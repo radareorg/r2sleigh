@@ -1764,6 +1764,14 @@ impl SsaArtifact {
         }
     }
 
+    /// How many landing pads the source held apart from the blocks (D570); none without a source.
+    pub fn landing_pads(&self) -> u32 {
+        match &self.provenance {
+            SsaArtifactProvenance::TrustedSource(source) => source.image().landing_pads(),
+            SsaArtifactProvenance::Manual => 0,
+        }
+    }
+
     /// The whole table, for a consumer that outlives the artifact.
     pub fn user_operations(&self) -> Arc<[String]> {
         Arc::clone(&self.spellings.user_operations)

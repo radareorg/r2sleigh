@@ -382,6 +382,10 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         let assembled = self.db.inputs().assembled();
         assembled.and_then(|held| held.link.clone())
     }
+
+    fn landing_pad(&self, last: u64) -> Option<u64> {
+        self.source().container().unwind.pad_for(last)
+    }
 }
 
 impl<S: Source + 'static> crate::native::Program for View<'_, S> {

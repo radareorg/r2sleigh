@@ -52,6 +52,8 @@ fn graph_of(session: &mut Session, entry: u64) -> Result<Graph, String> {
                     Edge::NotTaken => EdgeKind::NotTaken,
                     Edge::Case => EdgeKind::Case,
                     Edge::Default => EdgeKind::Default,
+                    // The visual graph draws normal flow; an unwind edge waits on a style (D570).
+                    Edge::Unwind => continue,
                 };
                 edges.push(GraphEdge { from, to, kind });
             }

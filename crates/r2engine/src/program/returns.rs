@@ -57,6 +57,11 @@ impl BodyWalk {
         self.trace.tail_calls().iter().copied()
     }
 
+    /// Whether a call of the body unwinds to a landing pad (D570).
+    pub(super) fn unwinds(&self) -> bool {
+        self.trace.unwinds()
+    }
+
     /// The bytes the walk decoded as this body's instructions.
     pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
         self.trace.spans()
@@ -140,6 +145,10 @@ impl crate::body::Program for Knowing<'_> {
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.program.return_address_register()
+    }
+
+    fn landing_pad(&self, last: u64) -> Option<u64> {
+        self.program.landing_pad(last)
     }
 }
 

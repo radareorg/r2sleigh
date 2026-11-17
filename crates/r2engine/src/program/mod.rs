@@ -723,6 +723,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
     }
+
+    fn landing_pad(&self, last: u64) -> Option<u64> {
+        crate::body::Program::landing_pad(&self.view(), last)
+    }
 }
 
 impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {

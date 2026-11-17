@@ -141,6 +141,33 @@ impl FunctionInfo {
         }
     }
 
+    /// The same function with its landing pads' blocks and each call's unwind edge, as `afb` lists
+    /// them (D570); the analysis reads neither. O((b + p) log b).
+    pub(crate) fn hold_pads(&mut self, pads: &crate::body::Pads) {
+        self.blocks.extend(pads.blocks.iter().map(|block| Block {
+            addr: block.lifted.addr,
+            size: u64::from(block.lifted.size),
+            instructions: block.lifted.instructions.iter().count(),
+            successors: block.successors.len(),
+        }));
+        self.blocks.sort_unstable_by_key(|block| block.addr);
+        for &(call, pad) in &pads.unwinds {
+            if self
+                .blocks
+                .binary_search_by_key(&pad, |block| block.addr)
+                .is_err()
+            {
+                continue;
+            }
+            let at = self.blocks.partition_point(|block| block.addr <= call);
+            if let Some(block) = at.checked_sub(1).map(|at| &mut self.blocks[at])
+                && call < block.addr + block.size
+            {
+                block.successors += 1;
+            }
+        }
+    }
+
     /// A function whose analysis refused: the walk's blocks, as `afb` lists them, and why.
     pub(crate) fn refused(
         entry: u64,
