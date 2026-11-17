@@ -1513,8 +1513,8 @@ pub enum GapCallee {
     Address(u64),
     /// A target computed at run time, among these functions a stated table holds (P5).
     OneOf(Vec<u64>),
-    /// A target computed at run time.
-    Indirect,
+    /// A target computed at run time, loaded from this RAM slot where its block shows one (D521).
+    Through(Option<u64>),
 }
 
 impl std::fmt::Display for GapCallee {
@@ -1526,7 +1526,8 @@ impl std::fmt::Display for GapCallee {
                 let spelled = targets.iter().map(|target| format!("{target:#x}"));
                 write!(f, "one of {}", spelled.collect::<Vec<_>>().join(", "))
             }
-            Self::Indirect => f.write_str("an indirect target"),
+            Self::Through(None) => f.write_str("an indirect target"),
+            Self::Through(Some(slot)) => write!(f, "an indirect target through [{slot:#x}]"),
         }
     }
 }

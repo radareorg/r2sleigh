@@ -2288,3 +2288,29 @@ fn a_cited_function_pointer_parameter_keeps_every_parameter_type() {
     );
     assert!(!text.contains("the parameters are a floor"), "{text}");
 }
+
+/// `f`: `call [0x1020]; ret`, the slot at 0x1020 in memory the program may write and no import binds.
+const CALL_THROUGH_AN_UNBOUND_SLOT: &[u8] = &[
+    0xff, 0x14, 0x25, 0x20, 0x10, 0x00, 0x00, // 1000 call [0x1020]
+    0xc3, // 1007 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1008 padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1020 the slot
+];
+
+/// An indirect call that loads its target from one RAM slot names that slot in its gap (D521).
+#[test]
+fn a_call_through_an_unbound_slot_names_the_slot_in_its_gap() {
+    let literal = Literal::of_code(CALL_THROUGH_AN_UNBOUND_SLOT, &[("f", BASE, 0x08)])
+        .writable_data_after(BASE + 0x20);
+    let text = OpenProgram::of(literal)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(
+        text.contains("call to an indirect target through [0x1020]: "),
+        "{text}"
+    );
+}

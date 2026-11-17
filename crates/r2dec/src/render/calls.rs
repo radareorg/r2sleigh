@@ -400,6 +400,12 @@ pub(super) fn plan(
     )
 }
 
+/// The call site r2ssa states at `inst`.
+pub(super) fn call_site(artifact: &SsaArtifact, inst: InstId) -> Option<&r2ssa::CallSiteFact> {
+    let calls = &artifact.facts().call_sites;
+    calls.by_id.get(calls.by_inst.get(inst)?)
+}
+
 /// Who the call at `inst` reaches, for the gap it leaves: the name r2types resolves, else its
 /// direct target, else a target computed at run time.
 pub(super) fn gap_callee(
@@ -407,10 +413,8 @@ pub(super) fn gap_callee(
     resolution: Option<&CalleeResolutionFacts>,
     inst: InstId,
 ) -> GapCallee {
-    let calls = &artifact.facts().call_sites;
-    let direct = (calls.by_inst.get(inst))
-        .and_then(|site| calls.by_id.get(site))
-        .and_then(|site| site.direct_target);
+    let site = call_site(artifact, inst);
+    let direct = site.and_then(|site| site.direct_target);
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
     match identity.and_then(|identity| named(identity, direct)) {
         Some((name, _)) => GapCallee::Named(name),
@@ -418,9 +422,10 @@ pub(super) fn gap_callee(
             Some(address) => GapCallee::Address(address),
             None => resolution
                 .and_then(|resolution| resolution.targets_for_callsite(inst))
-                .map_or(GapCallee::Indirect, |targets| {
-                    GapCallee::OneOf(targets.to_vec())
-                }),
+                .map_or(
+                    GapCallee::Through(site.and_then(|site| site.target_slot)),
+                    |targets| GapCallee::OneOf(targets.to_vec()),
+                ),
         },
     }
 }

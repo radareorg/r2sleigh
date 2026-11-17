@@ -225,10 +225,10 @@ fn check_residual(label: &str, residual: &Value, text: &[&str]) {
     let reason = residual["reason"].as_str();
     if residual["gap"] == "CallNotRendered" {
         let callee = callee.expect("a call gap's callee");
-        let spelled = if callee == "indirect" {
-            "an indirect target"
-        } else {
-            callee
+        let spelled = match callee {
+            "indirect" => "an indirect target".to_owned(),
+            slot if slot.starts_with('[') => format!("an indirect target through {slot}"),
+            named => named.to_owned(),
         };
         assert!(
             line.contains(&format!(": call to {spelled}: ")),

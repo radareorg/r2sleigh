@@ -1771,13 +1771,14 @@ impl<'a> Values<'a> {
 
     /// The gap a call the text states no statement for leaves: its callee and `reason`.
     fn call_gap(&self, inst: InstId, reason: CallRefusal) -> CallGap {
+        let slot = || calls::call_site(self.artifact, inst).and_then(|site| site.target_slot);
         let callee = match (self.calls.get(inst), self.unplanned.get(inst)) {
             (Some(plan), _) => match &plan.callee {
                 calls::Callee::Named { name, .. } => GapCallee::Named(name.clone()),
-                calls::Callee::Through(_) => GapCallee::Indirect,
+                calls::Callee::Through(_) => GapCallee::Through(slot()),
             },
             (None, Some(gap)) => gap.callee.clone(),
-            (None, None) => GapCallee::Indirect,
+            (None, None) => GapCallee::Through(slot()),
         };
         CallGap { callee, reason }
     }
