@@ -1,0 +1,71 @@
+{
+ "bias": "0x555555556000",
+ "binary": "diffutils/cmp",
+ "cells": {
+  "0x2aaaab2ab980": "00ba2aabaa2a000078152babaa2a0000e0522eabaa2a0000c0582eabaa2a000060912eabaa2a0000b04a2eabaa2a000020ba2aab02000000b0b92aabaa2a0000"
+ },
+ "command": [
+  "cmp",
+  "text.txt",
+  "other.txt"
+ ],
+ "entry": "0x8d68",
+ "function": "0x8d68",
+ "machine": {
+  "results": {
+   "RAX": "0x55555555ed68",
+   "XMM0": "0xffffffffffffffffffffffffffffffff"
+  },
+  "returned_to": "0x2aaaab2b1578",
+  "store_trace": false,
+  "writes": []
+ },
+ "registers": {
+  "AF": "0x0",
+  "CF": "0x0",
+  "DF": "0x0",
+  "FS_OFFSET": "0x80010001",
+  "GS_OFFSET": "0x0",
+  "IF": "0x1",
+  "OF": "0x0",
+  "PF": "0x0",
+  "R10": "0x2aaaab2ab93f",
+  "R11": "0x2aaaab2ab940",
+  "R12": "0x0",
+  "R13": "0x2aaaab2e4a08",
+  "R14": "0x0",
+  "R15": "0x2aaaab2e52e0",
+  "R8": "0x2aaaab2ab990",
+  "R9": "0x0",
+  "RAX": "0x55555555ed68",
+  "RBP": "0x2aaaab2aba00",
+  "RBX": "0x2aaaab2e4000",
+  "RCX": "0x0",
+  "RDI": "0x555555563028",
+  "RDX": "0x555555562ba0",
+  "RSI": "0x0",
+  "RSP": "0x2aaaab2ab988",
+  "SF": "0x0",
+  "TF": "0x0",
+  "XMM0": "0xffffffffffffffffffffffffffffffff",
+  "XMM1": "0xffffffff",
+  "XMM10": "0x0",
+  "XMM11": "0x0",
+  "XMM12": "0x0",
+  "XMM13": "0x1f80",
+  "XMM2": "0xffffffffffffffffffffffffffffffff",
+  "XMM3": "0xffffffff",
+  "XMM4": "0xffffffff",
+  "XMM5": "0x0",
+  "XMM6": "0x0",
+  "XMM7": "0x0",
+  "XMM8": "0x0",
+  "XMM9": "0x0",
+  "ZF": "0x0"
+ },
+ "results": [
+  "RAX",
+  "XMM0"
+ ],
+ "sha256": "8f51b364d5ecc8e7691009a9456e3cd9ab92bfaa5a055614a6214df7fcceb512"
+}

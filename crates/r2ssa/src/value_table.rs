@@ -36,11 +36,28 @@ impl crate::dense::DenseId for VarId {
 pub struct ValueTable {
     vars: Vec<SSAVar>,
     /// The lifted storage each variable was read from or written to, where
-    /// the lift stated one: the one owner of that fact, a column beside the
-    /// variable rather than a second map keyed by its name.
-    storage: Vec<Option<CanonicalStorageId>>,
+    /// the lift stated one: a column beside the variable, never a map keyed by its name.
+    storage: Vec<Lifted>,
     /// Each variable's id by its hash, compared against `vars`: the variable is held once.
     index: crate::dense::HashIndex,
+}
+
+/// What the lift stated of one variable's storage. A variable recorded with two
+/// storages states none (`Ambiguous`), and a later record does not revive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lifted {
+    Unset,
+    One(CanonicalStorageId),
+    Ambiguous,
+}
+
+impl Lifted {
+    fn stated(self) -> Option<CanonicalStorageId> {
+        match self {
+            Self::One(storage) => Some(storage),
+            Self::Unset | Self::Ambiguous => None,
+        }
+    }
 }
 
 impl ValueTable {
@@ -59,7 +76,7 @@ impl ValueTable {
         }
         let id = VarId(u32::try_from(self.vars.len()).expect("fewer than 2^32 variables"));
         self.vars.push(var.clone());
-        self.storage.push(None);
+        self.storage.push(Lifted::Unset);
         let vars = &self.vars;
         (self.index).insert(id.0, var.index_hash(), |at| vars[at as usize].index_hash());
         id
@@ -67,7 +84,9 @@ impl ValueTable {
 
     /// The lifted storage of `id`, where one was stated.
     pub fn storage(&self, id: VarId) -> Option<CanonicalStorageId> {
-        self.storage.get(id.0 as usize).copied().flatten()
+        self.storage
+            .get(id.0 as usize)
+            .and_then(|held| held.stated())
     }
 
     /// The lifted storage of `var`, where it is interned and one was stated.
@@ -77,7 +96,19 @@ impl ValueTable {
 
     /// State `id`'s lifted storage.
     pub(crate) fn set_storage(&mut self, id: VarId, storage: CanonicalStorageId) {
-        self.storage[id.0 as usize] = Some(storage);
+        self.storage[id.0 as usize] = Lifted::One(storage);
+    }
+
+    /// Intern `var` and record that the lift stated `storage` for it: a second,
+    /// different storage leaves it stating none. `O(1)` expected.
+    pub(crate) fn record_storage(&mut self, var: &SSAVar, storage: CanonicalStorageId) {
+        let id = self.intern(var);
+        let held = &mut self.storage[id.0 as usize];
+        *held = match *held {
+            Lifted::Unset => Lifted::One(storage),
+            Lifted::One(stated) if stated != storage => Lifted::Ambiguous,
+            kept => kept,
+        };
     }
 
     /// Intern `var` and state its storage.
@@ -91,19 +122,11 @@ impl ValueTable {
         id
     }
 
-    /// Every variable with a stated storage, ordered by the variable: a
-    /// snapshot for the seal's few passes that take the first match among
-    /// them, so the match does not depend on interning order. `O(n log n)`,
-    /// once per pass.
-    pub(crate) fn storage_by_var(&self) -> Vec<(&SSAVar, CanonicalStorageId)> {
-        let mut held = self
-            .vars
-            .iter()
-            .zip(&self.storage)
-            .filter_map(|(var, storage)| Some((var, (*storage)?)))
-            .collect::<Vec<_>>();
-        held.sort_unstable_by_key(|(a, _)| *a);
-        held
+    /// Every variable with a stated storage, by id. A reader whose answer
+    /// depends on order orders its own survivors.
+    pub(crate) fn stored(&self) -> impl Iterator<Item = (VarId, &SSAVar, CanonicalStorageId)> {
+        (self.vars.iter().zip(&self.storage).enumerate())
+            .filter_map(|(at, (var, held))| Some((VarId::from_len(at), var, held.stated()?)))
     }
 
     /// The variable an id is spelled as.
@@ -144,7 +167,8 @@ impl ValueTable {
             let id = VarId::from_len(self.vars.len());
             let hash = var.index_hash();
             self.vars.push(var);
-            self.storage.push(storage);
+            self.storage
+                .push(storage.map_or(Lifted::Unset, Lifted::One));
             let vars = &self.vars;
             (self.index).insert(id.0, hash, |at| vars[at as usize].index_hash());
         }
@@ -239,6 +263,14 @@ impl<'t> Minting<'t> {
         match index.checked_sub(self.table.len()) {
             Some(minted) => &self.vars[minted],
             None => self.table.var(id),
+        }
+    }
+
+    /// The lifted storage of `id`, whether the table or this minting numbered it.
+    pub(crate) fn storage(&self, id: VarId) -> Option<CanonicalStorageId> {
+        match (id.0 as usize).checked_sub(self.table.len()) {
+            Some(minted) => self.storage[minted],
+            None => self.table.storage(id),
         }
     }
 

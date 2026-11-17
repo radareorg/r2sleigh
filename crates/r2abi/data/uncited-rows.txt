@@ -5,37 +5,20 @@
 # name | why it is uncited
 
 # types.sdb.txt, the portable table.
-arc4random | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 srandomdev | no glibc 2.39 header declares it
 strtonum | no glibc 2.39 header declares it
-ioctl | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 main | the program's own function, no library's
 xmalloc | no glibc 2.39 header declares it
 reallocf | no glibc 2.39 header declares it
 user_from_uid | no glibc 2.39 header declares it
 group_from_gid | no glibc 2.39 header declares it
-dcgettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-dcngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-dgettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-dngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-gettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-ngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 compat_mode | no glibc 2.39 header declares it
 getprogname | no glibc 2.39 header declares it
-strlcpy | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-usleep | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-bind | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-imaxdiv | a record or an array typedef by value, which the row reader does not spell
+imaxdiv | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
 maskrune | no glibc 2.39 header declares it
-fesetexceptflag | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-fesetenv | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-feupdateenv | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-localeconv | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 signbit | a macro of ISO C17 <math.h>, no function
 fpclassify | a macro of ISO C17 <math.h>, no function
 isfinite | a macro of ISO C17 <math.h>, no function
-isinf | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-isnan | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 isnormal | a macro of ISO C17 <math.h>, no function
 isgreater | a macro of ISO C17 <math.h>, no function
 isgreaterequal | a macro of ISO C17 <math.h>, no function
@@ -43,39 +26,19 @@ isless | a macro of ISO C17 <math.h>, no function
 islessequal | a macro of ISO C17 <math.h>, no function
 islessgreater | a macro of ISO C17 <math.h>, no function
 isunordered | a macro of ISO C17 <math.h>, no function
-longjmp | a record or an array typedef by value, which the row reader does not spell
-bsearch | a function pointer parameter, which the row reader does not spell
-qsort | a function pointer parameter, which the row reader does not spell
-div | a record or an array typedef by value, which the row reader does not spell
-ldiv | a record or an array typedef by value, which the row reader does not spell
-lldiv | a record or an array typedef by value, which the row reader does not spell
-bzero | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-memmem | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+div | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
+ldiv | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
+lldiv | returns a record by value, a class with no rendered witness: cited, `ldiv` renders its parameters `r2sleigh_word_u64` and reads RDX as a residual (D449)
 fts_open_INODE64 | no glibc 2.39 header declares it
 fts_read_INODE64 | no glibc 2.39 header declares it
 fts_close_INODE64 | no glibc 2.39 header declares it
 fts_set_INODE64 | no glibc 2.39 header declares it
 fts_children_INODE64 | no glibc 2.39 header declares it
-mktime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-asctime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-gmtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-localtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-strftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-wcsftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 gets | ISO C11 removed it, and no mode of glibc 2.39's <stdio.h> declares it
-inet_aton | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-inet_ntoa | a record or an array typedef by value, which the row reader does not spell
-connect | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+inet_ntoa | takes a record by value, a class with no rendered witness: a cited `ldiv` renders its parameters `r2sleigh_word_u64` (D449)
 strmode | no glibc 2.39 header declares it
 tgoto | no glibc 2.39 header declares it
-basename | POSIX <libgen.h> and GNU <string.h> declare two functions of this name
 humanize_number | no glibc 2.39 header declares it
-pututxline | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-mktemp | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-bindtextdomain | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-textdomain | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-setjmp | a record or an array typedef by value, which the row reader does not spell
-ptrace | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 swift_bridgeObjectRelease | no glibc 2.39 header declares it
 swift_endAccess | no glibc 2.39 header declares it
 swift_release | no glibc 2.39 header declares it
@@ -95,29 +58,13 @@ tgetent | no glibc 2.39 header declares it
 tgetflag | no glibc 2.39 header declares it
 tgetstr | no glibc 2.39 header declares it
 tgetnum | no glibc 2.39 header declares it
-listxattr | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-getopt_long | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 getbsize | no glibc 2.39 header declares it
 fflagtostr | no glibc 2.39 header declares it
-sigprocmask | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-fflush_unlocked | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-utime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-utimes | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 
 # types-linux.sdb.txt, glibc's own.
-xalloc_die | no glibc 2.39 header declares it
 ctype_b_loc | no glibc 2.39 header declares it
 ctype_toupper_loc | no glibc 2.39 header declares it
 ctype_tolower_loc | no glibc 2.39 header declares it
-stat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-lstat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-fstat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-__fgets_chk | glibc declares it only inside its fortify headers
-__fread_chk | glibc declares it only inside its fortify headers
-__read_chk | glibc declares it only inside its fortify headers
-__realpath_chk | glibc declares it only inside its fortify headers
-__longjmp_chk | glibc declares it only inside its fortify headers
-__fdelt_chk | glibc declares it only inside its fortify headers
 
 # types-cxx.sdb.txt, the C++ runtime's, read from the Itanium C++ ABI and the standard.
 _Znwm | no row names the header that declares it on `.include=`
@@ -162,11 +109,9 @@ __cxa_free_exception | no row names the header that declares it on `.include=`
 __cxa_get_exception_ptr | no row names the header that declares it on `.include=`
 __cxa_begin_catch | no row names the header that declares it on `.include=`
 __cxa_end_catch | no row names the header that declares it on `.include=`
-__cxa_call_unexpected | no installed header declares it: GCC 13's and libc++abi's cxxabi.h name it nowhere
 
 # types-darwin.sdb.txt, libSystem's own.
 tputs | no libSystem header is read for it yet
-xalloc_die | gnulib's, which no macOS SDK header declares
 access | no libSystem header is read for it yet
 prctl | no libSystem header is read for it yet
 sigaction | no libSystem header is read for it yet
@@ -179,7 +124,6 @@ waitpid | no libSystem header is read for it yet
 wait | no libSystem header is read for it yet
 waitid | no libSystem header is read for it yet
 __bzero | no libSystem header is read for it yet
-__stack_chk_fail | no macOS SDK header declares it
 acl_free | no libSystem header is read for it yet
 recvfrom | no libSystem header is read for it yet
 __maskrune | no libSystem header is read for it yet

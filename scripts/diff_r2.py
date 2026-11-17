@@ -30,6 +30,26 @@ Two comparison modes, because the two tools do not yet fill the same columns:
           the count may fall, never rise. It is a floor, not a to-do list: it
           also counts values judged radare2's defect. Used for the listings.
 
+The analysis verbs (ROADMAP D490) run after one `aa` per file per tool, in one session each,
+on the corpora ANALYSED_CORPORA names and the architectures GRADED_ARCHES names (`i`'s arch):
+
+  entries     `afl`: the set of function entries. One r2s lists alone is a disagreement; one
+              radare2 lists alone is unfilled, counted and ratcheted, and judged by class.
+  blocks      `afb`: each sampled function's set of (address, size), both directions.
+  noreturn    `afi`: the noreturn bit. r2s `true` against radare2 `false`, and radare2 `true`
+              against r2s not `true` (`unproven`, or no line), are disagreements.
+  frame       `afv`: frame offsets from the stack pointer at entry, and argument registers by
+              their whole register (ARGUMENT_REGISTERS). radare2's offset is its own var delta
+              (radare2 6.2.4 var.c: `afvj` sp offset minus `afi`'s stackframe; a bp var's delta
+              from `afvf`, its bp offset fixed by the function's other vars), both directions.
+  references  `axt`: each referencing address, for each sampled function and SAMPLED_FUNCTIONS
+              import slots `is` states. r2s-only is a disagreement; radare2-only is unfilled.
+
+The sample is `aoj`'s: each entry point `ie` states and SAMPLED_FUNCTIONS of the entries both
+tools list, evenly spaced by address. A session may run ANALYSIS_TIMEOUT seconds (or --timeout, if longer):
+pumasim's takes 32 s on an M-series Mac and about 90 s on a 4-core x86-64 host. A file either session
+times out on is skipped and counted.
+
 Every disagreement is either judged in `diff_r2_judged.toml` (who is right,
 and why) or fails the run; a judgment nothing matches any more is reported, so
 the table cannot outlive what it judged (ROADMAP P11). The judgments were made
@@ -48,17 +68,57 @@ Usage:
 """
 
 import argparse
+import bisect
 import concurrent.futures
 import os
 import fnmatch
 import json
 import pathlib
 import re
+import signal
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 
 VERDICTS = ("r2s-right", "r2-right", "unfilled", "deliberate")
+
+# The analysis verbs, each with its mode; the corpora and architectures they grade.
+ANALYSIS = [("afl", "entries"), ("afb", "blocks"), ("afi", "noreturn"), ("afv", "frame"), ("axt", "references")]
+ANALYSED_CORPORA = ("elf",)
+ANALYSIS_TIMEOUT = 300
+GRADED_ARCHES = ("x86-64", "AArch64")
+# Frame facts with no stated entry offset: r2s's `fp-`, `realigned.sp-` and offsetless stack formals,
+# radare2's bp var two bp offsets explain. Counted, not compared (ROADMAP D490, D507).
+UNPLACED = ("base", "formal", "unstated")
+# Fences a session's answers: `<FENCE> <verb> <address>` before each.
+SESSION_FENCE = "diff-r2"
+
+# A part of a register by its whole register: x86-64's 32, 16 and 8-bit names, AArch64's w.
+ARGUMENT_REGISTERS = {
+    **{
+        part: "r" + whole
+        for whole in ("ax", "bx", "cx", "dx", "si", "di", "bp", "sp")
+        for part in ("e" + whole, whole)
+    },
+    **{low: "r" + whole for whole, low in (("ax", "al"), ("bx", "bl"), ("cx", "cl"), ("dx", "dl"))},
+    **{low: "r" + whole for whole, low in (("si", "sil"), ("di", "dil"), ("bp", "bpl"), ("sp", "spl"))},
+    **{"r{}{}".format(n, s): "r{}".format(n) for n in range(8, 16) for s in "dwb"},
+    **{"w{}".format(n): "x{}".format(n) for n in range(31)},
+    # Sleigh's low quadword and doubleword lanes of an SSE register (a double or float argument).
+    **{"xmm{}_{}".format(n, lane): "xmm{}".format(n) for n in range(16) for lane in ("qa", "da")},
+}
+
+# The bytes a C type r2s's `afv` spells occupies, where the spelling alone states it: the extent
+# `frame_witness` measures an offset radare2 lists inside an r2s object against.
+TYPE_BYTES = {
+    **{name: 1 for name in ("char", "bool", "_Bool", "int8_t", "uint8_t")},
+    **{name: 2 for name in ("short", "int16_t", "uint16_t")},
+    **{name: 4 for name in ("int", "float", "int32_t", "uint32_t", "__uint32_t", "unsigned int")},
+    **{name: 8 for name in ("long", "double", "size_t", "int64_t", "uint64_t", "__uint64_t", "long long")},
+    **{name: 16 for name in ("__int128_t", "__uint128_t")},
+}
 
 # Command, comparison mode. The seek is issued to both so the cursor agrees.
 COMMANDS = [
@@ -69,6 +129,7 @@ COMMANDS = [
     ("iS", "values"),
     ("is", "values"),
     ("aoj", "registers"),
+    *ANALYSIS,
 ]
 
 # The keys of `i` that pairs mode grades: the container's posture, under radare2's names.
@@ -460,6 +521,14 @@ def judgment_for(judgments, binary, command, difference, corpus=None):
                     for key in ("arch", "refused", "ours", "theirs")
                 )
             )
+        elif kind == "fact":
+            _, _, _, lacking, mine, other, context = detail
+            covered = (
+                judgment.get("lacking", lacking) == lacking
+                and re.search(judgment.get("r2s", ""), mine) is not None
+                and re.search(judgment.get("r2", ""), other) is not None
+                and all(re.search(judgment.get(key, ""), context[key]) is not None for key in ("arch", "function"))
+            )
         elif kind == "value":
             # No values listed covers every value of those binaries; columns listed cover only values
             # r2s prints in them; `r2s` matches r2s's row and `r2` a radare2 row holding the value.
@@ -483,6 +552,7 @@ def judgment_for(judgments, binary, command, difference, corpus=None):
                 covered = covered and filled(verb, theirs, ours, judgment["fill"])
         if covered:
             judgment["matched"] += 1
+            judgment.setdefault("instance", (binary, command, difference))
             return judgment
     return None
 
@@ -497,6 +567,11 @@ def spelled(difference):
             address, what, mine, other, context["arch"], context["ours"], context["theirs"],
             "  ({})".format(context["refused"]) if context["refused"] else "",
         )
+    if kind == "fact":
+        verb, function, key, lacking, mine, other, context = detail
+        key = " ".join(map(str, key)) if isinstance(key, tuple) else "{:#x}".format(key)
+        return "      {:#x} {} not in {}'s  r2s `{}`  r2 `{}`  [{}] {}".format(
+            function, key, lacking, mine, other, context["arch"], context["function"])
     if kind == "value":
         value, column, row = detail[:3]
         return "      {:#x}{}  {}".format(value, " ({})".format(column) if column else "", row)
@@ -506,24 +581,41 @@ def spelled(difference):
     )
 
 
+# `-e` holds through the load, so the file's own architecture and bits are put back after it.
+RESTORE = "e asm.arch=`i~^arch[1]`;e asm.bits=`i~^bits[1]`"
+
+
 def radare2_argv(r2, script, binary):
-    """radare2 answering `script`, loading `binary` as an x86-64 host does."""
-    # `-e` holds through the load, so the file's own architecture and bits are put back after it.
-    restore = "e asm.arch=`i~^arch[1]`;e asm.bits=`i~^bits[1]`;"
+    """radare2 answering `script`, loading `binary` as an x86-64 host does; with no script, a
+    session that reads its commands on stdin, RESTORE first."""
+    script = [] if script is None else ["-c", RESTORE + ";" + script]
     return [str(r2), "-N", "-q", "-e", "asm.arch=x86", "-e", "asm.bits=64", "-e", "scr.color=0",
-            "-c", restore + script, str(binary)]
+            *script, str(binary)]
 
 
-def answers(binary, commands, r2, r2s, timeout):
-    """Both tools' output for each command on one binary, or r2s's refusal to open it."""
+ANALYSIS_MODES = {mode for _, mode in ANALYSIS}
+
+
+def answers(binary, commands, r2, r2s, timeout, corpus=None):
+    """Both tools' output for each command on one binary, or r2s's refusal to open it. The
+    analysis verbs share one session per tool, on a graded corpus and architecture only."""
     # A refusal to open is a capability gap, not a disagreement about a
     # binary both tools read, so it is counted and reported separately.
-    _, opened_error, opened_code = run([str(r2s), "-q", "-c", "i", str(binary)], timeout)
+    opened, opened_error, opened_code = run([str(r2s), "-q", "-c", "i", str(binary)], timeout)
     if opened_code != 0:
         reason = opened_error.strip().splitlines()[-1] if opened_error.strip() else "failed"
         return reason.replace("r2s: ", ""), {}
     said = {}
+    arch = next((line.split()[1] for line in opened.splitlines() if line.split()[:1] == ["arch"]), "")
+    if corpus in ANALYSED_CORPORA and arch in GRADED_ARCHES and any(m in ANALYSIS_MODES for _, m in commands):
+        both, ended = analysed(binary, r2, r2s, max(timeout, ANALYSIS_TIMEOUT))
+        said["aa"] = ended
+        if both is not None:
+            both[0][("arch", 0)] = [arch]
+            said.update({command: both for command, mode in commands if mode in ANALYSIS_MODES})
     for command, mode in commands:
+        if mode in ANALYSIS_MODES:
+            continue
         # Every command seeks first, so a seek that timed out once times out each time.
         if None in said.values():
             said[command] = None
@@ -578,9 +670,13 @@ def sampled_entries(lines):
             # A symbol a library defines names the slot the loader fills (a PE import), not code.
             if lib is None or not line[lib[0] : lib[1]].strip():
                 functions.add(int(words[2], 16))
-    functions = sorted(functions - entries)
-    step = max(1, len(functions) // SAMPLED_FUNCTIONS)
-    return sorted(entries) + functions[::step][:SAMPLED_FUNCTIONS]
+    return sorted(entries) + spaced(functions - entries)
+
+
+def spaced(addresses):
+    """SAMPLED_FUNCTIONS of these addresses, evenly spaced over them in address order."""
+    addresses = sorted(addresses)
+    return addresses[:: max(1, len(addresses) // SAMPLED_FUNCTIONS)][:SAMPLED_FUNCTIONS]
 
 
 def radare2_rows(text):
@@ -606,8 +702,521 @@ def radare2_rows(text):
     return rows
 
 
+def fenced(text):
+    """A session's answers by the fence before each: (verb, address) to its lines."""
+    found, current = {}, None
+    for line in text.splitlines():
+        words = line.split()
+        if len(words) == 3 and words[0] == SESSION_FENCE and HEX.fullmatch(words[2]):
+            current = (words[1], int(words[2], 16))
+            found[current] = []
+        elif current is not None:
+            found[current].append(line)
+    return found
+
+
+def fence(verb, address=0):
+    return "?e {} {} {:#x}".format(SESSION_FENCE, verb, address)
+
+
+def listed(lines):
+    """Each function `afl` lists: its entry to its row."""
+    found = {}
+    for line in lines:
+        words = line.split()
+        if len(words) >= 4 and HEX.fullmatch(words[0]):
+            found.setdefault(int(words[0], 16), " ".join(words))
+    return found
+
+
+FDE = re.compile(r"FDE cie=\S+ pc=([0-9a-f]+)\.\.\.?([0-9a-f]+)")
+
+
+def frame_descriptions(binary, timeout):
+    """Each `.eh_frame` FDE's code range, `objdump --dwarf=frames`'s rows: the container's statement a
+    judgment of an entry cites. Empty where objdump is missing or fails."""
+    out, _, _ = run(["objdump", "--dwarf=frames", str(binary)], timeout)
+    return ["{} {}".format(*match.groups()) for match in FDE.finditer(out)]
+
+
+def sections(lines):
+    """`iS`'s sections that hold bytes in memory, (vaddr, vsize, `name:perm`), sorted by address."""
+    header = header_of(lines)
+    found = []
+    for line in lines:
+        row, words = cells(header, line), line.split()
+        if header and "vaddr" in row and "vsize" in row and row["vsize"] and words[-1].startswith("."):
+            perm = next((word for word in words if re.fullmatch(r"[-a-z][-r][-w][-x]", word)), "")
+            # A section with no permission is not loaded: its vaddr 0 places nothing.
+            if perm != "----":
+                found.append((row["vaddr"], row["vsize"], "{}:{}".format(words[-1], perm)))
+    return sorted(found)
+
+
+def section_of(address, spans):
+    """The name of the section holding this address, or None; the spans are sorted by address."""
+    index = bisect.bisect_right(spans, (address, float("inf"), "")) - 1
+    return spans[index][2] if index >= 0 and address < spans[index][0] + spans[index][1] else None
+
+
+def entry_rows(said):
+    """`afl`'s rows, each with the section `iS` places it in, the basis `aflj` states and the FDE
+    that starts there, if any: the statements a judgment of an entry cites."""
+    fdes = {int(low, 16): int(high, 16) for low, high in map(str.split, said.get(("fde", 0), []))}
+    spans = sections(said.get(("iS", 0), []))
+    rows = {}
+    for entry, row in listed(said.get(("afl", 0), [])).items():
+        where = section_of(entry, spans) if spans else None
+        row = row if where is None else "{} in={}".format(row, where.split(":")[0])
+        rows[entry] = row if entry not in fdes else "{} fde={:#x}-{:#x}".format(row, entry, fdes[entry])
+    try:
+        basis = {row["addr"]: row.get("confidence") for row in json.loads("".join(said.get(("aflj", 0), [])) or "[]")}
+    except (ValueError, TypeError, KeyError):
+        basis = {}
+    return {
+        entry: row if basis.get(entry) is None else row.replace(" fde=", " basis={} fde=".format(basis[entry]))
+        if " fde=" in row else "{} basis={}".format(row, basis[entry])
+        for entry, row in rows.items()
+    }
+
+
+def referenced_by(lines):
+    """The kinds and mnemonics of the references `axt` lists, sorted: `CALL:call,JUMP:je`, or `none`."""
+    kinds = set()
+    for words in map(str.split, lines):
+        if len(words) >= 4 and HEX.fullmatch(words[1]) and words[2].startswith("["):
+            kinds.add("{}:{}".format(words[2].strip("[]").split(":")[0], words[3]))
+    return ",".join(sorted(kinds)) or "none"
+
+
+def stated_entries(lines):
+    """The program entry points `ie` states."""
+    return {
+        int(words[1], 16)
+        for words in map(str.split, lines)
+        if len(words) == 5 and words[-1] == "program" and HEX.fullmatch(words[1])
+    }
+
+
+def import_slots(lines):
+    """The address `is` states for each import that has one: where a call to the import goes."""
+    return {
+        int(words[2], 16)
+        for words in map(str.split, lines)
+        if len(words) >= 5 and words[4] == "FUNC" and HEX.fullmatch(words[2]) and int(words[2], 16)
+        and words[-1].startswith("imp.")
+    }
+
+
+def analysis_sample(entries, ours, theirs):
+    """The stated entry points both tools list, then SAMPLED_FUNCTIONS of the other entries both list."""
+    common = set(ours) & set(theirs)
+    return sorted(common & entries) + spaced(common - entries)
+
+
+def block_rows(lines):
+    """`afb`'s blocks, (address, size) to the row; the size is the row's end less its start."""
+    found = {}
+    for words in map(str.split, lines):
+        if len(words) >= 2 and HEX.fullmatch(words[0]) and HEX.fullmatch(words[1]):
+            start = int(words[0], 16)
+            found[(start, int(words[1], 16) - start)] = " ".join(words)
+    return found
+
+
+def noreturn_row(lines):
+    """`afi`'s noreturn row, `<absent>` where it prints none, or its refusal."""
+    for line in lines:
+        if line.startswith(("noreturn:", "refused:")):
+            return " ".join(line.split())
+    return "<absent>"
+
+
+def signed(value):
+    return value - (1 << 64) if value >= 1 << 63 else value
+
+
+def frame_key(at):
+    """A variable's place as a fact: an offset from the stack pointer at entry, a whole register,
+    or a base no entry offset is stated for (`fp`, `realigned.sp`)."""
+    based = re.fullmatch(r"entry\.sp([+-])0x([0-9a-f]+)", at)
+    if based:
+        return ("offset", int(based.group(2), 16) * (-1 if based.group(1) == "-" else 1))
+    if re.search(r"[+-]", at):
+        return ("base", at)
+    return ("register", ARGUMENT_REGISTERS.get(at, at))
+
+
+def our_frame(lines):
+    """r2s's `afv`: each fact to its row; a refusal is one fact of its own."""
+    found = {}
+    for line in lines:
+        words = line.split()
+        if line.startswith("refused:"):
+            found[("refused", " ".join(words))] = " ".join(words)
+        elif words[:1] in (["arg"], ["var"]) and len(words) >= 3 and words[-2] == "@":
+            found.setdefault(frame_key(words[-1]), " ".join(words))
+        elif words[:1] == ["arg"] and len(words) >= 3:
+            found.setdefault(("formal", words[-1]), " ".join(words))
+    return found
+
+
+def their_frame(variables, frame, stackframe, unstated=None):
+    """radare2's `afv` as facts, each to its row, from `afvj`, `afvf` and `afi`'s stackframe.
+
+    A var's delta is its offset from the stack pointer at entry (6.2.4 var.c:1389-1396). `afvj`
+    prints an sp var's delta plus the stackframe (var.c:641-646) and a bp var's plus the bp's own
+    offset, which nothing prints. `afvf` prints -delta for a var at or below 0 and delta - 0x6a
+    for an argument or a var at or above 0 (cmd_anal.inc.c:2005-2033), so a bp var's delta is the
+    candidate that gives every bp var of the function one bp offset; with none or two it is unstated,
+    and `unstated`, where given, takes each such var's candidate offsets.
+    """
+    try:
+        table = json.loads(variables) if variables else {}
+    except ValueError:
+        table = {}
+    if not isinstance(table, dict):
+        table = {}
+    found = {}
+    for var in table.get("reg", []):
+        found.setdefault(("register", ARGUMENT_REGISTERS.get(var["ref"], var["ref"])), "arg {} {} @ {}".format(
+            var["type"], var["name"], var["ref"]))
+    for var in table.get("sp", []):
+        delta = var["ref"]["offset"] - stackframe
+        found.setdefault(("offset", delta), "{} {} {} @ {}{:+#x}".format(
+            var["kind"], var["type"], var["name"], var["ref"]["base"], var["ref"]["offset"]))
+    printed = {}
+    for words in map(str.split, frame):
+        if len(words) >= 2 and HEX.fullmatch(words[0]):
+            printed.setdefault(words[1].rstrip(":"), []).append(int(words[0], 16))
+    candidates = []
+    for var in table.get("bp", []):
+        deltas = None
+        for value in printed.get(var["name"], []):
+            above, below = signed((value + 0x6A) & ((1 << 64) - 1)), -signed(value)
+            each = {above} if var["kind"] == "arg" or above >= 0 else set()
+            each |= {below} if var["kind"] != "arg" and below <= 0 else set()
+            deltas = each if deltas is None else deltas & each
+        candidates.append((var, deltas or set()))
+    offsets = None
+    for var, deltas in candidates:
+        each = {var["ref"]["offset"] - delta for delta in deltas}
+        offsets = each if offsets is None else offsets & each
+    for var, deltas in candidates:
+        row = "{} {} {} @ {}{:+#x}".format(
+            var["kind"], var["type"], var["name"], var["ref"]["base"], var["ref"]["offset"])
+        key = ("offset", var["ref"]["offset"] - next(iter(offsets))) if offsets and len(offsets) == 1 else (
+            "unstated", var["name"])
+        found.setdefault(key, row)
+        if key[0] == "unstated" and unstated is not None:
+            unstated.update(deltas)
+    return found
+
+
+def type_bytes(spelled):
+    """The bytes a C type spelling occupies, or None where the spelling does not state it."""
+    spelled = spelled.strip()
+    array = re.fullmatch(r"(.+)\[(\d+)\]", spelled)
+    if array:
+        element = type_bytes(array.group(1))
+        return element * int(array.group(2)) if element else None
+    if spelled.endswith("*"):
+        return 8
+    sized = re.fullmatch(r"(?:struct )?r2sleigh_(?:bits_|word_u|unread_u)(\d+)", spelled)
+    if sized:
+        return int(sized.group(1)) // 8
+    return TYPE_BYTES.get(spelled)
+
+
+def extents_of(rows):
+    """Each frame object's (start, end, name, type) where its spelled type states its bytes."""
+    found = []
+    for key, row in rows.items():
+        typed = re.fullmatch(r"(?:var|arg) (.+) (\S+) @ \S+", row)
+        if key[0] == "offset" and typed and type_bytes(typed.group(1)):
+            found.append((key[1], key[1] + type_bytes(typed.group(1)), typed.group(2), typed.group(1)))
+    return sorted(found)
+
+
+def frame_witness(facts, function, mine, their, unstated):
+    """What each side states where it lacks the other's frame fact, and the r2s offsets radare2 may hold.
+
+    A radare2 frame fact r2s lacks shows r2s's refusal, the r2s object whose extent (by its spelled
+    type) holds the offset, or, above the entry stack pointer, the stack formals r2s spells with no
+    offset. An r2s offset radare2 lacks shows the radare2 var whose extent holds it, or the radare2
+    vars inside the r2s object. An r2s offset an unstated radare2 bp var may hold is not compared."""
+    refused = next((row for key, row in mine.items() if key[0] == "refused"), None)
+    extents, theirs = extents_of(mine), extents_of(their)
+    unplaced = sum(1 for key in mine if key[0] == "formal")
+    for (place, key), (shown_ours, shown_theirs, side) in list(facts.items()):
+        if place != function or not isinstance(key, tuple):
+            continue
+        if side == "r2s" and key[0] == "offset" and key[1] in unstated:
+            facts[(place, key)] = (shown_ours, shown_theirs, "unplaced")
+        elif side == "r2s" and key[0] == "offset":
+            holder = next((e for e in theirs if e[0] < key[1] < e[1]), None)
+            own = next((e for e in extents if e[0] == key[1]), None)
+            held = [e[2] for e in theirs if own is not None and own[0] < e[0] < own[1]]
+            said = "<missing>"
+            if holder is not None:
+                said += " within={} {}".format(holder[2], holder[3])
+            elif held:
+                said += " holds={}".format(",".join(held))
+            facts[(place, key)] = (shown_ours, said, side)
+        elif side == "r2" and refused is not None:
+            facts[(place, key)] = ("<missing> " + refused, shown_theirs, side)
+        elif side == "r2" and key[0] == "offset":
+            holder = next((e for e in extents if e[0] < key[1] < e[1]), None)
+            said = "<missing>"
+            if holder is not None:
+                said += " inside={} {}".format(holder[2], holder[3])
+            elif key[1] >= 0:
+                said += " above formals={}".format(unplaced)
+            facts[(place, key)] = (said, shown_theirs, side)
+
+
+def stackframe_of(lines):
+    return next((int(line.split()[1]) for line in lines if line.startswith("stackframe:")), 0)
+
+
+def reference_rows(lines):
+    """`axt`'s rows, each referencing address to its row. A demangled function name may hold
+    spaces, so the address is the first hex word followed by the `[KIND:perm]` word."""
+    found = {}
+    for words in map(str.split, lines):
+        at = next(
+            (i for i in range(1, len(words) - 1) if HEX.fullmatch(words[i]) and words[i + 1].startswith("[")), None
+        )
+        if at is not None:
+            found.setdefault(int(words[at], 16), " ".join(words))
+    return found
+
+
+def order(key):
+    """A fact's sort key: numbers by value, before words, so the report keeps address order."""
+    if isinstance(key, tuple):
+        return tuple(order(part) for part in key)
+    return (0, key, "") if isinstance(key, int) else (1, 0, str(key))
+
+
+def analysis_facts(verb, ours, theirs):
+    """Every fact of one analysis verb either session states: (function, key) to (r2s's row, radare2's
+    row, side) where side is `equal`, `r2s` (r2s alone states it) or `r2` (radare2 alone)."""
+    facts = {}
+
+    def add(function, mine, other, near=lambda key: key):
+        places = {}
+        for side, rows in ((0, mine), (1, other)):
+            for key, row in rows.items():
+                places.setdefault((side, near(key)), row)
+        for key in sorted(set(mine) | set(other), key=order):
+            here = (mine.get(key), other.get(key))
+            side = "equal" if None not in here else "r2s" if here[1] is None else "r2"
+            # A frame offset from a base no entry offset is stated for is not compared (UNPLACED).
+            side = "unplaced" if isinstance(key, tuple) and key[0] in UNPLACED else side
+            shown = tuple(
+                here[index] or places.get((index, near(key)), "<missing>") for index in (0, 1)
+            )
+            facts[(function, key)] = shown + (side,)
+
+    if verb == "afl":
+        mine, other = entry_rows(ours), entry_rows(theirs)
+        add(0, mine, other)
+        # An entry one side lacks shows what that side records referencing it, and an entry
+        # radare2 lists alone the r2s function whose extent (`afl`'s address and size) holds it.
+        extents = sorted((entry, entry + int(row.split()[2])) for entry, row in mine.items())
+        spans = sections(ours.get(("iS", 0), []))
+        for (_, entry), (shown_ours, shown_theirs, side) in list(facts.items()):
+            if side != "equal":
+                lacking = ours if side == "r2" else theirs
+                said = "<missing> refs={}".format(referenced_by(lacking.get(("refs", entry), [])))
+                index = bisect.bisect_right(extents, (entry, float("inf"))) - 1
+                if side == "r2" and index >= 0 and entry < extents[index][1]:
+                    said += " inside={:#x}".format(extents[index][0])
+                if side == "r2" and spans:
+                    said += " in={}".format(section_of(entry, spans) or "none")
+                facts[(0, entry)] = (said, shown_theirs, side) if side == "r2" else (shown_ours, said, side)
+        return facts
+    if verb == "axt":
+        extents = sorted((entry, entry + int(row.split()[2])) for entry, row in listed(ours.get(("afl", 0), [])).items())
+        listed_theirs = set(listed(theirs.get(("afl", 0), [])))
+
+        def holder(address):
+            index = bisect.bisect_right(extents, (address, float("inf"))) - 1
+            return extents[index][0] if index >= 0 and address < extents[index][1] else None
+
+    for (asked, function), lines in sorted(ours.items()):
+        if asked != verb:
+            continue
+        other = theirs.get((verb, function), [])
+        if verb == "afb":
+            add(function, block_rows(lines), block_rows(other), near=lambda key: key[0])
+        elif verb == "afi":
+            mine, their = noreturn_row(lines), noreturn_row(other)
+            ours_true, theirs_true = mine.startswith("noreturn: true"), their == "noreturn: true"
+            side = "equal" if ours_true == theirs_true else "r2s" if ours_true else "r2"
+            facts[(function, ("noreturn",))] = (mine, their, side)
+        elif verb == "afv":
+            stackframe = stackframe_of(theirs.get(("afi", function), []))
+            variables = "".join(theirs.get(("afvj", function), []))
+            unstated = set()
+            their = their_frame(variables, theirs.get(("afvf", function), []), stackframe, unstated)
+            mine = our_frame(lines)
+            add(function, mine, their)
+            frame_witness(facts, function, mine, their, unstated)
+        elif verb == "axt":
+            add(function, reference_rows(lines), reference_rows(other))
+            # A reference r2s states alone names the r2s function it lies in, and whether radare2 lists it.
+            for (_, place), (mine, their, side) in [item for item in facts.items() if item[0][0] == function]:
+                if side == "r2s":
+                    # The extent misses a function laid out in pieces; r2s's row then names it.
+                    named = re.match(r"fcn\.([0-9a-f]+) ", mine)
+                    caller = holder(place) if named is None else int(named.group(1), 16)
+                    facts[(function, place)] = (mine, "<missing> from={} listed={}".format(
+                        "none" if caller is None else "{:#x}".format(caller),
+                        "yes" if caller in listed_theirs else "no"), side)
+    return facts
+
+
+def fact_differences(verb, ours, theirs, context):
+    """Each fact the two sessions disagree on, as `fact` disagreements; radare2-only `axt`
+    references are unfilled, returned apart and not judged."""
+    found, missed = [], []
+    for (function, key), (mine, other, side) in sorted(analysis_facts(verb, ours, theirs).items(), key=order):
+        if side in ("equal", "unplaced"):
+            continue
+        # An `afl` fact is an entry: the function it names.
+        function = key if verb == "afl" else function
+        detail = (verb, function, key, "r2" if side == "r2s" else "r2s", mine, other, context(function))
+        if verb == "axt" and side == "r2":
+            missed.append((verb, key))
+        else:
+            found.append(("fact", detail))
+        if verb == "afl" and side == "r2":
+            missed.append((verb, key))
+    return found, missed
+
+
+class Session:
+    """One tool answering on stdin for one file, killed at its deadline."""
+
+    def __init__(self, argv, timeout):
+        self.started, self.timeout = time.monotonic(), timeout
+        self.process = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, errors="surrogateescape",
+        )
+        self.lock, self.reaped = threading.Lock(), False
+        self.timer = threading.Timer(timeout, self.kill)
+        self.timer.start()
+
+    def kill(self):
+        """The deadline: SIGKILL while end() has not reaped the child, so its pid is still this child's."""
+        with self.lock:
+            if not self.reaped:
+                os.kill(self.process.pid, signal.SIGKILL)
+
+    def send(self, lines):
+        """Write on a thread of its own: a tool answering while its pipe is full blocks the writer."""
+        script = "\n".join(lines + [fence("end")]) + "\n"
+
+        def write():
+            try:
+                self.process.stdin.write(script)
+                self.process.stdin.flush()
+            except (OSError, ValueError):
+                pass
+
+        self.writer = threading.Thread(target=write, daemon=True)
+        self.writer.start()
+
+    def receive(self):
+        """The answers up to the closing fence; None once the session died."""
+        closing, out = "{} end 0x0".format(SESSION_FENCE), []
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                return None
+            if line.rstrip("\n") == closing:
+                return "\n".join(out)
+            out.append(line.rstrip("\n"))
+
+    def end(self):
+        """(seconds, peak resident KiB, how it ended): `done`, `timeout` or `died`."""
+        self.writer.join()
+        try:
+            self.process.stdin.close()
+        except OSError:
+            pass
+        self.process.stdout.read()
+        # Exited, still a zombie (WNOWAIT): the deadline may signal it until the flag is set.
+        # macOS has waitid from Python 3.13; before it the deadline ends at stdout's close.
+        if hasattr(os, "waitid"):
+            os.waitid(os.P_PID, self.process.pid, os.WEXITED | os.WNOWAIT)
+        with self.lock:
+            self.reaped = True
+        self.timer.cancel()
+        _, status, usage = os.wait4(self.process.pid, 0)
+        self.process.returncode = status
+        took = time.monotonic() - self.started
+        ended = "done" if status == 0 else "timeout" if took >= self.timeout else "died"
+        return took, usage.ru_maxrss, ended
+
+
+def analysed(binary, r2, r2s, timeout):
+    """Both sessions' fenced answers after one `aa` each, or None, and each session's end."""
+    ours = Session([str(r2s), "-q", str(binary)], timeout)
+    theirs = Session(radare2_argv(r2, None, binary), timeout)
+    ours.send([fence("ie"), "ie", fence("is"), "is", fence("iS"), "iS", "aa", fence("afl"), "afl", fence("aflj"), "aflj"])
+    theirs.send([RESTORE, "aa", fence("afl"), "afl"])
+    mine, other = ours.receive(), theirs.receive()
+    if mine is not None and other is not None:
+        mine, other = fenced(mine), fenced(other)
+        mine[("fde", 0)] = frame_descriptions(binary, timeout)
+        entries = stated_entries(mine.get(("ie", 0), []))
+        listed_ours, listed_theirs = listed(mine.get(("afl", 0), [])), listed(other.get(("afl", 0), []))
+        sample = analysis_sample(entries, listed_ours, listed_theirs)
+        asked_ours, asked_theirs = [], []
+        # An entry one side lists alone: what the other side records referencing it.
+        for address in sorted(set(listed_theirs) - set(listed_ours)):
+            asked_ours += [fence("refs", address), "axt @ {:#x}".format(address)]
+        for address in sorted(set(listed_ours) - set(listed_theirs)):
+            asked_theirs += [fence("refs", address), "axt @ {:#x}".format(address)]
+        for address in sample:
+            for verb in ("afb", "afi", "afv", "axt"):
+                asked_ours += [fence(verb, address), "{} @ {:#x}".format(verb, address)]
+            for verb in ("afb", "afi", "afvj", "afvf", "axt"):
+                asked_theirs += [fence(verb, address), "{} @ {:#x}".format(verb, address)]
+        for address in spaced(import_slots(mine.get(("is", 0), [])) - set(sample)):
+            asked_ours += [fence("axt", address), "axt @ {:#x}".format(address)]
+            asked_theirs += [fence("axt", address), "axt @ {:#x}".format(address)]
+        ours.send(asked_ours)
+        theirs.send(asked_theirs)
+        second, third = ours.receive(), theirs.receive()
+        if second is not None and third is not None:
+            mine.update(fenced(second))
+            other.update(fenced(third))
+        else:
+            mine = None
+    ended = ours.end(), theirs.end()
+    if mine is None or other is None or any(end[2] != "done" for end in ended):
+        return None, ended
+    return (mine, other), ended
+
+
+def context_of(ours, theirs):
+    """The context a fact judgment reads: the architecture, and the function's `afl` row."""
+    arch = (ours.get(("arch", 0)) or [""])[0]
+    rows = {**listed(theirs.get(("afl", 0), [])), **listed(ours.get(("afl", 0), []))}
+    return lambda function: {"arch": arch, "function": rows.get(function, "{:#x}".format(function))}
+
+
 def compare(name, command, mode, left, right, judgments, corpus=None):
     """Every disagreement, those no judgment covers, and the values only radare2 reports."""
+    if mode in ANALYSIS_MODES:
+        found, missed = fact_differences(command, left, right, context_of(left, right))
+        unjudged = [item for item in found if judgment_for(judgments, name, command, item, corpus) is None]
+        return found, unjudged, missed
     found = differences(command, mode, left, right)
     unjudged = [item for item in found if judgment_for(judgments, name, command, item, corpus) is None]
     missed = radare2_only(normalise(left), normalise(right)) if mode == "values" else []
@@ -621,15 +1230,30 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
     """One corpus: per command, binaries agreeing, judged, unjudged, and radare2-only values."""
     tally = {command: {"agree": 0, "judged": 0, "unjudged": 0, "r2-only": 0} for command, _ in commands}
     unsupported, skipped = {}, []
+    facts = {
+        command: {"files": 0, "equal": 0, "r2s": 0, "r2": 0, "unplaced": 0}
+        for command, mode in commands
+        if mode in ANALYSIS_MODES
+    }
     # The tools run in parallel; judging stays in name order, so the report and the matches do not move.
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        ran = pool.map(lambda binary: answers(binary, commands, r2, r2s, args.timeout), binaries)
+        ran = pool.map(lambda binary: answers(binary, commands, r2, r2s, args.timeout, corpus), binaries)
         for binary, (refused, said) in zip(binaries, ran):
             if refused is not None:
                 unsupported[refused] = unsupported.get(refused, 0) + 1
                 continue
             reported = False
+            ended = said.get("aa")
+            if ended is not None:
+                if args.verbose:
+                    print("{} aa: r2s {:.1f}s {} MiB {}, radare2 {:.1f}s {} MiB {}".format(
+                        binary.name, ended[0][0], ended[0][1] // 1024, ended[0][2],
+                        ended[1][0], ended[1][1] // 1024, ended[1][2]))
+                if any(end[2] != "done" for end in ended):
+                    skipped.append("{} aa".format(binary.name))
             for command, mode in commands:
+                if mode in ANALYSIS_MODES and command not in said:
+                    continue
                 if said[command] is None:
                     skipped.append("{} {}".format(binary.name, command))
                     continue
@@ -637,7 +1261,11 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
                 # A binary neither tool has anything to say about is not a difference.
                 if mode == "registers" and left is None:
                     continue
-                if mode != "registers" and not normalise(right) and not normalise(left):
+                if mode in ANALYSIS_MODES:
+                    for _, (_, _, side) in analysis_facts(command, left, right).items():
+                        facts[command][side] += 1
+                    facts[command]["files"] += 1
+                elif mode != "registers" and not normalise(right) and not normalise(left):
                     continue
 
                 found, unjudged, missed = compare(binary.name, command, mode, left, right, judgments, corpus)
@@ -661,7 +1289,7 @@ def grade(corpus, binaries, commands, r2, r2s, judgments, args):
                     print("    {} radare2 only: {}".format(command, len(missed)))
                     shown = [c if v is None else "{}={:#x}".format(c, v) if c else "{:#x}".format(v) for c, v in missed[:8]]
                     print("      " + " ".join(shown + (["..."] if len(missed) > 8 else [])))
-    return tally, unsupported, skipped
+    return tally, unsupported, skipped, facts
 
 
 def ratchet(baseline, measured):
@@ -704,6 +1332,9 @@ def main():
         help="radare2-only values per corpus and command, which may not rise",
     )
     parser.add_argument("--bless", action="store_true", help="write this run's counts as the baseline")
+    parser.add_argument(
+        "--upstream", action="store_true", help="list each judged radare2 defect with one instance it matched"
+    )
     parser.add_argument(
         "--no-build",
         action="store_true",
@@ -761,7 +1392,7 @@ def main():
     unjudged, measured = 0, {}
     for corpus, binaries in corpora.items():
         print("== {} ({} binaries)".format(corpus, len(binaries)))
-        tally, unsupported, skipped = grade(corpus, binaries, commands, r2, r2s, judgments, args)
+        tally, unsupported, skipped, facts = grade(corpus, binaries, commands, r2, r2s, judgments, args)
         print("\n{:<8} {:>8} {:>8} {:>8} {:>8}".format("command", "agree", "judged", "unjudged", "r2-only"))
         print("-" * 44)
         for command, _ in commands:
@@ -772,9 +1403,18 @@ def main():
                 )
             )
             unjudged += row["unjudged"]
+        if any(row["files"] for row in facts.values()):
+            print("\n{:<8} {:>8} {:>8} {:>8} {:>8} {:>8}".format("facts", "files", "equal", "r2s-only", "r2-only", "unplaced"))
+            print("-" * 53)
+            for command, row in facts.items():
+                print("{:<8} {:>8} {:>8} {:>8} {:>8} {:>8}".format(
+                    command, row["files"], row["equal"], row["r2s"], row["r2"], row["unplaced"]))
+            print("{} files skipped by the aa sessions".format(sum(1 for s in skipped if s.endswith(" aa"))))
         # A binary r2s stops opening, or a run that times out, hides its values: both are ratcheted.
+        ratcheted = ("values", "pairs", "entries", "references")
         measured[corpus] = {
-            command.split()[0]: tally[command]["r2-only"] for command, mode in commands if mode in ("values", "pairs")
+            command.split()[0]: tally[command]["r2-only"] for command, mode in commands if mode in ratcheted
+            and (mode not in ANALYSIS_MODES or corpus in ANALYSED_CORPORA)
         }
         measured[corpus]["refused"] = sum(unsupported.values())
         measured[corpus]["skipped"] = len(skipped)
@@ -784,6 +1424,19 @@ def main():
             print("\nnot opened by r2s:")
             for reason, count in sorted(unsupported.items(), key=lambda item: -item[1]):
                 print("  {:>4}  {}".format(count, reason))
+        print()
+
+    if args.upstream:
+        # One idea per line: judgments naming the same upstream line are one entry, their matches summed.
+        ideas = {}
+        for judgment in judgments:
+            if "upstream" in judgment and "instance" in judgment:
+                ideas.setdefault(judgment["upstream"], []).append(judgment)
+        print("radare2 defects (r2s-right with an upstream line), one instance each:")
+        for idea, judged in ideas.items():
+            binary, command, difference = judged[0]["instance"]
+            print("  {} ({} matched)\n    {} {}".format(idea, sum(j["matched"] for j in judged), binary, command))
+            print(spelled(difference))
         print()
 
     stale = [judgment for judgment in judgments if judgment["matched"] == 0]

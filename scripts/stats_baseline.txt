@@ -105,17 +105,17 @@
 bash aa; pdd @ 0x2e630 | analysed.computed | 1
 bash aa; pdd @ 0x2e630 | analysed.recomputed | 0
 bash aa; pdd @ 0x2e630 | analysed.reused | 1
-bash aa; pdd @ 0x2e630 | call_boundaries.computed | 3
+bash aa; pdd @ 0x2e630 | call_boundaries.computed | 4
 bash aa; pdd @ 0x2e630 | call_boundaries.recomputed | 0
-bash aa; pdd @ 0x2e630 | call_boundaries.reused | 1
-bash aa; pdd @ 0x2e630 | callee_reads.computed | 3
+bash aa; pdd @ 0x2e630 | call_boundaries.reused | 0
+bash aa; pdd @ 0x2e630 | callee_reads.computed | 4
 bash aa; pdd @ 0x2e630 | callee_reads.recomputed | 0
-bash aa; pdd @ 0x2e630 | callee_reads.reused | 8
+bash aa; pdd @ 0x2e630 | callee_reads.reused | 12
 bash aa; pdd @ 0x2e630 | defects | 0
-bash aa; pdd @ 0x2e630 | direct_sites.computed | 138
+bash aa; pdd @ 0x2e630 | direct_sites.computed | 139
 bash aa; pdd @ 0x2e630 | direct_sites.recomputed | 0
-bash aa; pdd @ 0x2e630 | direct_sites.reused | 276
-bash aa; pdd @ 0x2e630 | frames_built | 6
+bash aa; pdd @ 0x2e630 | direct_sites.reused | 278
+bash aa; pdd @ 0x2e630 | frames_built | 7
 bash aa; pdd @ 0x2e630 | rebuilt | 0
 bash aa; pdd @ 0x2e630 | references.computed | 0
 bash aa; pdd @ 0x2e630 | references.recomputed | 0
@@ -123,7 +123,7 @@ bash aa; pdd @ 0x2e630 | references.reused | 0
 bash aa; pdd @ 0x2e630 | rendered.computed | 1
 bash aa; pdd @ 0x2e630 | rendered.recomputed | 0
 bash aa; pdd @ 0x2e630 | rendered.reused | 0
-bash aa; pdd @ 0x2e630 | resolved.computed | 2
+bash aa; pdd @ 0x2e630 | resolved.computed | 3
 bash aa; pdd @ 0x2e630 | resolved.recomputed | 0
 bash aa; pdd @ 0x2e630 | resolved.reused | 0
 bash aa; pdd @ 0x2e630 | sealed.computed | 1
@@ -133,7 +133,7 @@ bash aa; pdd @ 0x2e630 | site_fates_in_direct_sites | 0
 bash aa; pdd @ 0x2e630 | site_fates_never_joined | 0
 bash aa; pdd @ 0x2e630 | site_fates_relifted | 108
 bash aa; pdd @ 0x2e630 | table_seals | 183
-bash aa; pdd @ 0x2e630 | walked.computed | 1187
+bash aa; pdd @ 0x2e630 | walked.computed | 1189
 bash aa; pdd @ 0x2e630 | walked.recomputed | 0
 bash aa; pdd @ 0x2e630 | walked.reused | 0
 pumasim aa; pdd @ 0x3b6b20 | analysed.computed | 1
@@ -141,7 +141,7 @@ pumasim aa; pdd @ 0x3b6b20 | analysed.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | analysed.reused | 1
 pumasim aa; pdd @ 0x3b6b20 | call_boundaries.computed | 37
 pumasim aa; pdd @ 0x3b6b20 | call_boundaries.recomputed | 0
-pumasim aa; pdd @ 0x3b6b20 | call_boundaries.reused | 309
+pumasim aa; pdd @ 0x3b6b20 | call_boundaries.reused | 303
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.computed | 13
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | callee_reads.reused | 33
@@ -166,7 +166,7 @@ pumasim aa; pdd @ 0x3b6b20 | sealed.reused | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_in_direct_sites | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_never_joined | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_relifted | 55
-pumasim aa; pdd @ 0x3b6b20 | table_seals | 1385
+pumasim aa; pdd @ 0x3b6b20 | table_seals | 1384
 pumasim aa; pdd @ 0x3b6b20 | walked.computed | 375
 pumasim aa; pdd @ 0x3b6b20 | walked.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | walked.reused | 0
@@ -200,7 +200,7 @@ pumasim afl | sealed.reused | 0
 pumasim afl | site_fates_in_direct_sites | 0
 pumasim afl | site_fates_never_joined | 0
 pumasim afl | site_fates_relifted | 0
-pumasim afl | table_seals | 1385
+pumasim afl | table_seals | 1384
 pumasim afl | walked.computed | 0
 pumasim afl | walked.recomputed | 0
 pumasim afl | walked.reused | 0

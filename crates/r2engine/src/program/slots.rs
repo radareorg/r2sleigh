@@ -195,6 +195,10 @@ fn take_fate<S: Source + 'static>(
 
 /// The slots a fate hands its register into, where every handoff is into a cited slot: an
 /// import's code-pointer parameter, or a body's `SlotParameter`. `Dead` and `Other` prove nothing.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 fn into_slots<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     fate: RegisterFate,
@@ -212,7 +216,8 @@ fn into_slots<S: Source + 'static>(
             Some(name) => {
                 let walker = super::returns::Walking::new(view.clone(), true).ok()?;
                 let native = walker.target(view.thumb_at(target));
-                let (parameter, reads) = crate::native::code_slot(native, &name, handoff.storage)?;
+                let (parameter, reads) =
+                    crate::native::code_slot(native, name.text(), handoff.storage)?;
                 let origin = SourceSlotOrigin {
                     import: target,
                     parameter,

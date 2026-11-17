@@ -220,3 +220,29 @@ fn a_glibc_version_need_names_the_c_library_of_a_shared_object() {
     // musl and bionic also ship a `libc.so`, and no version need names glibc there.
     assert_eq!(declared("__fgets_chk", &[]), None);
 }
+
+/// `caller: call import; mov eax, 7; ret`, then the import's stub at [`common::STUB`].
+fn calling_then_seven() -> &'static [u8] {
+    let mut code = vec![0xcc; 0xa0];
+    let call = (common::STUB - (BASE + 5)) as u32;
+    code[0] = 0xe8;
+    code[1..5].copy_from_slice(&call.to_le_bytes());
+    code[5..0x0b].copy_from_slice(&[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..0xa0].fill(0);
+    Box::leak(code.into_boxed_slice())
+}
+
+/// glibc 2.39 `<setjmp.h>` declares `longjmp` `__noreturn__` (D495): the caller's body ends at the
+/// call, and the code after it is no block of it.
+#[test]
+fn code_after_a_longjmp_import_call_is_not_in_the_body() {
+    for import in ["longjmp", "_longjmp", "siglongjmp"] {
+        let literal = common::Literal::of_code(calling_then_seven(), &[("caller", BASE, 0x0b)])
+            .importing(import)
+            .running_on(common::GLIBC);
+        let info = (OpenProgram::of(literal).function_info(BASE)).expect("it is described");
+        let blocks = (info.blocks.iter()).map(|block| (block.addr, block.size));
+        assert_eq!(blocks.collect::<Vec<_>>(), [(BASE, 5)], "{import}");
+    }
+}

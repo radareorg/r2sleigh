@@ -799,10 +799,7 @@ struct Owed {
 /// certified round trips, and the blocks whose conditional branch sends both arms to one block.
 pub(crate) struct SeedingFacts<'a> {
     pub(crate) private_stack_objects: &'a BTreeSet<crate::ObjectId>,
-    pub(crate) memory_round_trips: &'a BTreeMap<
-        crate::semantic::StructuredAccessId,
-        crate::semantic::MemoryRoundTripCertificate,
-    >,
+    pub(crate) memory_round_trips: &'a crate::semantic::MemoryRoundTrips,
     pub(crate) meeting_arms: &'a BTreeSet<u64>,
     /// The compiler-inserted operations, whose inputs no C statement reads through them.
     pub(crate) inserted: crate::dense::IdSet<InstId>,
@@ -811,10 +808,7 @@ pub(crate) struct SeedingFacts<'a> {
 impl<'a> SeedingFacts<'a> {
     pub(crate) const fn new(
         private_stack_objects: &'a BTreeSet<crate::ObjectId>,
-        memory_round_trips: &'a BTreeMap<
-            crate::semantic::StructuredAccessId,
-            crate::semantic::MemoryRoundTripCertificate,
-        >,
+        memory_round_trips: &'a crate::semantic::MemoryRoundTrips,
         meeting_arms: &'a BTreeSet<u64>,
         inserted: crate::dense::IdSet<InstId>,
     ) -> Self {
@@ -948,6 +942,8 @@ impl SemanticObligationInventory {
             }
         }
 
+        // The accesses ascend by id, so the covered ones are a merge (D452).
+        let mut round_trips = seeding.memory_round_trips.cursor();
         for access in structured.memory_accesses.values() {
             if r2il::refusal_evidence::tracing() && graph.inst(access.id.inst).is_none() {
                 r2il::refusal_evidence!(
@@ -991,12 +987,7 @@ impl SemanticObligationInventory {
             // its instruction live whether or not anything reads the value. If
             // something does read the value, that walk reaches the load and
             // annotates it then, which is the whole of what it owes.
-            let round_trip = seeding.memory_round_trips.values().any(|certificate| {
-                certificate.write == access.id
-                    || certificate.read == access.id
-                    || certificate.redundant_reads.contains(&access.id)
-            });
-            if round_trip {
+            if round_trips.covers(access.id) {
                 continue;
             }
             if private_read {
@@ -3788,7 +3779,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &BTreeMap::new(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -3887,7 +3878,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &BTreeMap::new(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4115,7 +4106,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &BTreeMap::new(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4158,7 +4149,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &BTreeMap::new(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4247,7 +4238,7 @@ mod tests {
             None,
             &SeedingFacts::new(
                 &BTreeSet::new(),
-                &BTreeMap::new(),
+                &crate::semantic::MemoryRoundTrips::default(),
                 &BTreeSet::new(),
                 crate::dense::IdSet::default(),
             ),
@@ -4361,6 +4352,133 @@ mod tests {
                 .keys()
                 .any(|id| id.kind == SemanticObligationKind::LiveStateTransition),
             "a loop carrier must owe a latch state transition"
+        );
+    }
+
+    /// `orq $0, [rsp + 8i]` on each of `slots` slots of a frame whose address a call takes: per
+    /// slot a load, a copy of it, the store back and a reload, so each slot is one round trip.
+    #[cfg(feature = "work-meter")]
+    fn rmw_round_trip_artifact(slots: u64) -> SsaArtifact {
+        const SP: u64 = 32;
+        const RA: u64 = 24;
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("rax", 0, 8));
+        arch.add_register(RegisterDef::new("rdi", 8, 8));
+        arch.add_register(RegisterDef::new("rip", RA, 8));
+        arch.add_register(RegisterDef::new("rsp", SP, 8));
+        let frame = 8 * (slots + 1);
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::IntSub {
+            dst: Varnode::register(SP, 8),
+            a: Varnode::register(SP, 8),
+            b: Varnode::constant(frame, 8),
+        });
+        entry.push(R2ILOp::Copy {
+            dst: Varnode::register(8, 8),
+            src: Varnode::register(SP, 8),
+        });
+        entry.push(R2ILOp::Call {
+            target: Varnode::constant(0x5000, 8),
+        });
+        for slot in 0..slots {
+            or_zero_in_place(&mut entry, SP, slot);
+        }
+        entry.push(R2ILOp::IntAdd {
+            dst: Varnode::register(SP, 8),
+            a: Varnode::register(SP, 8),
+            b: Varnode::constant(frame, 8),
+        });
+        entry.push(R2ILOp::Return {
+            target: Varnode::register(RA, 8),
+        });
+        let register = |offset| register_storage(offset, 8);
+        SsaArtifact::for_decompile_with(
+            &[entry],
+            crate::DecompileInputs {
+                arch: Some(&crate::Arch::from(arch)),
+                machine_roles: crate::SourceMachineRoles::new(
+                    Some(register(RA)),
+                    Some(register(SP)),
+                )
+                .expect("machine roles"),
+                conventions: Some(
+                    r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+                        .arguments(r2source::convention::SlotClass::Integer, [register(8)])
+                        .result(r2source::convention::SlotClass::Integer, register(0))
+                        .preserved([register(SP)])
+                        .conventions(),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect("artifact")
+    }
+
+    /// `orq $0, [sp + 8 * slot]`: the address once, a load, a copy of it, the store back, a reload.
+    #[cfg(feature = "work-meter")]
+    fn or_zero_in_place(entry: &mut R2ILBlock, sp: u64, slot: u64) {
+        let (address, loaded, kept) = (
+            Varnode::unique(0x1_0000 + 0x40 * slot, 8),
+            Varnode::unique(0x1_0008 + 0x40 * slot, 8),
+            Varnode::unique(0x1_0010 + 0x40 * slot, 8),
+        );
+        entry.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: Varnode::register(sp, 8),
+            b: Varnode::constant(8 * slot, 8),
+        });
+        entry.push(R2ILOp::Load {
+            dst: loaded.clone(),
+            space: SpaceId::Ram,
+            addr: address.clone(),
+        });
+        entry.push(R2ILOp::Copy {
+            dst: kept.clone(),
+            src: loaded,
+        });
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: address.clone(),
+            val: kept,
+        });
+        entry.push(R2ILOp::Load {
+            dst: Varnode::unique(0x1_0018 + 0x40 * slot, 8),
+            space: SpaceId::Ram,
+            addr: address,
+        });
+    }
+
+    /// The element visits this thread makes building the artifact of `slots` round trips.
+    #[cfg(feature = "work-meter")]
+    fn rmw_round_trip_visits(slots: u64) -> u64 {
+        let here = || crate::dense::element_visits_on_this_thread().expect("a work-meter build");
+        let before = here();
+        let artifact = rmw_round_trip_artifact(slots);
+        let visits = here() - before;
+        assert_eq!(
+            artifact
+                .certificates()
+                .memory_round_trips
+                .certificates()
+                .len() as u64,
+            slots,
+            "one round trip per slot"
+        );
+        visits
+    }
+
+    /// Whether an access is a round trip's is one question per access: doubling the round trips
+    /// at most doubles the visits beyond the empty frame's (D452).
+    #[cfg(feature = "work-meter")]
+    #[test]
+    fn round_trip_questions_grow_linearly_with_the_round_trips() {
+        let fixed = rmw_round_trip_visits(0);
+        let (once, twice) = (rmw_round_trip_visits(128), rmw_round_trip_visits(256));
+        let growth = (twice - fixed) as f64 / (once - fixed) as f64;
+        assert!(
+            growth <= 2.05,
+            "{fixed} visits empty, {once} at 128 round trips, {twice} at 256: {growth:.3}x"
         );
     }
 

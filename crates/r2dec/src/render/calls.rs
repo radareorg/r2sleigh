@@ -609,6 +609,10 @@ fn location(
 
 /// The C name and kind of the callee `identity` names, a function no symbol names only at the
 /// `direct` address the call reaches.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "printed")
+)]
 fn named(
     identity: &r2types::CalleeIdentity,
     direct: Option<u64>,
@@ -623,10 +627,8 @@ fn named(
         }
         _ => return None,
     };
-    let name = (identity.display_name.as_deref())
-        .or(identity.normalized_name.as_deref())
-        .or(identity.raw_name.as_deref())?;
-    Some((crate::ast::c_identifier(name), kind))
+    let name = (identity.display_name.as_ref()).or(identity.raw_name.as_ref())?;
+    Some((crate::ast::c_identifier(name.text()), kind))
 }
 
 /// Who the call at `inst` reaches: the callee r2types names, or the value an indirect call's

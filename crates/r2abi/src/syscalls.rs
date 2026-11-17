@@ -50,13 +50,6 @@ impl Syscalls {
     pub fn name(&self, number: u64) -> Option<&str> {
         self.names.get(&number).map(String::as_str)
     }
-
-    /// Whether control comes back from the call. `exit` ends the thread and
-    /// `exit_group` the process; no other number in these tables ends the
-    /// caller unconditionally.
-    pub fn returns(&self, number: u64) -> bool {
-        !matches!(self.name(number), Some("exit" | "exit_group"))
-    }
 }
 
 /// Why an interrupt `vector` on `arch` under `kernel` never comes back, where a document states it
@@ -132,10 +125,8 @@ mod tests {
             ),
             ("rax", "x8", "eax")
         );
-        assert!(!x86_64.returns(231) && !arm64.returns(94) && x86_64.returns(1));
-        // A number the kernel does not assign has no name, and is not exit.
+        // A number the kernel does not assign has no name.
         assert_eq!(x86_64.name(100_000), None);
-        assert!(x86_64.returns(100_000));
     }
 
     #[test]

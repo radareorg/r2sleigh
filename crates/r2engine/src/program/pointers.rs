@@ -91,6 +91,10 @@ impl<S: Source + 'static> Parameters for View<'_, S> {
 }
 
 /// What the declaration or the body says, and what cut it short.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 fn derived<S: Source + 'static>(
     view: &View<'_, S>,
     callee: Callee,
@@ -102,10 +106,12 @@ fn derived<S: Source + 'static>(
     // A slot names its import only where the loader binds it and seals it, as pdd's CallSlot does.
     let import = match callee {
         Callee::At(_) => crate::native::Program::import_at(view, address),
-        Callee::ThroughSlot(_) => crate::stated::sealed_import(view, address).map(str::to_owned),
+        Callee::ThroughSlot(_) => {
+            crate::stated::sealed_import(view, address).map(r2abi::SymbolName::new)
+        }
     };
     if let Some(name) = import {
-        let declared = crate::native::declared_pointers(&target, &name);
+        let declared = crate::native::declared_pointers(&target, name.text());
         let declared = declared
             .into_iter()
             .map(|storage| (storage, Basis::Declared));

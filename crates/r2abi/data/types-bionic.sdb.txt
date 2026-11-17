@@ -1067,3 +1067,36 @@ func.openat.arg.3=,...
 func.openat.ret=int
 func.openat.include=fcntl.h
 func.openat.tail=variadic
+
+# bionic <setjmp.h> (android-14.0.0_r1) line 84: `typedef long jmp_buf[_JBLEN];`, a pointer to its
+# first element as a parameter (ISO C17 6.7.6.3p7); line 103: `int setjmp(jmp_buf __env) __returns_twice;`.
+setjmp=func
+func.setjmp.args=1
+func.setjmp.arg.0=long *,env
+func.setjmp.ret=int
+func.setjmp.include=setjmp.h
+
+# bionic <setjmp.h> (android-14.0.0_r1) line 94: `int _setjmp(jmp_buf __env) __returns_twice;`.
+_setjmp=func
+func._setjmp.args=1
+func._setjmp.arg.0=long *,env
+func._setjmp.ret=int
+func._setjmp.include=setjmp.h
+
+# bionic <setjmp.h> (android-14.0.0_r1) line 109: `__noreturn void longjmp(jmp_buf __env, int __value);`.
+longjmp=func
+func.longjmp.args=2
+func.longjmp.arg.0=long *,env
+func.longjmp.arg.1=int,value
+func.longjmp.ret=void
+func.longjmp.include=setjmp.h
+func.longjmp.noreturn=true
+
+# bionic <setjmp.h> (android-14.0.0_r1) line 97: `__noreturn void _longjmp(jmp_buf __env, int __value);`.
+_longjmp=func
+func._longjmp.args=2
+func._longjmp.arg.0=long *,env
+func._longjmp.arg.1=int,value
+func._longjmp.ret=void
+func._longjmp.include=setjmp.h
+func._longjmp.noreturn=true

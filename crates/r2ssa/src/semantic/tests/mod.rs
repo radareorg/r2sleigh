@@ -643,7 +643,10 @@ fn register_assumption_does_not_treat_an_ssa_display_name_as_storage_proof() {
         .graph()
         .values
         .iter()
-        .find(|value| value.var.version == 0 && value.var.is_register())
+        .find(|value| {
+            let storage = value.canonical_storage.map(|storage| storage.space);
+            value.var.version == 0 && storage == Some(crate::CanonicalStorageSpace::Register)
+        })
         .expect("entry register")
         .var
         .name();

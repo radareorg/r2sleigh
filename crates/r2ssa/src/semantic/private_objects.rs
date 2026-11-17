@@ -42,7 +42,7 @@ pub(crate) fn private_stack_objects(objects: &ObjectModel) -> BTreeSet<ObjectId>
 pub(crate) fn collect_memory_round_trips(
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,
-) -> BTreeMap<StructuredAccessId, MemoryRoundTripCertificate> {
+) -> MemoryRoundTrips {
     let mut certificates = BTreeMap::new();
     // Where an access stands: its instruction's block and place in the
     // graph's order of that block.
@@ -174,5 +174,70 @@ pub(crate) fn collect_memory_round_trips(
             },
         );
     }
-    certificates
+    MemoryRoundTrips::of(certificates)
+}
+
+/// A function's round trips, keyed by write, and every access they cover (D452).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryRoundTrips {
+    certificates: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
+    /// Each certificate's write, read and redundant reads, ascending and each once: `T' <= 3A`.
+    covered: crate::dense::Metered<Vec<StructuredAccessId>>,
+}
+
+impl MemoryRoundTrips {
+    /// The covered accesses of final certificates: one sort, `O(T' log T')`.
+    fn of(certificates: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>) -> Self {
+        let mut covered = (certificates.values())
+            .flat_map(|trip| {
+                [trip.write, trip.read]
+                    .into_iter()
+                    .chain(trip.redundant_reads.iter().copied())
+            })
+            .collect::<Vec<_>>();
+        covered.sort_unstable();
+        covered.dedup();
+        Self {
+            certificates,
+            covered: covered.into(),
+        }
+    }
+
+    pub const fn certificates(&self) -> &BTreeMap<StructuredAccessId, MemoryRoundTripCertificate> {
+        &self.certificates
+    }
+
+    /// Every access a round trip covers, ascending.
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn covered(&self) -> impl Iterator<Item = StructuredAccessId> + '_ {
+        self.covered.iter().copied()
+    }
+
+    /// Asks about accesses in ascending id order: a merge, `O(1)` amortised per question.
+    pub(crate) fn cursor(&self) -> CoveredCursor<'_> {
+        CoveredCursor {
+            rest: &self.covered,
+            asked: None,
+        }
+    }
+}
+
+/// A merge walk of [`MemoryRoundTrips`]' covered accesses against ascending questions.
+pub(crate) struct CoveredCursor<'a> {
+    rest: &'a [StructuredAccessId],
+    asked: Option<StructuredAccessId>,
+}
+
+impl CoveredCursor<'_> {
+    /// Whether a round trip covers `access`; every question asks for an id no lower than the last.
+    pub(crate) fn covers(&mut self, access: StructuredAccessId) -> bool {
+        debug_assert!(self.asked <= Some(access), "questions ascend");
+        self.asked = Some(access);
+        // Each covered id is stepped past once over the walk.
+        let below = (self.rest.iter())
+            .take_while(|covered| **covered < access)
+            .count();
+        self.rest = &self.rest[below..];
+        self.rest.first() == Some(&access)
+    }
 }

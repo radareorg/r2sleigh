@@ -5,14 +5,14 @@ use r2abi::{CLibrary, Dll, Halt, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
 const CITED: [(&str, usize); 8] = [
-    ("types-posix.sdb.txt", 515),
-    ("types-glibc.sdb.txt", 85),
-    ("types-bionic.sdb.txt", 100),
-    ("types-musl.sdb.txt", 3),
-    ("types-kernel32.sdb.txt", 50),
+    ("types-posix.sdb.txt", 525),
+    ("types-glibc.sdb.txt", 149),
+    ("types-bionic.sdb.txt", 143),
+    ("types-musl.sdb.txt", 8),
+    ("types-kernel32.sdb.txt", 53),
     ("types-ucrt.sdb.txt", 1),
-    ("types-cxx-cited.sdb.txt", 30),
-    ("types-darwin-cited.sdb.txt", 4),
+    ("types-cxx-cited.sdb.txt", 32),
+    ("types-darwin-cited.sdb.txt", 40),
 ];
 const UNCITED: [&str; 6] = [
     "types.sdb.txt",
@@ -68,11 +68,11 @@ fn rows(text: &str) -> Vec<(String, String, Option<String>)> {
                 .strip_prefix("func.")
                 .and_then(|rest| rest.strip_suffix(".cite"))
             && let Some(row) = rows.iter_mut().find(|row| row.0 == name && row.2.is_none())
-            && row.1.contains("musl src/")
-            && row.1.contains("no header declares it")
+            && (row.1.contains("no header declares it")
+                || row.1.contains("no installed header declares it"))
         {
-            // A musl interface no header declares cites the source file that defines it.
-            row.2 = Some(format!("musl: {}", page.trim()));
+            // An interface no installed header declares cites the source file that declares it.
+            row.2 = Some(format!("source: {}", page.trim()));
         }
     }
     rows
@@ -90,8 +90,10 @@ fn every_row_cites_its_header() {
                     // libstdc++ declares `std::terminate` in <exception>, a header with no suffix.
                     || (file == "types-cxx-cited.sdb.txt" && header == "exception")
                     || header.starts_with("LSB: LSB-Core-generic 5.0, ")
-                    || (header.starts_with("musl: src/")
-                        && comment.contains("no header declares it")),
+                    || header
+                        .strip_prefix("source: ")
+                        .and_then(|page| page.split_once(':'))
+                        .is_some_and(|(path, _)| comment.contains(path)),
                 "{file}: `{name}` includes `{header}`"
             );
             assert!(
@@ -107,10 +109,10 @@ fn every_row_cites_its_header() {
 /// Each uncited table's rows, with the most `uncited-rows.txt` may list for it: each only falls
 /// (ROADMAP D242, D395).
 const UNCITED_CAPS: [(&str, usize); 6] = [
-    ("types.sdb.txt", 98),
-    ("types-linux.sdb.txt", 13),
-    ("types-cxx.sdb.txt", 44),
-    ("types-darwin.sdb.txt", 39),
+    ("types.sdb.txt", 55),
+    ("types-linux.sdb.txt", 3),
+    ("types-cxx.sdb.txt", 42),
+    ("types-darwin.sdb.txt", 37),
     ("types-android.sdb.txt", 2),
     ("types-objc.sdb.txt", 7),
 ];
@@ -169,21 +171,39 @@ fn every_uncited_row_names_why() {
     }
 }
 
-/// A row of an uncited table that states noreturn proves no "never": the row is not cited (D395).
+/// No uncited row states noreturn: only a cited source proves a "never" (D395, D406).
 #[test]
-fn an_uncited_noreturn_row_is_not_cited() {
-    let rows = LibraryRows::embedded(CLibrary::Glibc);
-    let uncited = rows.rows().filter(|row| row.noreturn && !row.cited());
-    let names = uncited.map(|row| &*row.linked_name).collect::<Vec<_>>();
-    assert!(names.contains(&"xalloc_die"), "{names:?}");
-    assert!(names.contains(&"__cxa_call_unexpected"), "{names:?}");
-    let cited = |name: &str| rows.rows().find(|row| &*row.linked_name == name);
-    // GCC's cxxabi.h and bits/functexcept.h state these never return (D406).
-    for name in ["exit", "__cxa_throw", "_ZSt9terminatev", "_Unwind_Resume"] {
-        assert!(
-            cited(name).is_some_and(|row| row.noreturn && row.cited()),
-            "{name}"
-        );
+fn no_uncited_row_states_noreturn() {
+    let stated = UNCITED.into_iter().flat_map(|file| {
+        let text = table(file);
+        let lines = text.lines().filter(|line| line.contains(".noreturn="));
+        lines
+            .map(|line| format!("{file}: {line}"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(stated.collect::<Vec<_>>(), Vec::<String>::new());
+    for (library, named) in [
+        (CLibrary::Glibc, ["__longjmp_chk", "__cxa_call_unexpected"]),
+        (
+            CLibrary::LibSystem,
+            ["__stack_chk_fail", "__cxa_call_unexpected"],
+        ),
+        (CLibrary::Bionic, ["__stack_chk_fail", "_Unwind_Resume"]),
+    ] {
+        let rows = LibraryRows::embedded(library);
+        let uncited = rows.rows().filter(|row| row.noreturn && !row.cited());
+        let names = uncited.map(|row| &*row.linked_name).collect::<Vec<_>>();
+        assert_eq!(names, Vec::<&str>::new(), "{library:?}");
+        let cited = |name: &str| rows.rows().find(|row| &*row.linked_name == name);
+        // glibc's bits/setjmp2.h, GCC's cxxabi.h, unwind-cxx.h and bits/functexcept.h, Apple
+        // Libc's stack_protector.c and bionic's __stack_chk_fail.cpp state these never return.
+        let always = ["exit", "__cxa_throw", "_ZSt9terminatev", "_Unwind_Resume"];
+        for name in always.into_iter().chain(named) {
+            assert!(
+                cited(name).is_some_and(|row| row.noreturn && row.cited()),
+                "{library:?} {name}"
+            );
+        }
     }
 }
 
@@ -527,4 +547,46 @@ fn a_cited_slot_returning_int_reads_its_integer_bytes() {
     assert!(row.citation.contains("musl"), "{}", row.citation);
     let main = musl.prototype(row).parameters[0].code_result(musl.graph());
     assert_eq!(main, Some(r2abi::ResultRead::Integer { bytes: 4 }));
+}
+
+/// D448, D449: a row a header states is cited where it binds; `ioctl` and `ptrace` stay variadic,
+/// `objc_msgSend` unstated, and each uncited list stays at the count the moves leave.
+#[test]
+fn the_rows_a_header_states_are_cited_where_they_bind() {
+    let glibc = LibraryRows::embedded(CLibrary::Glibc);
+    let cited = |rows: &LibraryRows, library, name: &str| {
+        let row = rows.row(library, name).unwrap_or_else(|| panic!("{name}"));
+        assert!(row.cited(), "{name}");
+        row.tail
+    };
+    assert_eq!(cited(&glibc, LibraryId::Glibc, "dcgettext"), Tail::None);
+    assert!(glibc.row(LibraryId::Portable, "dcgettext").is_none());
+    for name in ["ioctl", "ptrace"] {
+        assert_eq!(
+            cited(&glibc, LibraryId::Glibc, name),
+            Tail::Variadic,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        cited(&glibc, LibraryId::CxxRuntime, "__cxa_finalize"),
+        Tail::None
+    );
+    let libsystem = LibraryRows::embedded(CLibrary::LibSystem);
+    assert_eq!(cited(&libsystem, LibraryId::LibSystem, "qsort"), Tail::None);
+    assert_eq!(
+        cited(&libsystem, LibraryId::LibSystem, "ioctl"),
+        Tail::Variadic
+    );
+    let msg_send = libsystem.row(LibraryId::Objc, "objc_msgSend");
+    assert_ne!(msg_send.map(|row| row.tail), Some(Tail::None));
+    let listed = table("uncited-rows.txt");
+    let count = |heading: &str| {
+        let section = listed.split("\n# ").find(|s| s.starts_with(heading));
+        let lines = section.unwrap_or_default().lines().skip(1);
+        lines.filter(|line| line.contains(" | ")).count()
+    };
+    assert!(count("types.sdb.txt,") <= 55, "{}", count("types.sdb.txt,"));
+    assert!(count("types-linux.sdb.txt,") <= 3);
+    assert!(count("types-cxx.sdb.txt,") <= 42);
 }

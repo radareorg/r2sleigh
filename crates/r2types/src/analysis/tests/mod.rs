@@ -20,10 +20,8 @@ pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSigna
         ret_type: Some(signature.ret_type.clone().unwrap_or(CTypeLike::Void)),
         params: (signature.params.iter().enumerate())
             .map(|(index, param)| InferredSignatureParam {
-                name: match param.name.trim().is_empty() {
-                    true => format!("arg{}", index + 1),
-                    false => param.name.clone(),
-                },
+                name: (param.name.clone())
+                    .unwrap_or_else(|| r2source::positional_parameter_name(index)),
                 ty: (param.ty.clone())
                     .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void))),
             })
@@ -110,40 +108,6 @@ fn storage_of_every_width_is_a_type_c_spells() {
         assert_eq!(render_signature_type(&ty, 64), spelling);
         assert_eq!(crate::convert::parse_c_type_like(spelling, 64), Some(ty));
     }
-    // A carrier states a width and nothing else, so any type outranks it. A
-    // 128-bit integer is an integer, like the narrower ones.
-    assert!(inferred_type_is_generic(
-        Some(&CTypeLike::BitVector(256)),
-        64
-    ));
-    assert!(!inferred_type_is_generic(
-        Some(&CTypeLike::machine_storage(128, Signedness::Signed)),
-        64
-    ));
-}
-
-#[test]
-fn type_name_policy_matches_planner_guard() {
-    assert!(type_name_is_opaque_placeholder("struct type_0x1234 *"));
-    assert!(type_name_is_opaque_placeholder("struct anon_field"));
-    assert!(!type_name_is_opaque_placeholder("struct real_type *"));
-
-    let pointer = |ty: CTypeLike| CTypeLike::Pointer(Box::new(ty));
-    for generic in [
-        pointer(CTypeLike::Void),
-        pointer(CTypeLike::Const(Box::new(CTypeLike::typedef("char")))),
-        pointer(CTypeLike::typedef("unsigned char")),
-        CTypeLike::typedef("unsigned long"),
-    ] {
-        assert!(
-            inferred_type_is_generic(Some(&generic), 64),
-            "{generic:?} should stay a weak planner type"
-        );
-    }
-    assert!(!inferred_type_is_generic(
-        Some(&parse_test_type("struct real_type *", 64)),
-        64
-    ));
 }
 
 #[test]
@@ -176,4 +140,41 @@ fn semantic_role_summary_set(
         summaries: BTreeMap::from([(root, summary)]),
         diagnostics: Default::default(),
     }
+}
+
+/// A program may call its own structure `anon_cfg`: the spelling makes no placeholder (D482).
+#[test]
+fn a_declared_struct_spelled_like_a_placeholder_keeps_its_type() {
+    let declared = CTypeLike::Pointer(Box::new(CTypeLike::Struct("anon_cfg".to_owned())));
+    let current_signature = FunctionSignatureSpec {
+        ret_type: Some(CTypeLike::Void),
+        params: vec![FunctionParamSpec {
+            name: Some("cfg".to_string()),
+            ty: Some(declared),
+        }],
+        basis: SignatureBasis::Declared,
+    };
+    let analysis = build_type_analysis(TypeAnalysisInput {
+        ptr_bits: 64,
+        inferred_signature: InferredSignature {
+            function_name: "configure".to_string(),
+            ret_type: Some(CTypeLike::Void),
+            params: vec![InferredSignatureParam {
+                name: "arg1".to_string(),
+                ty: parse_test_type("int64_t", 64),
+            }],
+        },
+        parsed_context: ParsedExternalContext {
+            current_signature: Some(current_signature.clone()),
+            merged_signature: Some(current_signature),
+            ..ParsedExternalContext::default()
+        },
+        local_structs: LocalStructArtifacts::default(),
+        interproc_summary_set: None,
+        diagnostics: TypeAnalysisDiagnostics::default(),
+    });
+    assert_eq!(
+        spelled(&spelled_signature(&analysis).params[0].ty),
+        "struct anon_cfg*"
+    );
 }

@@ -1,0 +1,120 @@
+0000 The run refuter compares a leaf function's run on the machine with the lift's run. refute 0
+0001 Each recording states the registers and the memory cells the lift reads at the entry. refute 919
+0002 A refuted function names the instruction where the two runs part. refute 838
+0003 The run refuter compares a leaf function's run on the machine with the lift's run. refute 757
+0004 Each recording states the registers and the memory cells the lift reads at the entry. refute 676
+0005 A refuted function names the instruction where the two runs part. refute 595
+0006 The run refuter compares a leaf function's run on the machine with the lift's run. refute 514
+0007 Each recording states the registers and the memory cells the lift reads at the entry. refute 433
+0008 A refuted function names the instruction where the two runs part. refute 352
+0009 The run refuter compares a leaf function's run on the machine with the lift's run. refute 271
+0010 Each recording states the registers and the memory cells the lift reads at the entry. refute 190
+0011 A refuted function names the instruction where the two runs part. refute 109
+0012 The run refuter compares a leaf function's run on the machine with the lift's run. refute 28
+0013 Each recording states the registers and the memory cells the lift reads at the entry. refute 947
+0014 A refuted function names the instruction where the two runs part. refute 866
+0015 The run refuter compares a leaf function's run on the machine with the lift's run. refute 785
+0016 Each recording states the registers and the memory cells the lift reads at the entry. refute 704
+0017 A refuted function names the instruction where the two runs part. refute 623
+0018 The run refuter compares a leaf function's run on the machine with the lift's run. refute 542
+0019 Each recording states the registers and the memory cells the lift reads at the entry. refute 461
+0020 A refuted function names the instruction where the two runs part. refute 380
+0021 The run refuter compares a leaf function's run on the machine with the lift's run. refute 299
+0022 Each recording states the registers and the memory cells the lift reads at the entry. refute 218
+0023 A refuted function names the instruction where the two runs part. refute 137
+0024 The run refuter compares a leaf function's run on the machine with the lift's run. refute 56
+0025 Each recording states the registers and the memory cells the lift reads at the entry. refute 975
+0026 A refuted function names the instruction where the two runs part. refute 894
+0027 The run refuter compares a leaf function's run on the machine with the lift's run. refute 813
+0028 Each recording states the registers and the memory cells the lift reads at the entry. refute 732
+0029 A refuted function names the instruction where the two runs part. refute 651
+0030 The run refuter compares a leaf function's run on the machine with the lift's run. refute 570
+0031 Each recording states the registers and the memory cells the lift reads at the entry. refute 489
+0032 A refuted function names the instruction where the two runs part. refute 408
+0033 The run refuter compares a leaf function's run on the machine with the lift's run. refute 327
+0034 Each recording states the registers and the memory cells the lift reads at the entry. refute 246
+0035 A refuted function names the instruction where the two runs part. refute 165
+0036 The run refuter compares a leaf function's run on the machine with the lift's run. refute 84
+0037 Each recording states the registers and the memory cells the lift reads at the entry. refute 3
+0038 A refuted function names the instruction where the two runs part. refute 922
+0039 The run refuter compares a leaf function's run on the machine with the lift's run. refute 841
+0040 Each recording states the registers and the memory cells the lift reads at the entry. refute 760
+0041 A refuted function names the instruction where the two runs part. refute 679
+0042 The run refuter compares a leaf function's run on the machine with the lift's run. refute 598
+0043 Each recording states the registers and the memory cells the lift reads at the entry. refute 517
+0044 A refuted function names the instruction where the two runs part. refute 436
+0045 The run refuter compares a leaf function's run on the machine with the lift's run. refute 355
+0046 Each recording states the registers and the memory cells the lift reads at the entry. refute 274
+0047 A refuted function names the instruction where the two runs part. refute 193
+0048 The run refuter compares a leaf function's run on the machine with the lift's run. refute 112
+0049 Each recording states the registers and the memory cells the lift reads at the entry. refute 31
+0050 A refuted function names the instruction where the two runs part. refute 950
+0051 The run refuter compares a leaf function's run on the machine with the lift's run. refute 869
+0052 Each recording states the registers and the memory cells the lift reads at the entry. refute 788
+0053 A refuted function names the instruction where the two runs part. refute 707
+0054 The run refuter compares a leaf function's run on the machine with the lift's run. refute 626
+0055 Each recording states the registers and the memory cells the lift reads at the entry. refute 545
+0056 A refuted function names the instruction where the two runs part. refute 464
+0057 The run refuter compares a leaf function's run on the machine with the lift's run. refute 383
+0058 Each recording states the registers and the memory cells the lift reads at the entry. refute 302
+0059 A refuted function names the instruction where the two runs part. refute 221
+0060 The run refuter compares a leaf function's run on the machine with the lift's run. refute 140
+0061 Each recording states the registers and the memory cells the lift reads at the entry. refute 59
+0062 A refuted function names the instruction where the two runs part. refute 978
+0063 The run refuter compares a leaf function's run on the machine with the lift's run. refute 897
+0064 Each recording states the registers and the memory cells the lift reads at the entry. refute 816
+0065 A refuted function names the instruction where the two runs part. refute 735
+0066 The run refuter compares a leaf function's run on the machine with the lift's run. refute 654
+0067 Each recording states the registers and the memory cells the lift reads at the entry. refute 573
+0068 A refuted function names the instruction where the two runs part. refute 492
+0069 The run refuter compares a leaf function's run on the machine with the lift's run. refute 411
+0070 Each recording states the registers and the memory cells the lift reads at the entry. refute 330
+0071 A refuted function names the instruction where the two runs part. refute 249
+0072 The run refuter compares a leaf function's run on the machine with the lift's run. refute 168
+0073 Each recording states the registers and the memory cells the lift reads at the entry. refute 87
+0074 A refuted function names the instruction where the two runs part. refute 6
+0075 The run refuter compares a leaf function's run on the machine with the lift's run. refute 925
+0076 Each recording states the registers and the memory cells the lift reads at the entry. refute 844
+0077 A refuted function names the instruction where the two runs part. refute 763
+0078 The run refuter compares a leaf function's run on the machine with the lift's run. refute 682
+0079 Each recording states the registers and the memory cells the lift reads at the entry. refute 601
+0080 A refuted function names the instruction where the two runs part. refute 520
+0081 The run refuter compares a leaf function's run on the machine with the lift's run. refute 439
+0082 Each recording states the registers and the memory cells the lift reads at the entry. refute 358
+0083 A refuted function names the instruction where the two runs part. refute 277
+0084 The run refuter compares a leaf function's run on the machine with the lift's run. refute 196
+0085 Each recording states the registers and the memory cells the lift reads at the entry. refute 115
+0086 A refuted function names the instruction where the two runs part. refute 34
+0087 The run refuter compares a leaf function's run on the machine with the lift's run. refute 953
+0088 Each recording states the registers and the memory cells the lift reads at the entry. refute 872
+0089 A refuted function names the instruction where the two runs part. refute 791
+0090 The run refuter compares a leaf function's run on the machine with the lift's run. refute 710
+0091 Each recording states the registers and the memory cells the lift reads at the entry. refute 629
+0092 A refuted function names the instruction where the two runs part. refute 548
+0093 The run refuter compares a leaf function's run on the machine with the lift's run. refute 467
+0094 Each recording states the registers and the memory cells the lift reads at the entry. refute 386
+0095 A refuted function names the instruction where the two runs part. refute 305
+0096 The run refuter compares a leaf function's run on the machine with the lift's run. refute 224
+0097 Each recording states the registers and the memory cells the lift reads at the entry. refute 143
+0098 A refuted function names the instruction where the two runs part. refute 62
+0099 The run refuter compares a leaf function's run on the machine with the lift's run. refute 981
+0100 Each recording states the registers and the memory cells the lift reads at the entry. refute 900
+0101 A refuted function names the instruction where the two runs part. refute 819
+0102 The run refuter compares a leaf function's run on the machine with the lift's run. refute 738
+0103 Each recording states the registers and the memory cells the lift reads at the entry. refute 657
+0104 A refuted function names the instruction where the two runs part. refute 576
+0105 The run refuter compares a leaf function's run on the machine with the lift's run. refute 495
+0106 Each recording states the registers and the memory cells the lift reads at the entry. refute 414
+0107 A refuted function names the instruction where the two runs part. refute 333
+0108 The run refuter compares a leaf function's run on the machine with the lift's run. refute 252
+0109 Each recording states the registers and the memory cells the lift reads at the entry. refute 171
+0110 A refuted function names the instruction where the two runs part. refute 90
+0111 The run refuter compares a leaf function's run on the machine with the lift's run. refute 9
+0112 Each recording states the registers and the memory cells the lift reads at the entry. refute 928
+0113 A refuted function names the instruction where the two runs part. refute 847
+0114 The run refuter compares a leaf function's run on the machine with the lift's run. refute 766
+0115 Each recording states the registers and the memory cells the lift reads at the entry. refute 685
+0116 A refuted function names the instruction where the two runs part. refute 604
+0117 The run refuter compares a leaf function's run on the machine with the lift's run. refute 523
+0118 Each recording states the registers and the memory cells the lift reads at the entry. refute 442
+0119 A refuted function names the instruction where the two runs part. refute 361

@@ -87,6 +87,8 @@ pub(crate) enum Arguments {
     Bytes,
     /// A configuration key, and the value to set it to.
     Key,
+    /// A file's path.
+    File,
 }
 
 impl Arguments {
@@ -98,6 +100,7 @@ impl Arguments {
             Self::Text => "<text>",
             Self::Bytes => "<hex>",
             Self::Key => "[key[=value]]",
+            Self::File => "<file>",
         }
     }
 }
@@ -402,6 +405,13 @@ pub(crate) const VERBS: &[Verb] = &[
         "a function's source obligations",
         Some(obligations)
     ),
+    verb!(
+        ["pdie"],
+        File,
+        Maintainer,
+        "the lift run on a recorded entry state",
+        Some(replayed)
+    ),
 ];
 
 /// The verb a name names.
@@ -571,7 +581,7 @@ fn posture(out: &mut String, container: &r2image::Container) {
         row("nx", nx.to_string());
     }
     if stated {
-        row("pic", posture.pic.to_string());
+        row("pic", (posture.load == r2image::LoadBase::Slid).to_string());
     }
     if let Some(relro) = posture.relro {
         row("relro", relro.spelled().to_owned());
@@ -708,19 +718,23 @@ fn write_text(session: &mut Session, bytes: &[u8]) -> Result<String, String> {
 
 /// Write bytes spelled in hex at the cursor.
 fn write_hex(session: &mut Session, argument: &str) -> Result<String, String> {
-    let digits = argument.replace(' ', "");
+    let bytes = hex_bytes(&argument.replace(' ', ""))?;
+    patch(session, &bytes)
+}
+
+/// Bytes spelled two hex digits each.
+fn hex_bytes(digits: &str) -> Result<Vec<u8>, String> {
     if !digits.len().is_multiple_of(2) {
         return Err("a byte is two hex digits".to_owned());
     }
-    let bytes = digits
+    digits
         .as_bytes()
         .chunks(2)
         .map(|pair| {
             let text = std::str::from_utf8(pair).map_err(|_| "not hex".to_owned())?;
             u8::from_str_radix(text, 16).map_err(|_| format!("'{text}' is not hex"))
         })
-        .collect::<Result<Vec<u8>, String>>()?;
-    patch(session, &bytes)
+        .collect()
 }
 
 /// Put bytes in the patch layer at the cursor.
@@ -1451,6 +1465,135 @@ pub(crate) fn relocations(session: &Session) -> Table {
 fn low_tier(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     session.program.lifted(addr)
+}
+
+/// `pdie <recording>`: the lift of a recorded function run by `r2il::eval` from the recording's
+/// entry state, as JSON; `scripts/run_refuter.py` sets it beside the machine's run (ROADMAP D467).
+fn replayed(session: &mut Session, argument: &str) -> Result<String, String> {
+    let path = argument.trim();
+    if path.is_empty() {
+        return Err("pdie: name a recording".to_owned());
+    }
+    let request = recorded_request(path)?;
+    let response = r2engine::query::replay::replay(&session.program, &request)
+        .map_err(|refusal| refused_replay(&refusal))?;
+    let hex = |value: u128| format!("{value:#x}");
+    let stop = replay_stop(response.stop);
+    let results = (response.results.iter())
+        .map(|(name, value)| (name.clone(), serde_json::Value::String(hex(*value))))
+        .collect::<serde_json::Map<_, _>>();
+    let writes = (response.writes.iter())
+        .map(|write| {
+            let bytes = write
+                .bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            serde_json::json!({"address": hex(write.address.into()), "bytes": bytes})
+        })
+        .collect::<Vec<_>>();
+    let answer = serde_json::json!({
+        "entry": hex(request.entry.into()),
+        "stop": stop,
+        "instructions": response.instructions,
+        "results": results,
+        "writes": writes,
+    });
+    serde_json::to_string(&answer).map_err(|error| error.to_string())
+}
+
+/// The typed request a `pdie` recording states: entry, bias, registers, memory cells, results.
+fn recorded_request(path: &str) -> Result<r2engine::query::replay::ReplayRequest, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| format!("pdie: {path}: {error}"))?;
+    let recording: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("pdie: {path}: {error}"))?;
+    let number = |value: &serde_json::Value, what: &str| -> Result<u128, String> {
+        let text = value.as_str().ok_or(format!("pdie: {what} is no string"))?;
+        let digits = text
+            .strip_prefix("0x")
+            .ok_or(format!("pdie: {what} is no 0x number"))?;
+        u128::from_str_radix(digits, 16).map_err(|error| format!("pdie: {what}: {error}"))
+    };
+    let field = |name: &str| recording.get(name).ok_or(format!("pdie: no `{name}`"));
+    let address = |value: &serde_json::Value, what: &str| {
+        u64::try_from(number(value, what)?).map_err(|_| format!("pdie: {what} is past 64 bits"))
+    };
+    let mut request = r2engine::query::replay::ReplayRequest {
+        entry: address(field("entry")?, "entry")?,
+        bias: address(field("bias")?, "bias")?,
+        ..r2engine::query::replay::ReplayRequest::default()
+    };
+    let object = |name: &str| {
+        field(name)?
+            .as_object()
+            .ok_or(format!("pdie: `{name}` is no object"))
+    };
+    for (name, value) in object("registers")? {
+        request.registers.insert(name.clone(), number(value, name)?);
+    }
+    for (at, bytes) in object("cells")? {
+        let start = address(&serde_json::Value::String(at.clone()), at)?;
+        let bytes = bytes
+            .as_str()
+            .ok_or(format!("pdie: cell {at} is no string"))?;
+        let bytes = hex_bytes(bytes).map_err(|error| format!("pdie: cell {at}: {error}"))?;
+        request.cells.extend((start..).zip(bytes));
+    }
+    let results = field("results")?
+        .as_array()
+        .ok_or("pdie: `results` is no list")?;
+    request.results = (results.iter())
+        .map(|name| {
+            name.as_str()
+                .map(str::to_owned)
+                .ok_or("pdie: a result is no name".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(request)
+}
+
+/// Why `pdie` refused, as one line.
+fn refused_replay(refusal: &r2engine::query::replay::ReplayRefusal) -> String {
+    use r2engine::query::replay::ReplayRefusal;
+    match refusal {
+        ReplayRefusal::Unloaded(why) => format!("pdie: {why}"),
+        ReplayRefusal::NoDecoder { entry } => format!("pdie: no decoder holds {entry:#x}"),
+        ReplayRefusal::UnnamedRegister(name) => format!("pdie: the specification names no {name}"),
+        ReplayRefusal::Unheld { register, value } => {
+            format!("pdie: {register} cannot hold {value:#x}")
+        }
+        ReplayRefusal::Body(error) => format!("pdie: {error}"),
+        ReplayRefusal::Unordered => {
+            "pdie: the program states no byte order the evaluator reads".to_owned()
+        }
+    }
+}
+
+/// Why the replay ended, as the JSON `pdie` prints.
+fn replay_stop(stop: r2engine::query::replay::ReplayStop) -> serde_json::Value {
+    use r2engine::query::replay::ReplayStop;
+    let hex = |value: u128| format!("{value:#x}");
+    match stop {
+        ReplayStop::Returned { to } => {
+            serde_json::json!({"kind": "returned", "to": hex(to.into())})
+        }
+        ReplayStop::LeftBody { at, to } => {
+            serde_json::json!({"kind": "left-body", "at": hex(at.into()), "to": hex(to.into())})
+        }
+        ReplayStop::Unrecorded { address } => {
+            serde_json::json!({"kind": "unrecorded", "address": hex(address.into())})
+        }
+        ReplayStop::Unstated { at, offset } => {
+            serde_json::json!({"kind": "unstated", "at": hex(at.into()), "register": hex(offset.into())})
+        }
+        ReplayStop::Unmodelled { at } => {
+            serde_json::json!({"kind": "unmodelled", "at": hex(at.into())})
+        }
+        ReplayStop::Undefined { at } => {
+            serde_json::json!({"kind": "undefined", "at": hex(at.into())})
+        }
+        ReplayStop::Exhausted => serde_json::json!({"kind": "exhausted"}),
+    }
 }
 
 /// `pdd`: decompile the function at the cursor, with no radare2 anywhere.

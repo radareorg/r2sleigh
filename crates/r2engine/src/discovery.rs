@@ -209,6 +209,10 @@ pub struct Discovery<T, E> {
 }
 
 /// Every function in the program from the seeds the image states, each in its stated instruction set, and what their bodies reach.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "handed to an output contract")
+)]
 pub fn functions<W: Walker>(
     program: &dyn Program,
     seeds: impl IntoIterator<Item = (u64, Confidence, bool)>,
@@ -239,7 +243,7 @@ pub fn functions<W: Walker>(
                 address,
                 confidence,
                 thumb,
-                name: program.name_at(address),
+                name: (program.name_at(address)).map(|name| name.text().to_owned()),
             })
             .collect(),
         placeless: fixpoint.placeless,
@@ -709,11 +713,11 @@ mod tests {
     }
 
     impl Program for Named {
-        fn name_at(&self, vaddr: u64) -> Option<String> {
-            (vaddr == 0x1000).then(|| "entry".to_owned())
+        fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+            (vaddr == 0x1000).then(|| r2abi::SymbolName::new("entry"))
         }
 
-        fn import_at(&self, _vaddr: u64) -> Option<String> {
+        fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
             None
         }
 

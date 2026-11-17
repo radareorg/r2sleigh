@@ -64,6 +64,13 @@ class Generators(unittest.TestCase):
             self.assertLess(sizes[1], sizes[2], name)
             self.assertIn(generate(8)[0], ("s", "c"), name)
 
+    def test_the_rmw_dimension_writes_one_round_trip_per_slot_of_an_escaped_frame(self) -> None:
+        kind, source = scaling.rmw_round_trips(4)
+        self.assertEqual(kind, "s")
+        self.assertEqual(source.count("orq $0, "), 4)
+        self.assertIn("sub $40, %rsp\n    mov %rsp, %rdi\n    call g\n", source)
+        self.assertIn("orq $0, 24(%rsp)\n", source)
+
     def test_the_sources_are_deterministic(self) -> None:
         for name, generate in scaling.DIMENSIONS.items():
             self.assertEqual(generate(16), generate(16), name)

@@ -20,23 +20,17 @@ pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
 
-pub(crate) use facts::{
-    SignatureCertificate, is_generic_signature_type, signature_param_count_is_authoritative,
-    signature_param_name_is_weak, signature_projection_is_exact,
-};
+pub(crate) use facts::{SignatureCertificate, is_generic_signature_type};
 
 pub use callee::{
     CalleeClass, CalleeIdentity, CalleeIdentityContext, CalleeIdentityKey, CalleeResolutionFacts,
     CalleeTargetIdentityRequest, CalleeTargetResolutionRequest, ResolvedCalleeTarget,
-    normalize_callee_name,
 };
 pub use constraint::{Constraint, ConstraintSource, SolverNode};
 pub(crate) use signature_infer::{infer_signature_from_prepared_ssa, render_signature_type};
 pub use solver::{SolvedTypes, solve_constraints};
 
-pub use context::{
-    ParsedExternalContext, ProgramExtents, is_generic_arg_name, sanitize_c_identifier,
-};
+pub use context::{ParsedExternalContext, ProgramExtents, sanitize_c_identifier};
 pub use convert::{
     CTypeLike, bit_vector_tag, c_object_declaration, source_type_like, spellable_c_type_like,
     spelling_names_a_type, spells_its_structure,
@@ -48,7 +42,7 @@ pub use evidence::{DeclaredBound, EvidenceTypes};
 pub use facts::{
     CalleeFact, CalleeLinkage, CalleeModelPolicyEvidence, CalleeReturnRelation,
     FieldAccessCertificate, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
-    FunctionTypeFacts, ParameterStructure, SignatureCertificateSource,
+    FunctionTypeFacts, ParameterStructure, SignatureBasis, SignatureCertificateSource,
 };
 pub(crate) use function_facts::exact_source_return_type;
 pub use function_facts::{

@@ -2171,6 +2171,21 @@ rustc_lint::declare_lint!(
     "a static phase reads a build's shape and its source's call sites, nothing a callee states"
 );
 
+rustc_lint::declare_lint!(
+    /// A symbol name is a hint (AGENTS.md, Non-Negotiable 6; D460): its `text` is read only in an
+    /// item allowing this lint with a reason from `NAME_READ_REASONS`.
+    pub NAME_DECIDES_FACT,
+    Deny,
+    "a symbol name decides no fact; read its text only in an item that states why"
+);
+
+/// Why an item may read a symbol name's text (D460): each allow states one.
+pub const NAME_READ_REASONS: [&str; 3] = [
+    "printed",
+    "handed to an output contract",
+    "table lookup by C identifier",
+];
+
 rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2253,7 +2268,8 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     SSA_CALL_CLASS_OUTSIDE_OP,
     EXHAUSTED_READ_THROUGH_SEALED_STAGE,
     TYPE_SPELLING_REPARSED,
-    BUILD_FACTS_READS_A_CALLEE_FACT
+    BUILD_FACTS_READS_A_CALLEE_FACT,
+    NAME_DECIDES_FACT
 ]);
 
 #[unsafe(no_mangle)]
@@ -2346,6 +2362,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         function_scale::SCAN_IN_LOOP,
         unproven_negative::UNPROVEN_NEGATIVE,
         BUILD_FACTS_READS_A_CALLEE_FACT,
+        NAME_DECIDES_FACT,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
     lint_store.register_late_lint_pass(Box::new(|_| {
@@ -3270,6 +3287,14 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        if reads_a_symbol_name(cx, expr) {
+            span_lint(
+                cx,
+                NAME_DECIDES_FACT,
+                expr.span,
+                "a symbol name's text is read here; allow `name_decides_fact` on the item with one of its reasons, or decide from a fact",
+            );
+        }
         match expr.kind {
             ExprKind::Let(condition) => ssa_call_class_pattern(cx, condition.pat, expr.hir_id),
             ExprKind::Match(_, arms, _)
@@ -6135,6 +6160,84 @@ fn reparses_a_type_spelling(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     cx.tcx.item_name(def_id).as_str() == "parse_c_type_like"
         && !in_definition
         && !clippy_utils::is_in_test(cx.tcx, expr.hir_id)
+}
+
+/// Whether `expr` reads `SymbolName::text` in a crate the lint covers (D460): a method call, or the
+/// method named by path. A file under no `crates/` directory is a lint test's own.
+fn reads_a_symbol_name(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let filename = cx.sess().source_map().span_to_filename(expr.span);
+    let filename = format!("{filename:?}");
+    let covered = [
+        "crates/r2engine/src/",
+        "crates/r2ssa/src/",
+        "crates/r2types/src/",
+        "crates/r2dec/src/",
+    ];
+    if filename.contains("crates/") && !covered.iter().any(|path| filename.contains(path)) {
+        return false;
+    }
+    let symbol = |ty: rustc_middle::ty::Ty<'_>| {
+        matches!(ty.peel_refs().kind(), rustc_middle::ty::Adt(adt, _)
+            if cx.tcx.item_name(adt.did()).as_str() == "SymbolName")
+    };
+    match expr.kind {
+        ExprKind::MethodCall(segment, receiver, ..) => {
+            segment.ident.as_str() == "text" && symbol(cx.typeck_results().expr_ty(receiver))
+        }
+        ExprKind::Path(ref qpath) => match cx.qpath_res(qpath, expr.hir_id) {
+            rustc_hir::def::Res::Def(rustc_hir::def::DefKind::AssocFn, def_id) => {
+                let owner = cx.tcx.parent(def_id);
+                cx.tcx.item_name(def_id).as_str() == "text"
+                    && matches!(
+                        cx.tcx.def_kind(owner),
+                        rustc_hir::def::DefKind::Impl { of_trait: false }
+                    )
+                    && symbol(cx.tcx.type_of(owner).instantiate_identity().skip_normalization())
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The items allowed to read a symbol name's text, by reason (D460). The count only falls.
+#[cfg(test)]
+const NAME_READS_ALLOWED: usize = 17;
+
+#[test]
+fn name_decides_fact_allows_state_a_reason_and_only_fall() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut pending = ["r2engine", "r2ssa", "r2types", "r2dec"]
+        .map(|krate| root.join("crates").join(krate).join("src"))
+        .to_vec();
+    let mut allowed = 0;
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            let entries = std::fs::read_dir(&path).expect("a source directory");
+            pending.extend(entries.map(|entry| entry.expect("an entry").path()));
+            continue;
+        }
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a source file");
+        const ALLOW: &str = "allow(name_decides_fact, reason = \"";
+        for (index, _) in text.match_indices(ALLOW) {
+            let rest = &text[index + ALLOW.len()..];
+            let reason = &rest[..rest.find('"').expect("a closed reason")];
+            assert!(
+                NAME_READ_REASONS.contains(&reason),
+                "{}: `{reason}` is no reason D460 states",
+                path.display()
+            );
+            allowed += 1;
+        }
+        // An allow with no reason, or any other mention, is no counted allow.
+        let mentions = text.matches("name_decides_fact").count();
+        let counted = text.matches(ALLOW).count();
+        assert_eq!(mentions, counted, "{}: an allow without a reason", path.display());
+    }
+    assert_eq!(allowed, NAME_READS_ALLOWED, "the allowed reads only fall");
 }
 
 #[test]

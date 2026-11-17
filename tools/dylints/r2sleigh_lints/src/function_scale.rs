@@ -118,16 +118,6 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
         1,
     ),
     (
-        "r2ssa::function::rewrite::<impl function::SSAFunction>::mint_entry_lane_projections",
-        ".into_iter()",
-        1,
-    ),
-    (
-        "r2ssa::function::rewrite::<impl function::SSAFunction>::zero_scratch_insert_roots",
-        ".into_iter()",
-        1,
-    ),
-    (
         "r2ssa::graph::SsaGraph::from_function_with_storage",
         ".iter()",
         2,
@@ -156,11 +146,6 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
     (
         "r2ssa::liveness::ValueLiveness::compute_with_relocations",
         "for",
-        1,
-    ),
-    (
-        "r2ssa::obligation::SemanticObligationInventory::collect",
-        ".values()",
         1,
     ),
     ("r2ssa::obligation::ValueReaders::of", ".iter()", 1),
@@ -253,11 +238,6 @@ const STANDING_SCANS: &[(&str, &str, usize)] = &[
     (
         "r2ssa::semantic::boundaries::convention_call_boundary",
         "body_writes",
-        1,
-    ),
-    (
-        "r2ssa::semantic::certificates::collect_prepared_function_certificates",
-        ".values()",
         1,
     ),
     (

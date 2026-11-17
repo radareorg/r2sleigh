@@ -2,7 +2,9 @@
 //! reading (`r2sleigh_lift::profile`) and the ABI rows (doc/adr-call-boundary.md).
 
 use crate::Kernel;
-use crate::platform::{EntryStack, RegisterSaveArea, SaveAreaAnchor, StackGuard};
+use crate::platform::{
+    EntryStack, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor, StackGuard,
+};
 
 /// The class of value a parameter or result location carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
@@ -198,6 +200,13 @@ pub enum SpecOverride {
         extension: Extension,
         citation: &'static str,
     },
+    /// A register the specification's `unaffected` and the document disagree on; `kept` says
+    /// whether the convention's preserved set holds it (D476).
+    Preserved {
+        register: RegName,
+        kept: bool,
+        citation: &'static str,
+    },
 }
 
 /// What an ABI states of a calling convention that no compiler specification does.
@@ -225,6 +234,9 @@ pub struct ConventionRow {
     /// That the result lanes are every lane a result comes back in, and how they pair; none where
     /// no document states the set complete, so no result of the convention is ever `void`.
     pub results: Option<ResultSet>,
+    /// Every register a call leaves as it found it; none where no document states one, so no
+    /// register survives a call (doc/adr-call-boundary.md, "Lower bounds and upper bounds").
+    pub preserved: Option<PreservedSet>,
     /// The documents that state these.
     pub citation: &'static str,
 }
@@ -245,6 +257,43 @@ pub struct ResultSet {
     /// The lanes that hold nothing at entry (the x87 stack is empty on entry).
     pub empty: &'static [RegName],
     pub citation: &'static str,
+}
+
+/// The registers a document states a callee keeps, as `PlatformRegister`s are stated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreservedSet {
+    pub registers: &'static [PreservedRegister],
+    pub citation: &'static str,
+}
+
+/// One preserved register; `bits` are the bits the duty covers, `None` the whole register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreservedRegister {
+    pub register: RegName,
+    pub bits: Option<u64>,
+}
+
+impl PreservedSet {
+    /// Whether the set holds `register` whole or in part.
+    pub fn holds(&self, register: RegName) -> bool {
+        self.registers.iter().any(|held| held.register == register)
+    }
+    /// `held` as a callee-saved platform row, which states the bytes its `bits` cover.
+    pub fn row(&self, held: &PreservedRegister) -> PlatformRegister {
+        PlatformRegister {
+            register: held.register.0,
+            duty: RegisterDuty::CalleeSaved,
+            bits: held.bits,
+            citation: self.citation,
+        }
+    }
+}
+
+/// Whole registers by name.
+macro_rules! whole {
+    ($($name:literal),* $(,)?) => {
+        &[$(PreservedRegister { register: RegName($name), bits: None }),*]
+    };
 }
 
 /// That the `localrange` above the return address is one home per shared position, `step` bytes
@@ -272,6 +321,139 @@ const SYSV_RESULTS: SpecOverride = SpecOverride::Results {
                used\"; \"If the class is X87, the value is returned on the X87 stack in %st0 \
                together with %st1\"; \"If the class is COMPLEX_X87, the real part of the value \
                is returned in %st0 and the imaginary part in %st1\"",
+};
+
+const SYSV_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole!["rbx", "rsp", "rbp", "r12", "r13", "r14", "r15"],
+    citation: "System V AMD64 psABI 1.0 (x86-psABIs/x86-64-ABI 74b6f30f), section 3.2.1: \
+               \"Registers %rbp, %rbx and %r12 through %r15 belong to the calling function and \
+               the called function is required to preserve their values\"; Figure 3.4: %rsp \
+               \"stack pointer\", preserved across function calls \"Yes\"; the x87 control word, \
+               MXCSR's control bits and DF are `r2abi::platform` rows",
+};
+
+const WIN64_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole![
+        "rbx", "rbp", "rdi", "rsi", "rsp", "r12", "r13", "r14", "r15", "xmm6", "xmm7", "xmm8",
+        "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
+    ],
+    citation: "Microsoft x64 calling convention (MicrosoftDocs/cpp-docs af4947c4, \
+               docs/build/x64-calling-convention.md), \"Caller/callee saved registers\": \"The x64 \
+               ABI considers registers RBX, RBP, RDI, RSI, RSP, R12, R13, R14, R15, and \
+               XMM6-XMM15 nonvolatile. They must be saved and restored by a function that uses \
+               them\"; x64-software-conventions.md: \"XMM6:XMM15, YMM6:YMM15 | Nonvolatile (XMM), \
+               Volatile (upper half of YMM)\"; DF is an `r2abi::platform` row",
+};
+
+/// Windows' x64 and i386 specifications list the thread block's segment base; no document does.
+const NO_SEGMENT_DOCUMENT: &str = "Microsoft x64 software conventions (MicrosoftDocs/cpp-docs \
+    af4947c4): the \"Register volatility and preservation\" table and \"Caller/callee saved \
+    registers\" name no segment register, so the specification's GS_OFFSET and FS_OFFSET \
+    survive a call by no document";
+
+const MS_CONTROL_EXCEPTED: &str = "Microsoft x64 calling convention (cpp-docs af4947c4), \
+    \"FPCSR\" and \"MXCSR\": the control fields are nonvolatile, but \"There are two exceptions \
+    to the rules about the nonvolatility of the control flags: In functions where the documented \
+    purpose of the given function is to modify the nonvolatile FPCSR flags\" (and MXCSR flags), \
+    so no call keeps them unconditionally";
+
+const I386_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole!["ebx", "esi", "edi", "ebp", "esp"],
+    citation: "System V i386 ABI 1.1 (x86-psABIs/i386-ABI 9137bb3d), \"Registers\" table: %ebx \
+               \"callee-saved register\", %esp \"stack pointer\", %ebp \"callee-saved register; \
+               optionally used as frame pointer\", %esi and %edi \"callee-saved register\", each \
+               preserved across function calls \"Yes\"; DF is an `r2abi::platform` row",
+};
+
+const I386_CONTROL_UNOWNED: &str = "System V i386 ABI 1.1 (i386-ABI 9137bb3d): \"The control \
+    bits of the MXCSR register are callee-saved (preserved across calls)\" and \"the x87 control \
+    word is callee-saved\"; `r2abi::platform` states these for x86-64 only, so the model keeps \
+    them on no i386 boundary (a lower bound)";
+
+const AAPCS64_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole![
+        "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29", "sp", "d8",
+        "d9", "d10", "d11", "d12", "d13", "d14", "d15",
+    ],
+    citation: "AAPCS64 (ARM-software/abi-aa 2024Q3), 6.1.1 \"General-purpose Registers\": \"A \
+               subroutine invocation must preserve the contents of the registers r19-r29 and \
+               SP\"; 6.1.2 \"SIMD and Floating-Point registers\": \"Registers v8-v15 must be \
+               preserved by a callee across subroutine calls ... only the bottom 64 bits of each \
+               value stored in v8-v15 need to be preserved\", d8 to d15",
+};
+
+const APPLE_ARM64_PRESERVED: PreservedSet = PreservedSet {
+    citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"Apple platforms diverge from \
+               the standard 64-bit ARM architecture in a few specific ways. Apart from these \
+               small differences, iOS, tvOS, and macOS adhere to the rest of the 64-bit ARM \
+               specification\", and none of the differences names a callee-saved register (x18, \
+               \"The platforms reserve register x18\", is an `r2abi::platform` row); so AAPCS64 \
+               6.1.1 and 6.1.2: r19-r29, SP and the bottom 64 bits of v8-v15",
+    ..AAPCS64_PRESERVED
+};
+
+const AAPCS32_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole![
+        "r4", "r5", "r6", "r7", "r8", "r10", "r11", "sp", "d8", "d9", "d10", "d11", "d12", "d13",
+        "d14", "d15",
+    ],
+    citation: "AAPCS32 (ARM-software/abi-aa 2024Q3), 6.1.1 \"Core registers\": \"A subroutine \
+               must preserve the contents of the registers r4-r8, r10, r11 and SP (and r9 in PCS \
+               variants that designate r9 as v6)\"; 6.1.2.1 \"VFP register usage conventions\": \
+               \"Registers s16-s31 (d8-d15, q4-q7) must be preserved across subroutine calls\"",
+};
+
+const RISCV_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole![
+        "sp", "gp", "tp", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
+        "fs0", "fs1", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9", "fs10", "fs11",
+    ],
+    citation: "RISC-V psABI 1.0 (riscv-non-isa/riscv-elf-psabi-doc v1.0, riscv-cc.adoc), \
+               \"Integer Register Convention\": sp preserved across calls \"Yes\", s0-s11 \
+               \"Yes\", and \"procedures should not modify the integer registers tp and gp\"; \
+               \"Hardware Floating-point Calling Convention\" (riscv64-fp.cspec's): \
+               \"Floating-point registers fs0-fs11 shall be preserved across procedure calls, \
+               provided they hold values no more than ABI_FLEN bits wide\"",
+};
+
+const GO_AMD64_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole!["rsp", "rbp", "r14"],
+    citation: "Go internal ABI (golang/go go1.22.0, src/cmd/compile/abi-internal.md), amd64: \
+               \"There are no callee-save registers\"; \"RSP | Stack pointer | Same | Same\", \
+               \"RBP | Frame pointer | Same | Same\", \"R14 | Current goroutine | Same | Same\"",
+};
+
+const GO_AMD64_SCRATCH: [SpecOverride; 2] = [
+    SpecOverride::Preserved {
+        register: RegName("r15"),
+        kept: false,
+        citation: "Go internal ABI (go1.22.0), amd64: \"R15 is a scratch register except in \
+                   dynamically linked binaries\"",
+    },
+    SpecOverride::Preserved {
+        register: RegName("xmm15"),
+        kept: false,
+        citation: "Go internal ABI (go1.22.0), amd64: \"X15 | Zero value (*) | Same | \
+                   Scratch\", \"(*) Except on Plan 9, where X15 is a scratch register\"",
+    },
+];
+
+const GO_AMD64_ABI0_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole!["rsp", "rbp", "r14"],
+    citation: "Go internal ABI (go1.22.0), amd64: \"ABIInternal and ABI0 functions are able to \
+               call each other through transparent ABI wrappers\", and R14 and X15 \"will have \
+               to be restored on transitions from ABI0 code to ABIInternal code\": a call reaches \
+               ABI0 code only through a wrapper, so the caller finds RSP, RBP and R14 as it left \
+               them; the row refuses every ABI0 body, so it is read only at such a call",
+};
+
+const GO_ARM64_PRESERVED: PreservedSet = PreservedSet {
+    registers: whole!["sp", "x29", "x28", "x18"],
+    citation: "Go internal ABI (go1.22.0, src/cmd/compile/abi-internal.md), arm64: \"RSP | Stack \
+               pointer | Same | Same\", \"R29 | Frame pointer | Same | Same\", \"R28 | Current \
+               goroutine | Same | Same\", \"R18 | Reserved (not used) | Same | Same\"; \"These \
+               register meanings are compatible with Go's stack-based calling convention\", so \
+               ABI0 keeps them too",
 };
 
 const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
@@ -324,6 +506,7 @@ const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
                    %st0 to %st7 temporaries, so a callee finds the x87 stack empty: what a body \
                    holds there it wrote",
     }),
+    preserved: Some(SYSV_PRESERVED),
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;} (overflow_arg_area at offset 8, reg_save_area at 16), and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
@@ -346,7 +529,23 @@ const MICROSOFT_X64: ConventionRow = ConventionRow {
         residue: 8,
     }),
     stack_bound: None,
-    overrides: &[],
+    overrides: &[
+        SpecOverride::Preserved {
+            register: RegName("gs_base"),
+            kept: false,
+            citation: NO_SEGMENT_DOCUMENT,
+        },
+        SpecOverride::Preserved {
+            register: RegName("cwd"),
+            kept: false,
+            citation: MS_CONTROL_EXCEPTED,
+        },
+        SpecOverride::Preserved {
+            register: RegName("mxcsr"),
+            kept: false,
+            citation: MS_CONTROL_EXCEPTED,
+        },
+    ],
     results: Some(ResultSet {
         follows: &[],
         empty: &[],
@@ -355,6 +554,7 @@ const MICROSOFT_X64: ConventionRow = ConventionRow {
                    Non-scalar types including floats, doubles, and vector types such as __m128 \
                    ... are returned in XMM0\"; otherwise the caller passes a pointer, returned in RAX",
     }),
+    preserved: Some(WIN64_PRESERVED),
     citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
                defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer; \"Stack allocation\": \"The stack will always be maintained 16-byte aligned, except within the prolog (for example, after the return address is pushed)\"; \"The caller is responsible for allocating space for the parameters to the callee. The caller must always allocate sufficient space to store four register parameters, even if the callee doesn't take that many parameters\", the area directly above the return address; \"Varargs\": \"It's the callee's responsibility to dump arguments that have their address taken\"; Windows SDK vadefs.h: _crt_va_arg on _M_X64 steps the char * va_list by sizeof(__int64) per argument",
 };
@@ -373,8 +573,25 @@ const I386_CDECL: ConventionRow = ConventionRow {
         residue: 12,
     }),
     stack_bound: None,
-    overrides: &[],
+    overrides: &[
+        SpecOverride::Preserved {
+            register: RegName("fs_base"),
+            kept: false,
+            citation: NO_SEGMENT_DOCUMENT,
+        },
+        SpecOverride::Preserved {
+            register: RegName("cwd"),
+            kept: false,
+            citation: I386_CONTROL_UNOWNED,
+        },
+        SpecOverride::Preserved {
+            register: RegName("mxcsr"),
+            kept: false,
+            citation: I386_CONTROL_UNOWNED,
+        },
+    ],
     results: None,
+    preserved: Some(I386_PRESERVED),
     citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
                defines no red zone; its register table gives %ebp the frame pointer role; \"The end of the input argument area shall be aligned on a 16 byte boundary\", so %esp + 4 is a multiple of 16 at entry",
 };
@@ -399,6 +616,20 @@ const AAPCS64_INTEGER_UNSPECIFIED: [SpecOverride; 2] = [
     },
 ];
 
+/// AARCH64_win.cspec names no return address, so its `unaffected` x30 is no link it drops.
+const AAPCS64_LINK: SpecOverride = SpecOverride::Preserved {
+    register: RegName("x30"),
+    kept: false,
+    citation: "AAPCS64 (abi-aa 2024Q3), 6.1.1: the registers a subroutine invocation must \
+               preserve are \"r19-r29 and SP\"; r30 is \"LR\", \"The Link Register\"",
+};
+
+const AAPCS64_OVERRIDES: [SpecOverride; 3] = [
+    AAPCS64_INTEGER_UNSPECIFIED[0],
+    AAPCS64_INTEGER_UNSPECIFIED[1],
+    AAPCS64_LINK,
+];
+
 const AAPCS64: ConventionRow = ConventionRow {
     id: ConventionId::Aapcs64,
     cspec: USUAL,
@@ -418,7 +649,7 @@ const AAPCS64: ConventionRow = ConventionRow {
         residue: 0,
     }),
     stack_bound: None,
-    overrides: &AAPCS64_INTEGER_UNSPECIFIED,
+    overrides: &AAPCS64_OVERRIDES,
     results: Some(ResultSet {
         follows: &[
             (RegName("x1"), RegName("x0")),
@@ -431,6 +662,7 @@ const AAPCS64: ConventionRow = ConventionRow {
                    an identical first argument would be passed in (x0 and x1, or v0 to v3 for an \
                    HFA or HVA, consecutive from v0); otherwise through the memory x8 addresses",
     }),
+    preserved: Some(AAPCS64_PRESERVED),
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"; the va_list is {void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs;} (__stack at offset 0, __gr_top at 8), and \"__gr_offs: set to 0 - ((8 - named_gr) * 8)\"",
@@ -455,7 +687,9 @@ const AAPCS64_DARWIN: ConventionRow = ConventionRow {
                        extensions, up to 32 bits\"",
         },
         AAPCS64_INTEGER_UNSPECIFIED[1],
+        AAPCS64_LINK,
     ],
+    preserved: Some(APPLE_ARM64_PRESERVED),
     citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"the caller places \
                the arguments for the variadic portion of a function on the stack\", so the \
                prologue saves no register area; where the tail goes is AARCH64_apple.cspec's",
@@ -476,8 +710,30 @@ const AAPCS32: ConventionRow = ConventionRow {
         residue: 0,
     }),
     stack_bound: None,
-    overrides: &[],
+    overrides: &[
+        SpecOverride::Preserved {
+            register: RegName("r9"),
+            kept: false,
+            citation: "AAPCS32 (abi-aa 2024Q3), 6.1.1: \"The role of register r9 is platform \
+                       specific\"; it is preserved only \"in PCS variants that designate r9 \
+                       as v6\", which no row here states",
+        },
+        SpecOverride::Preserved {
+            register: RegName("pc"),
+            kept: false,
+            citation: "AAPCS32 (abi-aa 2024Q3), 6.1.1 names the registers a subroutine must \
+                       preserve, and the program counter is not one",
+        },
+        SpecOverride::Preserved {
+            register: RegName("lr"),
+            kept: false,
+            citation: "AAPCS32 (abi-aa 2024Q3), 6.1.1: a subroutine must preserve \"r4-r8, r10, \
+                       r11 and SP\"; r14 is \"LR\", \"The Link Register\"; ARM_win.cspec names no \
+                       return address, so its `unaffected` lr is no link it drops",
+        },
+    ],
     results: None,
+    preserved: Some(AAPCS32_PRESERVED),
     citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"; AAPCS32 leaves the frame pointer to the platform, and GCC in ARM state keeps it in r11, the APCS fp; \"Public interfaces\": \"SP mod 8 = 0\"",
@@ -499,6 +755,7 @@ const RISCV_LP64: ConventionRow = ConventionRow {
     stack_bound: None,
     overrides: &[],
     results: None,
+    preserved: Some(RISCV_PRESERVED),
     citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
                no red zone; \"Register Convention\": x8 \"s0/fp Saved register/frame pointer\"; \"the stack pointer shall be aligned to a 128-bit boundary upon procedure entry\"",
 };
@@ -534,8 +791,9 @@ const GO_AMD64: ConventionRow = ConventionRow {
                    goroutine | Same | Same\"; runtime/runtime2.go: `type g struct { stack stack; \
                    stackguard0 uintptr` after `type stack struct { lo, hi uintptr }`, so 16 bytes in",
     }),
-    overrides: &[],
+    overrides: &GO_AMD64_SCRATCH,
     results: None,
+    preserved: Some(GO_AMD64_PRESERVED),
     citation: "Go internal ABI (src/cmd/compile/abi-internal.md), amd64: \"RBP | Frame pointer \
                | Same | Same\"; it defines no red zone; amd64: \"The stack pointer, RSP, grows down and is always aligned to 8 bytes\"",
 };
@@ -554,7 +812,9 @@ const GO_ARM64: ConventionRow = ConventionRow {
         citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R28 | Current \
                    goroutine | Same | Same\"; runtime/runtime2.go: `stackguard0` 16 bytes into `g`",
     }),
+    overrides: &[],
     results: None,
+    preserved: Some(GO_ARM64_PRESERVED),
     citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R29 | Frame pointer \
                | Same | Same\"; it defines no red zone; arm64: \"The stack pointer, RSP, grows down and is always aligned to 16 bytes\"",
     ..GO_AMD64
@@ -568,6 +828,8 @@ const GO_AMD64_ABI0: ConventionRow = ConventionRow {
     cspec: GO_ABI0,
     home: None,
     refused: Some(GO_ABI0_REFUSED),
+    overrides: &[],
+    preserved: Some(GO_AMD64_ABI0_PRESERVED),
     ..GO_AMD64
 };
 
@@ -576,6 +838,7 @@ const GO_ARM64_ABI0: ConventionRow = ConventionRow {
     cspec: GO_ABI0,
     home: None,
     refused: Some(GO_ABI0_REFUSED),
+    preserved: Some(GO_ARM64_PRESERVED),
     ..GO_ARM64
 };
 
@@ -585,6 +848,8 @@ const GO_AMD64_UNSTATED: ConventionRow = ConventionRow {
     id: ConventionId::GoAmd64Unstated,
     home: None,
     refused: Some(GO_UNSTATED_REFUSED),
+    overrides: &GO_AMD64_SCRATCH,
+    preserved: Some(GO_AMD64_PRESERVED),
     ..GO_AMD64
 };
 
@@ -592,6 +857,8 @@ const GO_ARM64_UNSTATED: ConventionRow = ConventionRow {
     id: ConventionId::GoArm64Unstated,
     home: None,
     refused: Some(GO_UNSTATED_REFUSED),
+    overrides: &[],
+    preserved: Some(GO_ARM64_PRESERVED),
     ..GO_ARM64
 };
 
@@ -609,11 +876,37 @@ mod tests {
             for item in row.overrides {
                 let citation = match item {
                     SpecOverride::Results { citation, .. }
-                    | SpecOverride::Extension { citation, .. } => citation,
+                    | SpecOverride::Extension { citation, .. }
+                    | SpecOverride::Preserved { citation, .. } => citation,
                 };
                 assert!(!citation.is_empty(), "{id:?}");
             }
         }
+    }
+
+    /// D476: every row states its preserved set, and a `Preserved` override's `kept` says whether
+    /// the set holds the register, so the set and its named differences have one owner.
+    #[test]
+    fn every_row_cites_its_preserved_set_and_its_named_differences_agree_with_it() {
+        for id in ConventionId::ALL {
+            let row = id.row();
+            let set = row
+                .preserved
+                .unwrap_or_else(|| panic!("{id:?}: a cited set"));
+            assert!(
+                !set.citation.is_empty() && !set.registers.is_empty(),
+                "{id:?}"
+            );
+            let named = row.overrides.iter().filter_map(|item| match *item {
+                SpecOverride::Preserved { register, kept, .. } => Some((register, kept)),
+                _ => None,
+            });
+            for (register, kept) in named {
+                assert_eq!(set.holds(register), kept, "{id:?}: {register:?}");
+            }
+        }
+        let sysv = ConventionId::SysVAmd64.row().preserved.expect("SysV's set");
+        assert!(sysv.holds(RegName("rbx")) && !sysv.holds(RegName("rcx")));
     }
 
     /// x86-64's call pushes a return address onto a 16-byte-aligned stack; AArch64's pushes none.

@@ -1,17 +1,15 @@
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
+use r2ssa::InstId;
 use r2ssa::dense::IdMap;
-use r2ssa::{InstId, SSAVarNameKind};
 
 use crate::{CalleeFact, CalleeLinkage, FunctionType, SignatureCertificateSource};
 
-const CALLEE_NAMESPACE_PREFIXES: [&str; 6] = ["sym.imp.", "sym.", "imp.", "reloc.", "dbg.", "fcn."];
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CalleeIdentityKey {
     DirectAddress(u64),
     IndirectSite(InstId),
-    Named(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -27,8 +25,6 @@ pub enum CalleeClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CalleeIdentityEvidence {
     DirectTarget,
-    RawMemoryName,
-    RawConstantName,
     ImportLinkage,
     InternalLinkage,
     CalleeFactName,
@@ -51,7 +47,6 @@ pub enum CalleeCallArgPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CalleeTargetResolutionSource {
-    PreparedIdentity,
     CallsiteResolution,
     PreparedDirectTarget,
 }
@@ -66,14 +61,14 @@ pub struct CalleeTargetPolicyDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCalleeIdentity {
-    pub key: Option<CalleeIdentityKey>,
+    pub key: CalleeIdentityKey,
     pub identity: CalleeIdentity,
     pub source: CalleeTargetResolutionSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCalleeTarget {
-    pub key: Option<CalleeIdentityKey>,
+    pub key: CalleeIdentityKey,
     pub identity: CalleeIdentity,
     pub source: CalleeTargetResolutionSource,
     pub policy: CalleeTargetPolicyDecision,
@@ -83,7 +78,6 @@ pub struct ResolvedCalleeTarget {
 pub struct CalleeTargetIdentityRequest<'a> {
     pub resolution: Option<&'a CalleeResolutionFacts>,
     pub callsite: Option<InstId>,
-    pub prepared_identity: Option<&'a CalleeIdentity>,
     pub prepared_direct_target: Option<u64>,
     pub direct_target_context: Option<&'a CalleeIdentityContext<'a>>,
 }
@@ -118,10 +112,8 @@ pub struct CalleeIdentityContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalleeIdentity {
     pub target_addr: Option<u64>,
-    pub raw_name: Option<String>,
-    pub display_name: Option<String>,
-    pub normalized_name: Option<String>,
-    pub aliases: BTreeSet<String>,
+    pub raw_name: Option<r2source::SymbolName>,
+    pub display_name: Option<r2source::SymbolName>,
     pub class: CalleeClass,
     pub is_recursive: bool,
     pub signature: Option<FunctionType>,
@@ -211,29 +203,16 @@ impl CalleeResolutionFacts {
     }
 
     pub fn target_resolution_source_for_presence(
-        has_prepared_identity: bool,
         has_callsite_identity: bool,
         has_prepared_direct_target_identity: bool,
     ) -> Option<CalleeTargetResolutionSource> {
-        if has_prepared_identity {
-            Some(CalleeTargetResolutionSource::PreparedIdentity)
-        } else if has_callsite_identity {
+        if has_callsite_identity {
             Some(CalleeTargetResolutionSource::CallsiteResolution)
         } else if has_prepared_direct_target_identity {
             Some(CalleeTargetResolutionSource::PreparedDirectTarget)
         } else {
             None
         }
-    }
-
-    fn key_for_prepared_identity(identity: &CalleeIdentity) -> Option<CalleeIdentityKey> {
-        identity
-            .target_addr
-            .map(CalleeIdentityKey::DirectAddress)
-            .or_else(|| {
-                let key = identity.primary_key();
-                (!key.trim().is_empty()).then_some(CalleeIdentityKey::Named(key))
-            })
     }
 
     fn direct_target_identity_from_request(
@@ -265,23 +244,12 @@ impl CalleeResolutionFacts {
         });
         let direct_target_identity = Self::direct_target_identity_from_request(request);
         let source = Self::target_resolution_source_for_presence(
-            request.prepared_identity.is_some(),
             callsite_identity.is_some(),
             direct_target_identity.is_some(),
         )?;
         let (key, identity) = match source {
-            CalleeTargetResolutionSource::PreparedIdentity => {
-                let identity = request.prepared_identity?.clone();
-                (Self::key_for_prepared_identity(&identity), identity)
-            }
-            CalleeTargetResolutionSource::CallsiteResolution => {
-                let (key, identity) = callsite_identity?;
-                (Some(key), identity)
-            }
-            CalleeTargetResolutionSource::PreparedDirectTarget => {
-                let (key, identity) = direct_target_identity?;
-                (Some(key), identity)
-            }
+            CalleeTargetResolutionSource::CallsiteResolution => callsite_identity?,
+            CalleeTargetResolutionSource::PreparedDirectTarget => direct_target_identity?,
         };
         Some(ResolvedCalleeIdentity {
             key,
@@ -338,37 +306,19 @@ impl CalleeResolutionFacts {
 }
 
 impl CalleeIdentity {
+    /// A callee known only by its spelling: no class, no address and no evidence, since a name
+    /// decides neither (D459); the spelling is kept as written, case and all.
     pub fn from_name(name: &str) -> Self {
-        let lower = name.trim().to_ascii_lowercase();
-        let storage_kind = SSAVarNameKind::classify(&lower);
-        let target_addr = parse_raw_address_name(name);
-        // Linkage is a typed fact on the callee, never read off the spelling.
-        let (class, classification_evidence) = classify_callee_name(storage_kind);
-        let mut evidence = BTreeSet::new();
-        if let Some(classification_evidence) = classification_evidence {
-            evidence.insert(classification_evidence);
-        }
-        let raw_name = name.trim().to_string();
-        let normalized_name = normalize_callee_name(name);
-        let mut aliases = BTreeSet::new();
-        if !raw_name.is_empty() {
-            aliases.insert(raw_name.clone());
-        }
-        if !normalized_name.is_empty() {
-            aliases.insert(normalized_name.clone());
-        }
-
+        let raw_name = r2source::SymbolName::new(name.trim());
         Self {
-            target_addr,
+            target_addr: None,
             raw_name: Some(raw_name.clone()),
             display_name: Some(raw_name),
-            normalized_name: Some(normalized_name),
-            aliases,
-            class,
+            class: CalleeClass::Unknown,
             is_recursive: false,
             signature: None,
             signature_source: None,
-            evidence,
+            evidence: BTreeSet::new(),
         }
     }
 
@@ -400,15 +350,11 @@ impl CalleeIdentity {
         };
 
         let mut identity = if name.is_empty() {
-            let display_name = r2source::unnamed_identifier(addr);
-            let mut aliases = BTreeSet::from([format!("addr:{addr:x}"), display_name.clone()]);
-            aliases.insert(format!("0x{addr:x}"));
+            let display_name = r2source::SymbolName::new(r2source::unnamed_identifier(addr));
             CalleeIdentity {
                 target_addr: Some(addr),
                 raw_name: Some(display_name.clone()),
                 display_name: Some(display_name),
-                normalized_name: Some(format!("addr:{addr:x}")),
-                aliases,
                 class: CalleeClass::RawAddress,
                 is_recursive: false,
                 signature: None,
@@ -423,18 +369,8 @@ impl CalleeIdentity {
             identity
         };
 
-        identity.insert_direct_target_aliases(addr);
-        if let Some(name) = fact_name {
-            identity.insert_name_alias(name);
-        }
-        if let Some(name) = function_name {
-            identity.insert_name_alias(name);
-        }
-        if let Some(name) = symbol_name {
-            identity.insert_name_alias(name);
-            if identity.class == CalleeClass::Unknown {
-                identity.class = CalleeClass::ExternalSymbol;
-            }
+        if symbol_name.is_some() && identity.class == CalleeClass::Unknown {
+            identity.class = CalleeClass::ExternalSymbol;
         }
         if callee_fact.is_some_and(|fact| fact.linkage.authorizes_import_policy()) {
             identity = identity.with_import_linkage_evidence();
@@ -462,26 +398,13 @@ impl CalleeIdentity {
         self
     }
 
+    #[cfg(test)]
     pub fn raw_name(&self) -> &str {
-        self.raw_name.as_deref().unwrap_or("")
-    }
-
-    pub fn normalized_name(&self) -> &str {
-        self.normalized_name.as_deref().unwrap_or("")
+        (self.raw_name.as_ref()).map_or("", r2source::SymbolName::text)
     }
 
     pub fn class(&self) -> CalleeClass {
         self.class
-    }
-
-    pub fn is_raw_storage_target(&self) -> bool {
-        self.class == CalleeClass::RawAddress
-            && self.evidence.iter().any(|evidence| {
-                matches!(
-                    evidence,
-                    CalleeIdentityEvidence::RawMemoryName | CalleeIdentityEvidence::RawConstantName
-                )
-            })
     }
 
     pub fn is_import_policy_authorized(&self) -> bool {
@@ -544,140 +467,6 @@ impl CalleeIdentity {
         }
         None
     }
-
-    pub fn matches_normalized_name(&self, normalized: &str) -> bool {
-        let normalized = normalized.trim();
-        !normalized.is_empty()
-            && (self.normalized_name.as_deref() == Some(normalized)
-                || self
-                    .aliases
-                    .iter()
-                    .any(|alias| normalize_callee_name(alias) == normalized))
-    }
-
-    pub fn primary_key(&self) -> String {
-        self.normalized_name
-            .clone()
-            .or_else(|| self.display_name.clone())
-            .or_else(|| self.raw_name.clone())
-            .or_else(|| self.target_addr.map(|addr| format!("addr:{addr:x}")))
-            .unwrap_or_default()
-    }
-
-    pub fn matches_identity(&self, other: &Self) -> bool {
-        let left = self.primary_key();
-        let right = other.primary_key();
-        (!left.is_empty() && left == right)
-            || self
-                .aliases
-                .iter()
-                .any(|alias| other.aliases.contains(alias))
-    }
-
-    fn insert_direct_target_aliases(&mut self, addr: u64) {
-        self.aliases.insert(format!("addr:{addr:x}"));
-        self.aliases.insert(r2source::unnamed_identifier(addr));
-        self.aliases.insert(format!("0x{addr:x}"));
-    }
-
-    fn insert_name_alias(&mut self, name: &str) {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        self.aliases.insert(trimmed.to_string());
-        let normalized = normalize_callee_name(trimmed);
-        if !normalized.is_empty() {
-            self.aliases.insert(normalized);
-        }
-    }
-}
-
-fn classify_callee_name(
-    storage_kind: SSAVarNameKind,
-) -> (CalleeClass, Option<CalleeIdentityEvidence>) {
-    match storage_kind {
-        SSAVarNameKind::Memory => (
-            CalleeClass::RawAddress,
-            Some(CalleeIdentityEvidence::RawMemoryName),
-        ),
-        SSAVarNameKind::Constant => (
-            CalleeClass::RawAddress,
-            Some(CalleeIdentityEvidence::RawConstantName),
-        ),
-        _ => (CalleeClass::Unknown, None),
-    }
-}
-
-pub fn normalize_callee_name(name: &str) -> String {
-    let raw = name.trim();
-    if let Some(addr) = parse_raw_address_name(raw) {
-        return format!("addr:{addr:x}");
-    }
-    // A name that restates the entry address says nothing more than the
-    // address does. This engine writes `fcn.` and `fcn_`; `sub_` is what a
-    // binary carries when another tool named it.
-    let lowered = raw.to_ascii_lowercase();
-    if let Some(addr) = ["sub_", "fcn_", "fcn."]
-        .iter()
-        .find_map(|prefix| lowered.strip_prefix(prefix))
-        .and_then(|suffix| suffix.split('_').next())
-        .and_then(|suffix| u64::from_str_radix(suffix, 16).ok())
-    {
-        return format!("addr:{addr:x}");
-    }
-
-    let mut normalized = lowered;
-    loop {
-        let mut stripped = false;
-        for prefix in CALLEE_NAMESPACE_PREFIXES {
-            if let Some(rest) = normalized.strip_prefix(prefix) {
-                normalized = rest.to_string();
-                stripped = true;
-                break;
-            }
-        }
-        if !stripped {
-            break;
-        }
-    }
-    while let Some(rest) = normalized.strip_suffix("@plt") {
-        normalized = rest.to_string();
-    }
-    while let Some(rest) = normalized.strip_suffix(".plt") {
-        normalized = rest.to_string();
-    }
-    if let Some((base, suffix)) = normalized.rsplit_once('_')
-        && !base.is_empty()
-        && !suffix.is_empty()
-        && suffix.chars().all(|ch| ch.is_ascii_digit())
-    {
-        normalized = base.to_string();
-    }
-
-    normalized
-}
-
-fn parse_raw_address_name(name: &str) -> Option<u64> {
-    let lower = name.trim().to_ascii_lowercase();
-    let kind = SSAVarNameKind::classify(&lower);
-    let payload = match kind {
-        SSAVarNameKind::Memory => lower.strip_prefix("ram:")?,
-        SSAVarNameKind::Constant => lower.strip_prefix("const:")?,
-        _ => return None,
-    };
-    parse_address_payload(payload)
-}
-
-fn parse_address_payload(payload: &str) -> Option<u64> {
-    let value = payload.split('_').next().unwrap_or(payload);
-    if let Some(hex) = value.strip_prefix("0x") {
-        return u64::from_str_radix(hex, 16).ok();
-    }
-    if value.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return u64::from_str_radix(value, 16).ok();
-    }
-    value.parse().ok()
 }
 
 #[cfg(test)]
@@ -761,64 +550,29 @@ mod tests {
         }
     }
 
-    fn minimal_identity_with_key(key: Option<&str>) -> CalleeIdentity {
-        CalleeIdentity {
-            target_addr: None,
-            raw_name: None,
-            display_name: None,
-            normalized_name: key.map(str::to_string),
-            aliases: BTreeSet::new(),
-            class: CalleeClass::Unknown,
-            is_recursive: false,
-            signature: None,
-            signature_source: None,
-            evidence: BTreeSet::new(),
-        }
-    }
-
+    /// No spelling decides a callee's class or address, and the name keeps its case (D459).
     #[test]
     fn callee_identity_class_is_never_read_off_a_namespace_spelling() {
-        let cases = [
-            ("ram:401000_0", CalleeClass::RawAddress, "addr:401000"),
-            ("const:0x401000", CalleeClass::RawAddress, "addr:401000"),
-            ("sym.imp.printf", CalleeClass::Unknown, "printf"),
-            ("imp.printf", CalleeClass::Unknown, "printf"),
-            ("reloc.memcpy", CalleeClass::Unknown, "memcpy"),
-            ("sym.helper", CalleeClass::Unknown, "helper"),
-            // A name that restates the entry address normalises to the
-            // address, so a call the engine spelled `fcn.401000` and one it
-            // knew only by its target are one identity rather than two.
-            ("fcn.401000", CalleeClass::Unknown, "addr:401000"),
-            ("helper", CalleeClass::Unknown, "helper"),
+        let names = [
+            "ram:401000_0",
+            "const:0x401000",
+            "RAM:401000",
+            "sym.imp.printf",
+            "imp.printf",
+            "reloc.memcpy",
+            "sym.helper",
+            "fcn.401000",
+            "Helper",
         ];
-
-        for (name, class, normalized) in cases {
+        for name in names {
             let identity = CalleeIdentity::from_name(name);
             assert_eq!(identity.raw_name(), name);
-            assert_eq!(identity.class(), class, "{name}");
-            assert_eq!(identity.normalized_name(), normalized, "{name}");
-            assert!(identity.aliases.contains(name), "{name}");
-            assert!(identity.aliases.contains(normalized), "{name}");
-            assert_eq!(
-                identity.is_raw_storage_target(),
-                class == CalleeClass::RawAddress,
-                "{name}",
-            );
+            assert_eq!(identity.display_name, Some(r2source::SymbolName::new(name)));
+            assert_eq!(identity.class(), CalleeClass::Unknown, "{name}");
+            assert_eq!(identity.target_addr, None, "{name}");
+            assert!(identity.evidence.is_empty(), "{name}");
             assert!(!identity.is_import_policy_authorized(), "{name}");
         }
-    }
-
-    #[test]
-    fn callee_identity_normalizes_address_and_plt_aliases() {
-        assert_eq!(normalize_callee_name("sub_00401000"), "addr:401000");
-        // The engine's own spelling normalises the same way, or a call to an
-        // unnamed function would stop matching its own identity.
-        assert_eq!(normalize_callee_name("fcn_00401000"), "addr:401000");
-        assert_eq!(normalize_callee_name("fcn.00401000"), "addr:401000");
-        assert_eq!(normalize_callee_name("sym.imp.printf@plt"), "printf");
-        assert_eq!(normalize_callee_name("sym.imp.printf.plt"), "printf");
-        assert_eq!(normalize_callee_name("reloc.sym.imp.memcpy"), "memcpy");
-        assert_eq!(normalize_callee_name("sym.helper_2"), "helper");
     }
 
     #[test]
@@ -832,8 +586,10 @@ mod tests {
         let identity = CalleeIdentity::from_direct_target(0x401000, &ctx);
 
         assert_eq!(identity.target_addr, Some(0x401000));
-        assert_eq!(identity.display_name.as_deref(), Some("sym.imp.printf"));
-        assert_eq!(identity.normalized_name(), "printf");
+        assert_eq!(
+            identity.display_name,
+            Some(r2source::SymbolName::new("sym.imp.printf"))
+        );
         assert_eq!(identity.class(), CalleeClass::Imported);
         assert!(
             identity
@@ -851,9 +607,6 @@ mod tests {
                 .contains(&CalleeIdentityEvidence::ImportLinkage)
         );
         assert!(identity.is_import_policy_authorized());
-        assert!(identity.aliases.contains("addr:401000"));
-        assert!(identity.aliases.contains("sym.function_name"));
-        assert!(identity.aliases.contains("sym.symbol_name"));
     }
 
     #[test]
@@ -884,7 +637,10 @@ mod tests {
 
         let identity = CalleeIdentity::from_direct_target(0x401028, &ctx);
 
-        assert_eq!(identity.normalized_name(), "printf");
+        assert_eq!(
+            identity.display_name,
+            Some(r2source::SymbolName::new("printf"))
+        );
         assert!(identity.is_import_policy_authorized());
         assert!(
             identity
@@ -1006,18 +762,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_target_identity_does_not_insert_empty_normalized_aliases() {
-        let function_names = FxHashMap::default();
-        let symbols = FxHashMap::default();
-        let callee_facts = BTreeMap::from([(0x401040, callee_fact(0x401040, "sym.imp."))]);
-        let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
-
-        let identity = CalleeIdentity::from_direct_target(0x401040, &ctx);
-
-        assert!(!identity.aliases.contains(""));
-    }
-
-    #[test]
     fn callee_target_policy_does_not_import_from_name_hint_alone() {
         let identity = CalleeIdentity::from_name("sym.imp.printf");
         let callee_facts = BTreeMap::new();
@@ -1116,14 +860,11 @@ mod tests {
 
     #[test]
     fn callee_resolution_source_precedence_truth_table_is_exhaustive() {
-        for mask in 0u8..8 {
-            let has_prepared_identity = mask & 0b0001 != 0;
-            let has_callsite_identity = mask & 0b0010 != 0;
-            let has_prepared_direct_target = mask & 0b0100 != 0;
+        for mask in 0u8..4 {
+            let has_callsite_identity = mask & 0b01 != 0;
+            let has_prepared_direct_target = mask & 0b10 != 0;
 
-            let expected = if has_prepared_identity {
-                Some(CalleeTargetResolutionSource::PreparedIdentity)
-            } else if has_callsite_identity {
+            let expected = if has_callsite_identity {
                 Some(CalleeTargetResolutionSource::CallsiteResolution)
             } else if has_prepared_direct_target {
                 Some(CalleeTargetResolutionSource::PreparedDirectTarget)
@@ -1133,50 +874,13 @@ mod tests {
 
             assert_eq!(
                 CalleeResolutionFacts::target_resolution_source_for_presence(
-                    has_prepared_identity,
                     has_callsite_identity,
                     has_prepared_direct_target,
                 ),
                 expected,
-                "wrong source precedence for mask {mask:04b}",
+                "wrong source precedence for mask {mask:02b}",
             );
         }
-    }
-
-    #[test]
-    fn callee_resolution_policy_prefers_prepared_identity_over_callsite_resolution() {
-        let function_names = FxHashMap::from_iter([(0x402000, "sym.local".to_string())]);
-        let symbols = FxHashMap::default();
-        let callee_facts =
-            BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
-        let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
-        let callsite = r2ssa::InstId(0x10);
-        let resolution =
-            CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x402000)], &ctx);
-        let prepared_identity = CalleeIdentity::from_direct_target(0x401000, &ctx);
-
-        let resolved =
-            CalleeResolutionFacts::resolve_target_policy(CalleeTargetResolutionRequest {
-                identity: CalleeTargetIdentityRequest {
-                    resolution: Some(&resolution),
-                    callsite: Some(callsite),
-                    prepared_identity: Some(&prepared_identity),
-                    prepared_direct_target: None,
-                    direct_target_context: Some(&ctx),
-                },
-                callee_facts: &callee_facts,
-            })
-            .expect("prepared identity should resolve");
-
-        assert_eq!(
-            resolved.source,
-            CalleeTargetResolutionSource::PreparedIdentity,
-        );
-        assert_eq!(resolved.identity.target_addr, Some(0x401000));
-        assert_eq!(
-            resolved.policy.arg_policy(),
-            CalleeCallArgPolicy::ImportedLike
-        );
     }
 
     #[test]
@@ -1195,7 +899,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: Some(&resolution),
                     callsite: Some(callsite),
-                    prepared_identity: None,
                     prepared_direct_target: Some(0x401000),
                     direct_target_context: Some(&ctx),
                 },
@@ -1228,7 +931,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: Some(&resolution),
                     callsite: Some(callsite),
-                    prepared_identity: None,
                     prepared_direct_target: Some(0x402000),
                     direct_target_context: Some(&ctx),
                 },
@@ -1261,7 +963,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: None,
                     callsite: None,
-                    prepared_identity: None,
                     prepared_direct_target: Some(0x401000),
                     direct_target_context: Some(&ctx),
                 },
@@ -1288,7 +989,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: None,
                     callsite: None,
-                    prepared_identity: None,
                     prepared_direct_target: None,
                     direct_target_context: Some(&ctx),
                 },
@@ -1311,7 +1011,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: None,
                     callsite: Some(unresolved_site),
-                    prepared_identity: None,
                     prepared_direct_target: None,
                     direct_target_context: Some(&ctx),
                 },
@@ -1335,7 +1034,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: None,
                     callsite: None,
-                    prepared_identity: None,
                     prepared_direct_target: Some(0x401000),
                     direct_target_context: Some(&ctx),
                 },
@@ -1371,7 +1069,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: Some(&resolution),
                     callsite: Some(unresolved_site),
-                    prepared_identity: None,
                     prepared_direct_target: None,
                     direct_target_context: Some(&ctx),
                 },
@@ -1398,7 +1095,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: Some(&resolution),
                     callsite: Some(callsite),
-                    prepared_identity: None,
                     prepared_direct_target: None,
                     direct_target_context: Some(&ctx),
                 },
@@ -1432,7 +1128,6 @@ mod tests {
                 identity: CalleeTargetIdentityRequest {
                     resolution: None,
                     callsite: None,
-                    prepared_identity: None,
                     prepared_direct_target: None,
                     direct_target_context: Some(&ctx),
                 },
@@ -1440,44 +1135,6 @@ mod tests {
             })
             .is_none()
         );
-    }
-
-    #[test]
-    fn callee_identity_matching_separates_exact_alias_and_negative_cases() {
-        let exact_left = minimal_identity_with_key(Some("printf"));
-        let exact_right = minimal_identity_with_key(Some("printf"));
-        assert!(exact_left.matches_identity(&exact_right));
-
-        let mut alias_left = minimal_identity_with_key(Some("fact_helper"));
-        alias_left.aliases.insert("sym.function_name".to_string());
-        let mut alias_right = minimal_identity_with_key(Some("function_name"));
-        alias_right.aliases.insert("sym.function_name".to_string());
-        assert!(alias_left.matches_identity(&alias_right));
-
-        let unrelated_left = CalleeIdentity::from_name("sym.imp.printf");
-        let unrelated_right = CalleeIdentity::from_name("sym.imp.puts");
-        assert!(!unrelated_left.matches_identity(&unrelated_right));
-
-        let empty_left = minimal_identity_with_key(None);
-        let empty_right = minimal_identity_with_key(None);
-        assert!(!empty_left.matches_identity(&empty_right));
-    }
-
-    #[test]
-    fn normalized_name_matching_uses_canonical_aliases_only() {
-        let identity = CalleeIdentity::from_name("sym.imp.printf@plt");
-
-        assert!(identity.matches_normalized_name("printf"));
-        assert!(!identity.matches_normalized_name(""));
-        assert!(!identity.matches_normalized_name("puts"));
-
-        let normalized_only = minimal_identity_with_key(Some("strcmp"));
-        assert!(normalized_only.matches_normalized_name("strcmp"));
-
-        let mut alias_only = minimal_identity_with_key(Some("fact_helper"));
-        alias_only.aliases.insert("sym.imp.memcpy@plt".to_string());
-        assert!(alias_only.matches_normalized_name("memcpy"));
-        assert!(!alias_only.matches_normalized_name("fact_helper_and_memcpy"));
     }
 
     #[test]
@@ -1490,15 +1147,15 @@ mod tests {
         let identity = CalleeIdentity::from_direct_target(0x401050, &ctx);
 
         assert_eq!(identity.target_addr, Some(0x401050));
-        assert_eq!(identity.primary_key(), "addr:401050");
-        assert_eq!(identity.display_name.as_deref(), Some("fcn_401050"));
+        assert_eq!(
+            identity.display_name,
+            Some(r2source::SymbolName::new("fcn_401050"))
+        );
         assert!(
             identity
                 .evidence
                 .contains(&CalleeIdentityEvidence::DirectTarget)
         );
-        assert!(identity.aliases.contains("addr:401050"));
-        assert!(identity.aliases.contains("fcn_401050"));
     }
 
     #[test]
@@ -1520,8 +1177,10 @@ mod tests {
         let by_site = facts
             .identity_for_callsite(callsite)
             .expect("callsite identity should be indexed");
-        assert_eq!(by_site.display_name.as_deref(), Some("sym.imp.printf"));
-        assert_eq!(by_site.primary_key(), "printf");
+        assert_eq!(
+            by_site.display_name,
+            Some(r2source::SymbolName::new("sym.imp.printf"))
+        );
         assert_eq!(by_site.non_variadic_known_arity(), Some(2));
         assert_eq!(by_site.class(), CalleeClass::Imported);
         assert!(by_site.is_import_policy_authorized());
@@ -1565,8 +1224,8 @@ mod tests {
         assert_eq!(
             facts
                 .identity_for_callsite(callsite)
-                .map(CalleeIdentity::primary_key),
-            Some("addr:401000".to_string())
+                .and_then(|identity| identity.target_addr),
+            Some(0x401000)
         );
     }
 
@@ -1576,8 +1235,6 @@ mod tests {
             target_addr: None,
             raw_name: None,
             display_name: None,
-            normalized_name: None,
-            aliases: BTreeSet::new(),
             class: CalleeClass::RawAddress,
             is_recursive: false,
             signature: None,
@@ -1585,17 +1242,9 @@ mod tests {
             evidence: BTreeSet::new(),
         };
 
-        assert!(!base.is_raw_storage_target());
-
-        let mut imported_without_evidence = base.clone();
+        let mut imported_without_evidence = base;
         imported_without_evidence.class = CalleeClass::Imported;
         assert!(!imported_without_evidence.is_import_policy_authorized());
-
-        let mut raw_with_evidence = base;
-        raw_with_evidence
-            .evidence
-            .insert(CalleeIdentityEvidence::RawMemoryName);
-        assert!(raw_with_evidence.is_raw_storage_target());
 
         let import_policy_authorized = imported_without_evidence.with_import_linkage_evidence();
         assert!(import_policy_authorized.is_import_policy_authorized());
@@ -1605,22 +1254,6 @@ mod tests {
 #[cfg(kani)]
 mod kani_proofs {
     use super::*;
-
-    fn pick_name_kind(tag: u8) -> SSAVarNameKind {
-        match tag % 11 {
-            0 => SSAVarNameKind::RegisterAlias,
-            1 => SSAVarNameKind::Temporary,
-            2 => SSAVarNameKind::Constant,
-            3 => SSAVarNameKind::Memory,
-            4 => SSAVarNameKind::AddressSpace,
-            5 => SSAVarNameKind::Symbol,
-            6 => SSAVarNameKind::Object,
-            7 => SSAVarNameKind::Data,
-            8 => SSAVarNameKind::Got,
-            9 => SSAVarNameKind::Frame,
-            _ => SSAVarNameKind::Ordinary,
-        }
-    }
 
     fn pick_callee_class(tag: u8) -> CalleeClass {
         match tag % 6 {
@@ -1641,54 +1274,31 @@ mod kani_proofs {
         }
     }
 
-    fn proof_identity(key: Option<&str>) -> CalleeIdentity {
-        CalleeIdentity {
-            target_addr: None,
-            raw_name: None,
-            display_name: None,
-            normalized_name: key.map(str::to_string),
-            aliases: BTreeSet::new(),
-            class: CalleeClass::Unknown,
-            is_recursive: false,
-            signature: None,
-            signature_source: None,
-            evidence: BTreeSet::new(),
-        }
+    /// No spelling decides a callee's class or address (D459), which replaces the proof that the
+    /// class read only the spelling's storage kind: no class is read off a spelling at all.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn callee_identity_from_a_name_states_no_class_and_no_address() {
+        let names = ["ram:401000_0", "const:0x401000", "sym.imp.printf", "helper"];
+        let name = names[usize::from(kani::any::<u8>()) % names.len()];
+        let identity = CalleeIdentity::from_name(name);
+        assert_eq!(identity.class(), CalleeClass::Unknown);
+        assert_eq!(identity.target_addr, None);
     }
 
     #[kani::proof]
-    fn callee_name_classification_reads_only_storage_kind() {
-        let storage_kind = pick_name_kind(kani::any());
+    fn callee_identity_is_its_target_address_alone() {
+        let a = u64::from(kani::any::<u16>());
+        let b = u64::from(kani::any::<u16>());
+        let bound = CalleeIdentityKey::DirectAddress(a);
 
-        let (class, evidence) = classify_callee_name(storage_kind);
-
-        match storage_kind {
-            SSAVarNameKind::Memory => {
-                assert_eq!(class, CalleeClass::RawAddress);
-                assert_eq!(evidence, Some(CalleeIdentityEvidence::RawMemoryName));
-            }
-            SSAVarNameKind::Constant => {
-                assert_eq!(class, CalleeClass::RawAddress);
-                assert_eq!(evidence, Some(CalleeIdentityEvidence::RawConstantName));
-            }
-            _ => {
-                assert_eq!(class, CalleeClass::Unknown);
-                assert_eq!(evidence, None);
-            }
-        }
-    }
-
-    #[kani::proof]
-    fn identity_matching_requires_nonempty_equal_key_or_alias_overlap() {
-        let left = proof_identity(Some("printf"));
-        let same = proof_identity(Some("printf"));
-        let different = proof_identity(Some("puts"));
-        let empty_left = proof_identity(None);
-        let empty_right = proof_identity(None);
-
-        assert!(left.matches_identity(&same));
-        assert!(!left.matches_identity(&different));
-        assert!(!empty_left.matches_identity(&empty_right));
+        assert_eq!(
+            CalleeResolutionFacts::callsite_binding_conflicts(
+                Some(&bound),
+                &CalleeIdentityKey::DirectAddress(b),
+            ),
+            a != b,
+        );
     }
 
     #[kani::proof]
@@ -1791,19 +1401,15 @@ mod kani_proofs {
 
     #[kani::proof]
     fn callee_resolution_source_precedence_is_total() {
-        let has_prepared_identity: bool = kani::any();
         let has_callsite_identity: bool = kani::any();
         let has_prepared_direct_target: bool = kani::any();
 
         let source = CalleeResolutionFacts::target_resolution_source_for_presence(
-            has_prepared_identity,
             has_callsite_identity,
             has_prepared_direct_target,
         );
 
-        if has_prepared_identity {
-            assert_eq!(source, Some(CalleeTargetResolutionSource::PreparedIdentity));
-        } else if has_callsite_identity {
+        if has_callsite_identity {
             assert_eq!(
                 source,
                 Some(CalleeTargetResolutionSource::CallsiteResolution)
@@ -1820,40 +1426,34 @@ mod kani_proofs {
 
     #[kani::proof]
     fn callee_resolution_source_returns_none_only_without_inputs() {
-        let has_prepared_identity: bool = kani::any();
         let has_callsite_identity: bool = kani::any();
         let has_prepared_direct_target: bool = kani::any();
 
         let source = CalleeResolutionFacts::target_resolution_source_for_presence(
-            has_prepared_identity,
             has_callsite_identity,
             has_prepared_direct_target,
         );
 
         assert_eq!(
             source.is_none(),
-            !has_prepared_identity && !has_callsite_identity && !has_prepared_direct_target,
+            !has_callsite_identity && !has_prepared_direct_target,
         );
     }
 
     #[kani::proof]
     fn callee_resolution_source_never_skips_higher_priority_inputs() {
-        let has_prepared_identity: bool = kani::any();
         let has_callsite_identity: bool = kani::any();
         let has_prepared_direct_target: bool = kani::any();
 
         let source = CalleeResolutionFacts::target_resolution_source_for_presence(
-            has_prepared_identity,
             has_callsite_identity,
             has_prepared_direct_target,
         );
 
         if source == Some(CalleeTargetResolutionSource::CallsiteResolution) {
-            assert!(!has_prepared_identity);
             assert!(has_callsite_identity);
         }
         if source == Some(CalleeTargetResolutionSource::PreparedDirectTarget) {
-            assert!(!has_prepared_identity);
             assert!(!has_callsite_identity);
             assert!(has_prepared_direct_target);
         }
@@ -1861,12 +1461,10 @@ mod kani_proofs {
 
     #[kani::proof]
     fn callee_resolution_has_no_rendered_expression_source() {
-        let has_prepared_identity: bool = kani::any();
         let has_callsite_identity: bool = kani::any();
         let has_prepared_direct_target: bool = kani::any();
 
         let source = CalleeResolutionFacts::target_resolution_source_for_presence(
-            has_prepared_identity,
             has_callsite_identity,
             has_prepared_direct_target,
         );
@@ -1874,8 +1472,7 @@ mod kani_proofs {
         assert!(
             matches!(
                 source,
-                Some(CalleeTargetResolutionSource::PreparedIdentity)
-                    | Some(CalleeTargetResolutionSource::CallsiteResolution)
+                Some(CalleeTargetResolutionSource::CallsiteResolution)
                     | Some(CalleeTargetResolutionSource::PreparedDirectTarget)
                     | None
             ),

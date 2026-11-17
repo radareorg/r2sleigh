@@ -19,6 +19,7 @@ pub mod decode;
 pub mod proved;
 pub mod records;
 pub mod references;
+pub mod replay;
 
 pub use decode::{instructions, listing};
 

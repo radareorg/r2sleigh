@@ -40,14 +40,14 @@ use crate::{
 /// program calls one. Whoever opened the binary answers them.
 pub trait Program: crate::body::Program {
     /// What the program calls this address, where it names it at all.
-    fn name_at(&self, vaddr: u64) -> Option<String>;
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName>;
 
     /// The import this address stands for, where the binary says it is one.
     ///
     /// Asked of the binary rather than guessed from a name: a program that
     /// defines its own `strlen` carries a body there, and rendering that
     /// against the library's declaration would be a claim it never made.
-    fn import_at(&self, vaddr: u64) -> Option<String>;
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName>;
 
     /// The control for the request in hand: its cancellation, its deadline and
     /// the work it has spent.
@@ -93,6 +93,11 @@ pub trait Program: crate::body::Program {
     /// The language the function at this address is written in, as the container states it.
     fn language_at(&self, _vaddr: u64) -> r2abi::statement::SourceLanguage {
         r2abi::statement::SourceLanguage::C
+    }
+
+    /// Where the loader places the image, as its header states it; `Unstated` where none does.
+    fn load_base(&self) -> r2abi::statement::LoadBase {
+        r2abi::statement::LoadBase::Unstated
     }
 
     /// The registers the body at `entry` leaves as it found them on every path to a return, from
@@ -1142,6 +1147,10 @@ pub fn decompile(
 }
 
 /// Whether a body that transfers to these callees and reads these import slots calls anything declared to take a function.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 pub(crate) fn hands_a_function(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -1152,10 +1161,11 @@ pub(crate) fn hands_a_function(
     let direct = callees
         .into_iter()
         .filter_map(|callee| program.import_at(callee));
-    let sealed = |slot: &u64| crate::stated::sealed_import(program, *slot).map(str::to_owned);
+    let sealed =
+        |slot: &u64| crate::stated::sealed_import(program, *slot).map(r2abi::SymbolName::new);
     let through_a_slot = loads.iter().filter_map(sealed);
     direct.chain(through_a_slot).any(|name| {
-        let declared = Declared::import(target, &name);
+        let declared = Declared::import(target, name.text());
         declared.is_some_and(|declared| {
             let code = |parameter: &r2abi::Parameter| parameter.code_returns(declared.graph);
             (declared.prototype.parameters.iter()).any(|parameter| code(parameter).is_some())
@@ -1198,6 +1208,10 @@ pub(crate) fn handed(
 
 /// Whether control comes back from the import at `address`, as its own declaration says, or from a
 /// body the binary's debug information states never returns; `None` where neither says.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 pub(crate) fn declared_return(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -1217,16 +1231,14 @@ pub(crate) fn declared_return(
         return (go && accepted_premises().contains(&premise))
             .then(|| program.name_at(address))
             .flatten()
-            .and_then(|name| Citation::runtime(&name))
+            .and_then(|name| Citation::runtime(name.text()))
             .map(|citation| Return::Never(Never::cited(citation)));
     };
-    // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
-    Some(match target.imports.row(&name) {
-        Some(row) if row.noreturn => Return::Never(match Citation::of(row) {
-            Some(citation) => Never::cited(citation),
-            None => Never::uncited(),
-        }),
-        _ => Return::Comes,
+    // Only a cited row states a "never" (D485); every other call comes back.
+    let row = target.imports.row(name.text()).filter(|row| row.noreturn);
+    Some(match row.and_then(Citation::of) {
+        Some(citation) => Return::Never(Never::cited(citation)),
+        None => Return::Comes,
     })
 }
 
@@ -1314,6 +1326,10 @@ struct Read {
 /// An import has no body here to read an interface off, so its declared
 /// prototype goes in the convention's own slots and stands in for one, and the
 /// same declaration states the C signature the call renders with.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 fn declare_imports(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
@@ -1332,7 +1348,7 @@ fn declare_imports(
         if let Some(import) = crate::declared::import_call(target) {
             callees.imports.insert(*address, import);
         }
-        let Some(declared) = Declared::import(target, &name) else {
+        let Some(declared) = Declared::import(target, name.text()) else {
             callees
                 .unstated
                 .insert(*address, r2ssa::UnstatedImport::Undeclared);
@@ -1432,6 +1448,9 @@ pub(crate) struct Stated<'a> {
     /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
     /// (D376); an alone read (`CalleeReads`) asks none, so a statement reads no statement.
     pub(crate) asks: bool,
+    /// The closed decision the caller asked before the build, under the gate `finish` asks it:
+    /// `None` where it was not asked (D442).
+    pub(crate) decided: Option<Option<r2source::SourceClosedDecision>>,
 }
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md):
@@ -1461,12 +1480,15 @@ fn resolved_alone(
         false => Unreadable::NotPrepared,
     };
     let declared_root = native.declaration(address);
+    // The caller's closed decision, asked before the first build, so a decided body seals once (D442).
+    let asked = stated.decided;
+    let decided = asked.flatten();
     let mut construction =
-        (native.construct_first(walked, &imports, &declared_root)).map_err(unreadable)?;
+        (native.construct_first(walked, &imports, &declared_root, decided)).map_err(unreadable)?;
     if stated.asks {
         let asked = construction.unstated_rewriting_callees();
         if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
-            let premises = premises_reading(false);
+            let premises = premises_reading(decided.is_some());
             let restated =
                 native.restate_against(&walked.root, construction, (&imports, &premises));
             construction = restated.map_err(unreadable)?;
@@ -1477,7 +1499,7 @@ fn resolved_alone(
         entry: address,
         declared_root,
         seal: seal.map_err(|why| unreadable(NativeRefusal::of_preparation(why)))?,
-        asked: None,
+        asked,
     };
     let finished = native.finish(walked, &imports, stated.world, first);
     finished
@@ -1593,7 +1615,7 @@ pub(crate) fn callee_built(
         let targets = reached(&walked.root.body, native.program);
         declare_imports(&native, target, &targets, ptr_bits, &mut imports);
         let declared_root = native.declaration(address);
-        let construction = native.construct_first(walked, &imports, &declared_root)?;
+        let construction = native.construct_first(walked, &imports, &declared_root, None)?;
         Ok(Built {
             address,
             construction,
@@ -2329,15 +2351,17 @@ impl<'a> Native<'a> {
         walk: &Walk,
         callees: &Callees,
         declared_root: &Restatement,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
-        let capture = Self::first_capture(walk, declared_root, None);
+        let closed = closed_result.is_some();
+        let capture = Self::first_capture(walk, declared_root, closed_result);
         let (lifted, evidence) = self.lifted(&walk.root, callees, capture)?;
         TrustedSsaArtifact::construct_with_callee_interfaces(
             lifted,
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(false),
+            &premises_reading(closed),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2346,7 +2370,11 @@ impl<'a> Native<'a> {
     fn evidence(&self, walked: &Walked, callees: &Callees) -> r2ssa::CalleeEvidence {
         let calls = call_sites(&walked.body, self.program);
         let library = library_evidence(self.program, self.target.imports, &calls);
-        callees.evidence(library, reentering_calls(&calls), walked.body.exits.clone())
+        callees.evidence(
+            library,
+            reentering_calls(self.program, &calls),
+            walked.body.exits.clone(),
+        )
     }
 
     /// A body resolved from its first seal, and whether another seal is the answer: one restating
@@ -2584,8 +2612,15 @@ impl<'a> Native<'a> {
     }
 
     /// What the program calls the function at `entry`.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "handed to an output contract")
+    )]
     fn name_of(&self, entry: u64) -> String {
-        (self.program.name_at(entry)).unwrap_or_else(|| r2source::unnamed_function(entry))
+        (self.program.name_at(entry)).map_or_else(
+            || r2source::unnamed_function(entry),
+            |name| name.text().to_owned(),
+        )
     }
 
     /// The tables the dispatches in a prepared body read, fetched.
@@ -2766,12 +2801,16 @@ impl<'a> Native<'a> {
     }
 
     /// The table as the snapshot carries it: where it lies, the dispatch that reads it, each target and its name.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "handed to an output contract")
+    )]
     fn captured(
         &self,
         read: &r2ssa::indirect::DispatchTableRead,
         targets: &[u64],
     ) -> Option<r2source::SourceCodePointerTable> {
-        let name = |target: &u64| self.program.name_at(*target).map(Into::into);
+        let name = |target: &u64| (self.program.name_at(*target)).map(|name| name.text().into());
         Some(r2source::SourceCodePointerTable::new(
             read.address,
             read.size,
@@ -2965,7 +3004,7 @@ impl<'a> Native<'a> {
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
         let calls = call_sites(&walked.body, self.program);
         let library = library_evidence(self.program, self.target.imports, &calls);
-        let reentering = reentering_calls(&calls);
+        let reentering = reentering_calls(self.program, &calls);
         let snapshot = self.snapshot(walked, calls, capture)?;
         let lifted = Disassembler::lift_owned_function(snapshot)
             .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
@@ -3077,6 +3116,7 @@ impl<'a> Native<'a> {
             interface,
             closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
+            load: self.program.load_base(),
             member_calls,
         };
 
@@ -3112,6 +3152,10 @@ fn reached(body: &crate::body::Body, program: &dyn Program) -> Vec<u64> {
 }
 
 /// Where each transfer to another function is made and what it reaches, as the walk read it.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "handed to an output contract")
+)]
 fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall> {
     let mut sites = Vec::new();
     for block in &body.blocks {
@@ -3122,7 +3166,7 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
             sites.push(NativeCall {
                 instruction,
                 target: transfer.target,
-                name: program.name_at(transfer.target),
+                name: (program.name_at(transfer.target)).map(|name| name.text().to_owned()),
                 transfer: transfer.kind,
                 linkage: match program.import_at(transfer.target) {
                     Some(_) => r2source::AdvisoryCalleeLinkage::Imported,
@@ -3136,6 +3180,10 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
 
 /// The summary each import a body calls states through the row it binds (D383); an unbound import,
 /// or one whose row states no effects, has none.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 fn library_evidence(
     program: &dyn Program,
     imports: &crate::imports::Imports,
@@ -3146,18 +3194,22 @@ fn library_evidence(
         .filter(|call| call.linkage == r2source::AdvisoryCalleeLinkage::Imported)
         .filter_map(|call| {
             let name = program.import_at(call.target)?;
-            let summary = crate::library::import_summary(call.target, &name, imports)?;
+            let summary = crate::library::import_summary(call.target, name.text(), imports)?;
             Some((call.target, summary))
         })
         .collect()
 }
 
-/// The call targets r2abi's runtime model says re-enter their caller at its entry, by the name the
-/// program gives them: a model keyed by name, which the stack check weighs beside its shape.
-fn reentering_calls(calls: &[NativeCall]) -> BTreeSet<u64> {
+/// The calls that re-enter their caller at its entry: a Go callee the container states, under the
+/// granted runtime premise, that r2abi's model names (`r2abi/src/runtime.rs`, obj6.go `stacksplit`).
+fn reentering_calls(program: &dyn Program, calls: &[NativeCall]) -> BTreeSet<u64> {
+    if !accepted_premises().contains(&r2source::Premise::GoRuntime) {
+        return BTreeSet::new();
+    }
     calls
         .iter()
         .filter(|call| call.transfer == r2source::AdvisoryCallTransfer::Call)
+        .filter(|call| program.language_at(call.target) == r2abi::statement::SourceLanguage::Go)
         .filter(|call| {
             call.name
                 .as_deref()
@@ -3218,6 +3270,10 @@ impl Native<'_> {
 
     /// The named program data this body points at, each with the type the
     /// binary's debug information declares at its address, and their graph.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "handed to an output contract")
+    )]
     fn data_symbols(
         &self,
         body: &crate::body::Body,
@@ -3241,7 +3297,7 @@ impl Native<'_> {
             std::iter::once(address).chain(start.filter(|start| *start != address))
         });
         let named = (starts.collect::<BTreeSet<_>>().into_iter())
-            .filter_map(|address| Some((address, self.program.name_at(address)?)))
+            .filter_map(|address| Some((address, self.program.name_at(address)?.text().to_owned())))
             .collect::<Vec<_>>();
         let types = (named.iter())
             .map(|(address, _)| declarations.object_at(*address).map(|object| object.ty))
@@ -3255,6 +3311,10 @@ impl Native<'_> {
 
     /// What one call operation calls, as the walk's transfer names it: a direct call its
     /// target, a call through a sealed import slot that import (`CallSlot`, audit W8).
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "table lookup by C identifier")
+    )]
     fn called_name(
         &self,
         sites: &[NativeCall],
@@ -3263,7 +3323,10 @@ impl Native<'_> {
         let instruction = op.call()?.instruction?;
         let site = sites.iter().find(|site| site.instruction == instruction)?;
         // A row applies to an import only, never to a body by its name.
-        Some((instruction, self.program.import_at(site.target)?))
+        Some((
+            instruction,
+            self.program.import_at(site.target)?.text().to_owned(),
+        ))
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.
@@ -3542,7 +3605,8 @@ pub fn convention_model(
     let at = Resolver { arch, id: row.id };
     let (sections, hidden_return) = sections(&at, prototype, row)?;
     let link = profile.return_address.as_deref().and_then(|n| at.placed(n));
-    let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
+    let (preserved, reserved) = duties(&at, row.preserved, bits, kernel);
+    let dropped = dropped_unaffected(&at, prototype, link, &preserved, &reserved);
     let owned = owned(prototype, row.home, &sections, profile.return_address_slot);
     let results = results(&at, prototype, row, &sections)?;
     let parts = ConventionParts {
@@ -3553,8 +3617,9 @@ pub fn convention_model(
         results,
         owned,
         preserved,
-        killed: at.lanes(&prototype.killed_by_call),
-        likely_trash: at.lanes(&prototype.likely_trash),
+        killed: [&at.lanes(&prototype.killed_by_call)[..], &dropped]
+            .concat()
+            .into(),
         reserved,
         link,
         forms: forms(&at, prototype, row, bits, (library, guards)),
@@ -3844,17 +3909,27 @@ fn owned(
         .collect()
 }
 
-/// What a call preserves (`unaffected` less the return address, and the ABI's callee-saved
-/// rows) and what the platform reserves.
+/// What a call preserves (the row's cited set and the platform's callee-saved rows) and what the
+/// platform reserves; the specification's `unaffected` list proves no survival (D476).
 fn duties(
     at: &Resolver<'_>,
-    prototype: &r2sleigh_lift::profile::ProtoModel,
-    link: Option<CanonicalStorageId>,
+    cited: Option<r2abi::convention::PreservedSet>,
     bits: u32,
     kernel: r2abi::Kernel,
 ) -> (Box<[LaneSet]>, Box<[LaneSet]>) {
-    let mut preserved = at.lanes(&prototype.unaffected).into_vec();
-    preserved.retain(|lanes| Some(lanes.storage) != link);
+    let mut preserved = Vec::new();
+    let held = cited
+        .iter()
+        .flat_map(|set| set.registers.iter().map(move |held| (set, held)));
+    for (set, held) in held {
+        let Some(storage) = at.placed(held.register.0) else {
+            continue;
+        };
+        match held.bits {
+            None => preserved.push(at.in_root(storage)),
+            Some(_) => preserved.extend(covered_runs(storage, &set.row(held))),
+        }
+    }
     let mut reserved = Vec::new();
     let rows = r2abi::architecture_registers(&at.arch.name)
         .iter()
@@ -3874,6 +3949,31 @@ fn duties(
     preserved.sort_unstable();
     preserved.dedup();
     (preserved.into(), reserved.into())
+}
+
+/// Each `unaffected` lane no cited row keeps, which a call may write, with one `convention-model`
+/// evidence line each (D476).
+fn dropped_unaffected(
+    at: &Resolver<'_>,
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    link: Option<CanonicalStorageId>,
+    preserved: &[LaneSet],
+    reserved: &[LaneSet],
+) -> Vec<LaneSet> {
+    let kept = |lanes: &LaneSet| covered_by(preserved, lanes) || covered_by(reserved, lanes);
+    let stated = at.lanes(&prototype.unaffected).into_vec();
+    let dropped = (stated.into_iter())
+        .filter(|lanes| Some(lanes.storage) != link && !kept(lanes))
+        .collect::<Vec<_>>();
+    for lanes in &dropped {
+        r2il::refusal_evidence!(
+            "convention-model",
+            "{:?}: the specification's unaffected {:?} is in no cited preserved set",
+            at.id,
+            lanes.narrowed()
+        );
+    }
+    dropped
 }
 
 /// Whether `runs` cover every byte of `lanes`. `O(n log n)` in the runs.
@@ -4083,12 +4183,12 @@ mod tests {
             NONE
         }
 
-        fn name_at(&self, vaddr: u64) -> Option<String> {
+        fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
             self.import_at(vaddr)
         }
 
-        fn import_at(&self, vaddr: u64) -> Option<String> {
-            (vaddr == 0x1018).then(|| "on_double".to_owned())
+        fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+            (vaddr == 0x1018).then(|| r2abi::SymbolName::new("on_double"))
         }
     }
 

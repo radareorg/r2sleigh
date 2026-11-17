@@ -29,7 +29,8 @@ METER_N = 512
 # A site whose own visits more than triple from N to 2N grows faster than n^1.58.
 SITE_GROWTH = 3.0
 # A dimension that fails today, by the row that owns its cost; held exactly both ways.
-OPEN = {}
+# rmw_round_trips: memory SSA asks every held location per access, Ir 2.367 at N = 64 (D457).
+OPEN = {"rmw_round_trips": "D457"}
 # A meter dimension that fails today, by the row that owns its cost; held exactly both ways.
 SCAN_OPEN = {}
 # The files whose superlinear sites each open row owns; a site elsewhere fails in any dimension.
@@ -79,12 +80,23 @@ def escaped_locals(n):
                  "int main(void) { return (int)f(); }\n")
 
 
+def rmw_round_trips(n):
+    """n slots of a frame whose address a call takes, each `or $0` in place: a scan of every round
+    trip per access is O(A * T), with T = n (D452)."""
+    frame = 8 * (n + 1)
+    body = "".join(f"    orq $0, {8 * i}(%rsp)\n" for i in range(n))
+    return "s", (f".text\n.globl _start\n{START}g:\n    ret\nf:\n    push %rbx\n    sub ${frame}, %rsp\n"
+                 f"    mov %rsp, %rdi\n    call g\n{body}    xor %eax, %eax\n    add ${frame}, %rsp\n"
+                 f"    pop %rbx\n    ret\n")
+
+
 DIMENSIONS = {
     "calls_in_one_block": calls_in_one_block,
     "unproven_returns": unproven_returns,
     "struct_parameter_accesses": struct_parameter_accesses,
     "halting_calls": halting_calls,
     "escaped_locals": escaped_locals,
+    "rmw_round_trips": rmw_round_trips,
 }
 
 

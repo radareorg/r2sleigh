@@ -532,7 +532,7 @@ mod tests {
         let narrow = graph
             .values
             .iter()
-            .find(|value| value.var.name().starts_with("tmp:lane:") && value.var.size == 4)
+            .find(|value| value.var.is_lane() && value.var.size == 4)
             .map(|value| value.id)
             .expect("lane temporary");
         let wide = value_named(&graph, "RAX", 1);

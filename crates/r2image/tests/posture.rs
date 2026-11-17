@@ -1,6 +1,6 @@
 //! How an image is linked and protected, each expectation as `readelf -lW -d` and radare2's `i` state it.
 
-use r2image::{Image, Posture, Relro};
+use r2image::{Image, LoadBase, Posture, Relro};
 
 fn posture(bytes: &[u8]) -> Posture {
     let image = Image::parse(bytes.to_vec()).expect("the fixture parses");
@@ -15,7 +15,6 @@ fn a_dynamic_executable_states_its_interpreter_and_a_full_relro() {
         Some("/lib64/ld-linux-x86-64.so.2")
     );
     assert_eq!(posture.nx, Some(true));
-    assert!(posture.pic);
     assert_eq!(posture.relro, Some(Relro::Full));
     assert!(!posture.statically_linked);
 }
@@ -24,7 +23,6 @@ fn a_dynamic_executable_states_its_interpreter_and_a_full_relro() {
 fn a_static_executable_has_no_interpreter_and_no_relro() {
     let posture = posture(include_bytes!("../../../tests/fixtures/syscalls_static_O2"));
     assert_eq!(posture.interpreter, None);
-    assert!(!posture.pic);
     assert_eq!(posture.relro, Some(Relro::No));
     assert!(posture.statically_linked);
 }
@@ -35,7 +33,6 @@ fn a_static_executable_has_no_interpreter_and_no_relro() {
 fn a_shared_object_is_neither_interpreted_nor_static() {
     let posture = posture(include_bytes!("../../../tests/fixtures/arm_plt_lld_be8.so"));
     assert_eq!(posture.interpreter, None);
-    assert!(posture.pic);
     assert_eq!(posture.relro, Some(Relro::Partial));
     assert!(!posture.statically_linked);
 }
@@ -45,6 +42,77 @@ fn a_shared_object_is_neither_interpreted_nor_static() {
 fn a_format_without_program_headers_states_no_posture() {
     let posture = posture(include_bytes!("../../../tests/fixtures/manual_limits_O0"));
     assert_eq!(posture, Posture::default());
+}
+
+/// gABI chapter 5, "Base Address": an `ET_EXEC` runs at its file's addresses, an `ET_DYN` at one
+/// base; a relocatable object and a Mach-O state neither.
+#[test]
+fn each_header_states_where_the_loader_places_the_image() {
+    let load = |bytes: &[u8]| posture(bytes).load;
+    let fixtures = [
+        (
+            &include_bytes!("../../../tests/fixtures/syscalls_static_O2")[..],
+            LoadBase::Linked,
+        ),
+        (
+            include_bytes!("../../../tests/fixtures/rv_O0g"),
+            LoadBase::Slid,
+        ),
+        (
+            include_bytes!("../../../tests/fixtures/arm_plt_lld_be8.so"),
+            LoadBase::Slid,
+        ),
+        (
+            include_bytes!("../../../tests/fixtures/x86_64_common_code.o"),
+            LoadBase::Unstated,
+        ),
+        (
+            include_bytes!("../../../tests/fixtures/manual_limits_O0"),
+            LoadBase::Unstated,
+        ),
+        (DYNAMIC_EXECUTABLE, LoadBase::Linked),
+    ];
+    for (index, (bytes, expected)) in fixtures.into_iter().enumerate() {
+        assert_eq!(load(bytes), expected, "fixture {index}");
+    }
+}
+
+/// A dynamic `ET_EXEC`: `PT_DYNAMIC` at 0x2e08, its `DT_DEBUG` entry (value 0) at 0x2ec8.
+const DYNAMIC_EXECUTABLE: &[u8] =
+    include_bytes!("../../../tests/coverage/pinned/branchy_gcc_x64_O0");
+
+/// `DYNAMIC_EXECUTABLE` with its `DT_DEBUG` entry restated as `(tag, value)`.
+fn restated(tag: i64, value: u64) -> Vec<u8> {
+    let mut bytes = DYNAMIC_EXECUTABLE.to_vec();
+    assert_eq!(bytes[0x2ec8..0x2ed0], 21i64.to_le_bytes(), "DT_DEBUG moved");
+    bytes[0x2ec8..0x2ed0].copy_from_slice(&tag.to_le_bytes());
+    bytes[0x2ed0..0x2ed8].copy_from_slice(&value.to_le_bytes());
+    bytes
+}
+
+/// gABI `DT_TEXTREL` and `DF_TEXTREL`: "one or more relocation entries might request modifications
+/// to a non-writable segment", so the loader may write the text and its addresses are not proven.
+#[test]
+fn an_executable_stating_text_relocations_states_no_load_base() {
+    assert_eq!(posture(&restated(22, 0)).load, LoadBase::Unstated); // DT_TEXTREL
+    assert_eq!(posture(&restated(30, 4)).load, LoadBase::Unstated); // DT_FLAGS, DF_TEXTREL
+    assert_eq!(posture(&restated(30, 8)).load, LoadBase::Linked); // DT_FLAGS, DF_BIND_NOW
+}
+
+/// An `ET_EXEC` whose `PT_DYNAMIC` runs past the file states nothing about text relocations.
+#[test]
+fn an_executable_whose_dynamic_section_is_unreadable_states_no_load_base() {
+    let mut bytes = DYNAMIC_EXECUTABLE.to_vec();
+    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let (table, size) = (word(&bytes, 0x20) as usize, usize::from(bytes[0x36]));
+    let header = (0..usize::from(bytes[0x38]))
+        .map(|index| table + index * size)
+        .find(|at| bytes[*at..*at + 4] == 2u32.to_le_bytes())
+        .expect("a PT_DYNAMIC");
+    let past = bytes.len() as u64 + 1;
+    bytes[header + 8..header + 16].copy_from_slice(&past.to_le_bytes());
+    let image = Image::parse(bytes).expect("the header past the file still parses");
+    assert_eq!(image.container().posture.load, LoadBase::Unstated);
 }
 
 /// Each program header of `rv_O0g` with its offset and size set to `value`: a path and a dynamic

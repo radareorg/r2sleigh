@@ -1562,3 +1562,793 @@ r2 = '^static true$'
 r2s = '^static false$'
 verdict = "r2s-right"
 reason = "radare2 prints static when the image needs no library (an empty DT_NEEDED); a shared object or a memory image that holds a PT_DYNAMIC is relocated by another image's loader, so it is not statically linked. r2s says static for an image with neither PT_INTERP nor PT_DYNAMIC, the one nothing else relocates (the permanence rule reads it)"
+
+# ── The analysis verbs (ROADMAP D490): afl entries, afb blocks, afi noreturn, afv frame, axt references ──
+#
+# lacking   the side that does not state the fact: `r2` (r2s states it alone) or `r2s`
+# r2s, r2   regular expressions over each tool's row: an `afl` row carries r2s's basis
+#           (`basis=stated`) and the FDE that starts there (`fde=0x..-0x..`, objdump's
+#           .eh_frame row); the side lacking an entry prints `<missing> refs=KIND:mnemonic,..`,
+#           what it records referencing the address
+# function  a regular expression over the function's `afl` row (or its address)
+# Each reason names the audit's root-cause class (A bounds, B noreturn, C switch, D data
+# references, E stack variables, F arguments) and the instance read by hand.
+
+[[judged]]
+command = "afb"
+binaries = ["dwarf_go_tree", "go-cdetect"]
+corpus = "elf"
+function = 'sym\.runtime\.goPanicSliceB$|sym\.syscall\.Getenv$'
+r2s = '^0x0042d043 |^0x0047aa84 '
+verdict = "r2s-right"
+upstream = "Go binaries: runtime.gopanic and the runtime.panicIndex family fall through, so the block runs into the next one"
+reason = "class B: a Go panic helper never returns (it unwinds through gopanic). dwarf_go_tree 0x42d0ce `e85d160000 call runtime.gopanic` ends r2s's block under the go-runtime premise; radare2's block 0x42d043 runs on into the morestack block at 0x42d0d4. go-cdetect 0x47aa84 `call runtime.panicIndex`: radare2 keeps the nop and `call runtime.deferreturn` after it"
+
+[[judged]]
+command = "afb"
+binaries = ["dwarf_go_tree", "go-cdetect"]
+corpus = "elf"
+r2s = '^0x[0-9a-f]+ 0x[0-9a-f]+ \d+$'
+r2 = '^0x[0-9a-f]+ 0x[0-9a-f]+ 00:0000 \d+$'
+verdict = "r2-right"
+reason = "class A: a Go stack-growth call returns to the instruction after it. dwarf_go_tree 0x401044 `e8278d0500 call runtime.morestack_noctxt; ebb5 jmp runtime.text`: r2s ends the block at the call with no edge (5 bytes), radare2 keeps the jmp (7 bytes). Go 1.14 asm_amd64.s:581-582 stores f's PC (the return address) in g.sched.pc and newstack resumes there with gogo, so the jmp runs; owner ROADMAP D503"
+
+[[judged]]
+command = "afb"
+binaries = "0pack"
+corpus = "elf"
+function = '_ZN2el4base6Writer9constructEiPKcz'
+verdict = "r2s-right"
+upstream = "noreturn types: add _ZSt24__throw_out_of_range_fmtPKcz (std::__throw_out_of_range_fmt, [[noreturn]] in bits/functexcept.h)"
+reason = "class B: 0pack 0x5f8472 `e809c8e5ff call sym.imp._ZSt24__throw_out_of_range_fmtPKcz`; libstdc++ bits/functexcept.h declares it __attribute__((__noreturn__)), so r2s ends the block at the call (18 bytes) and radare2 runs 8 bytes on with an edge to 0x466a74"
+
+[[judged]]
+command = "afb"
+binaries = "freebsd-ls"
+corpus = "elf"
+function = '^0x00203bc0 \d+ \d+ entry0$'
+verdict = "r2s-right"
+upstream = "FreeBSD ELF: sym.imp.exit is not noreturn (afi noreturn false), so _start's body runs past `call sym.imp.exit` into the next function"
+reason = "class B: freebsd-ls 0x203cc2 `e8d9440000 call sym.imp.exit`; radare2's afi says sym.imp.exit noreturn false, so entry0's block runs to 0x203cf0 and takes the function at 0x203cd0 (which 0x203cad calls) as eleven more blocks; r2s ends at the call"
+
+[[judged]]
+command = "afb"
+binaries = "libarm64.so"
+corpus = "elf"
+function = 'entry0$'
+lacking = "r2"
+r2s = '^0x000006c0 0x000006d0 16$'
+verdict = "r2-right"
+reason = "class A: libarm64.so entry0 0x738 `e2ffff17 b 0x6c0` is a tail branch to the PLT entry for the slot at 0x1ffc0, whose R_AARCH64_JUMP_SLOT relocation names __cxa_finalize; r2s states no stub there and takes the stub (adrp, ldr, add, br x17) as entry0's block; radare2 ends entry0 at the branch. Owner ROADMAP D530 (built and held at round 12 on the radare2-only ratchet)"
+
+[[judged]]
+command = "afb"
+binaries = ["ls", "ls-silent"]
+corpus = "elf"
+function = 'sym\._obstack_begin$'
+lacking = "r2s"
+verdict = "r2s-right"
+upstream = "a jmp to the start of another .eh_frame FDE is a tail call; aa merges that function's blocks into the jumping one"
+reason = "class A: ls 0x15c8c `e95fffffff jmp 0x15bf0` ends _obstack_begin (FDE pc=15c80..15c91); 0x15bf0 starts its own FDE (pc=15bf0..15c73). radare2 lists six blocks of 0x15bf0 under _obstack_begin"
+
+[[judged]]
+command = "afb"
+binaries = "runofthemill"
+corpus = "elf"
+function = 'entry0$'
+verdict = "r2s-right"
+upstream = "anal.bb.maxsize (64K) cuts a longer straight-line block and drops the function body after it"
+reason = "class A: runofthemill 0x401054 is one straight-line block of 67,516 bytes (r2s, edge to 0x411810); radare2 stops at 65,526 bytes with no edge (anal.bb.maxsize 64K) and lists none of the five blocks from 0x411810"
+
+[[judged]]
+command = "afb"
+binaries = "rust_nonnull_x86_64"
+corpus = "elf"
+function = 'entry0$'
+verdict = "deliberate"
+reason = "class A: rust_nonnull_x86_64 0x177a1 `e800000000 call 0x177a6` calls the next instruction; r2s starts a block at the call target (a leader), radare2 keeps one 39-byte block. Both cover the same bytes and edges"
+
+[[judged]]
+command = "afb"
+binaries = ["server-zigrefs", "x86_64-pie-memimg"]
+corpus = "elf"
+lacking = "r2"
+r2s = '^0x[0-9a-f]+ 0x[0-9a-f]+ 1 j 0x[0-9a-f]+$'
+verdict = "deliberate"
+reason = "class B: Sleigh states x86 HLT as `goto inst_start` (ia.sinc), so r2s gives server-zigrefs 0x401b0e `f4 hlt` a one-byte block with an edge to itself; radare2 ends the block before it at the hlt. Neither lets control past it"
+
+[[judged]]
+command = "afb"
+binaries = ["server-zigrefs", "x86_64-pie-memimg"]
+corpus = "elf"
+r2 = '^0x[0-9a-f]+ 0x[0-9a-f]+ 00:0000 \d+$'
+r2s = 'j 0x[0-9a-f]+$'
+verdict = "deliberate"
+reason = "class B: the block before that hlt: x86_64-pie-memimg 0x1040 runs 46 bytes then edges to the hlt block (r2s), 47 bytes ending at the hlt (radare2)"
+
+[[judged]]
+command = "afb"
+binaries = "static-glibc-2.27"
+corpus = "elf"
+function = 'entry0$'
+verdict = "r2s-right"
+upstream = "a static binary's call to the local __libc_start_main is not noreturn, so _start's block takes the hlt after it"
+reason = "class B: static-glibc-2.27 0x400a55 `call sym.__libc_start_main` then `f4 hlt` at 0x400a5a: glibc csu/libc-start.c declares __libc_start_main noreturn, so the hlt is never reached; r2s's block is 42 bytes, radare2's 43"
+
+[[judged]]
+command = "afb"
+binaries = "syscall_x86"
+corpus = "elf"
+function = 'sym\._start$'
+verdict = "r2s-right"
+upstream = "x86-64 Linux: `syscall` with rax=0x3c (exit) falls through, so aa decodes the data after it as code"
+reason = "class B: syscall_x86 0x4000f6 `48c7c03c000000 mov rax, 0x3c; 0f05 syscall` is exit(0); 0x4000ff is the 14-byte string `lea rsi, [0x4000ff]; mov rdx, 0xe` writes. r2s ends at the syscall, radare2 decodes the string as three blocks"
+
+[[judged]]
+command = "afb"
+binaries = "test.ko"
+corpus = "elf"
+function = 'sym\.init_module$'
+verdict = "r2-right"
+reason = "class A: test.ko init_module's block ends at 0x8000091 `48c7c600000000 mov rsi, imm32`, whose field at 0x8000094 an R_X86_64_32S record states as kmalloc_caches + 0x460 (ir); r2image reads it as SymbolPlusAddend, and Linkage::written states an import only for addend 0, so the field's value is unstated and the walk stops there (Relocated), 21 bytes in; radare2 keeps all 44 to the `ret` at 0x80000a7. The call to printk before it comes back (cleanup_module keeps its own and is whole). Owner ROADMAP D504, after D453"
+
+[[judged]]
+command = "afb"
+binaries = "true"
+corpus = "elf"
+function = 'fcn\.00002050$'
+verdict = "r2s-right"
+upstream = "noreturn: a call through a GOT slot (`call qword [reloc.exit]`, -fno-plt) to a noreturn import does not make the caller noreturn"
+reason = "class B: true 0x2105 `e806010000 call 0x2210`; 0x2210 (usage) ends every path in `ff15186b0000 call qword [reloc.exit]` at 0x24a2, so it never returns and r2s ends the block at the call (7 bytes); radare2 keeps the nop after it (13 bytes)"
+
+[[judged]]
+command = "afb"
+binaries = "upxtest"
+corpus = "elf"
+function = 'fcn\.000058d0$'
+verdict = "r2s-right"
+upstream = "afb counts an invalid opcode (64-bit 0x2f) as the last instruction of a block"
+reason = "class A: upxtest 0x58d1 `e87effffff call 0x5854` is followed by 0x2f, which has no 64-bit encoding (Intel SDM: DAS is invalid in 64-bit mode); r2s ends the block at the call (6 bytes), radare2 counts the invalid byte (7)"
+
+[[judged]]
+command = "afi"
+binaries = "*"
+corpus = "elf"
+arch = '^x86-64$'
+r2s = '^noreturn: true$'
+r2 = '^noreturn: false$'
+verdict = "r2s-right"
+upstream = "noreturn: a call through a GOT slot (`call qword [reloc.exit]`, -fno-plt) to a noreturn import does not make the caller noreturn"
+reason = "class B: 0pack 0x4767d0 _start ends `ff15b6573c00 call qword [reloc.__libc_start_main]; f4 hlt` and true 0x2210 ends every path in `call qword [reloc.exit]`; r2s proves noreturn, radare2 says false even after aaa. All 84 instances end in such a GOT-slot call (checked with pd on each)"
+
+[[judged]]
+command = "afi"
+binaries = "dwarf_go_tree"
+corpus = "elf"
+r2s = '^noreturn: true \(assuming go-runtime\)$'
+r2 = '^noreturn: false$'
+verdict = "r2s-right"
+upstream = "Go binaries: runtime.gopanic and the runtime.panicIndex family fall through, so the block runs into the next one"
+reason = "class B: dwarf_go_tree 0x42d030 runtime.goPanicSliceB ends in `call runtime.gopanic` (0x42d0ce) or re-enters itself after morestack; r2s proves noreturn on the go-runtime premise, radare2 says false"
+
+[[judged]]
+command = "afi"
+binaries = "*"
+corpus = "elf"
+r2s = '^noreturn: unproven \(no return reached\)$'
+r2 = '^noreturn: true$'
+verdict = "unfilled"
+reason = "class B: libc-2.31.so 0x27160 __libc_main ends `call sym._exit` (0x27180), ifunc_rel64 0x400c30 _start ends `call sym.__libc_start_main; hlt`; r2s reaches no return but proves no Never for the local callee, radare2 says true. Owner ROADMAP D505"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = ' basis=stated fde=0x[0-9a-f]+-0x[0-9a-f]+$'
+r2 = '^<missing> refs='
+verdict = "r2s-right"
+upstream = "seed function entries from .eh_frame FDE initial locations: aa analyses only sym.* flags and entry0, and no analysis command reads an FDE"
+reason = "class A: an .eh_frame FDE states a code range that starts a function. ls 0x5c10: objdump --dwarf=frames prints `FDE cie=00000000 pc=00005c10...00005c21`, r2s lists fcn.00005c10 of 17 bytes, radare2 records no reference to it; bash 0x1fa20 (FDE, called twice from main): radare2 records the calls (`refs=CALL:call`) but makes no function, as aa follows no call; bash 0x200d0 (FDE pc=200d0..20234, `55 push rbp`) is reached by get_current_user_info's tail `jmp` (`refs=CODE:jmp`); bash 0x20710 (FDE pc=20710..20756) is handed by read_command's `lea rsi, [0x20710]` (`refs=DATA:lea`); bash 0x1e1bf (FDE pc=1e1bf..1e1c9, `movzx eax, byte [0]; ud2`) is a .cold part, which GCC types STT_FUNC where it keeps the symbol (fedora_32_bin_ls sym.main.cold). 6.2.4 libr/core and libr/anal hold no eh_frame reader"
+
+[[judged]]
+command = "afl"
+binaries = ["dwarf_go_tree", "go-cdetect"]
+corpus = "elf"
+function = 'sym\.runtime\.(gcPaceSweeper|inHeapOrStack|spanOfHeap|markBitsForAddr|goexit(\.abi0)?)|sym\.reflect\.verifyNotInHeapPtr|sym\.internal_poll\.runtime_pollReset|fcn\.00(4590c0|45d0e1|45bba1)'
+verdict = "r2s-right"
+upstream = "anal.nopskip moves a function past its leading nop even where a FUNC symbol states the start"
+reason = "class A: go-cdetect runtime.gcPaceSweeper: `is` states FUNC 0x423340 size 145 and 0x423340 is `90 nop`; r2s lists the function there (145 bytes), radare2 at 0x423341 (144). Both rows of each pair, here and for the other Go functions that start with a nop"
+
+[[judged]]
+command = "afl"
+binaries = ["dwarf_go_tree", "go-cdetect"]
+corpus = "elf"
+lacking = "r2"
+r2s = ' in=\.text basis=called$'
+r2 = '^<missing> refs=CALL:call$'
+verdict = "r2-right"
+reason = "class A: a call into the middle of a stated function is not a new function. dwarf_go_tree 0x45c60c: strconv.bigFtoa 0x465847 calls it, and `is` states runtime.duffzero FUNC 0x45c5d0 size 305 around it (all 28 are inside duffzero or duffcopy); r2s lists fcn.0045c60c, radare2 keeps it inside duffzero. Owner ROADMAP D506"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = ' in=\.plt(\.sec|\.got)? basis=(stated|called)$'
+r2 = '^<missing> refs='
+verdict = "r2s-right"
+upstream = "aa makes no function at a PLT entry whose JUMP_SLOT names a symbol the object defines (ld.so sym.plt._dl_signal_exception), nor at many .plt.sec and .plt.got entries"
+reason = "class A: ld-2.27.so 0xeb0 `ff2572712200 jmp qword [0x228028]`; .rela.plt's JUMP_SLOT at 0x228028 names _dl_signal_exception, and _dl_find_dso_for_object 0x14a04 and _dl_signal_error 0x1bb73 call it. radare2 flags sym.plt._dl_signal_exception and records both calls but makes no function; r2s lists the stub"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = ' in=\.(init|fini) basis=stated$'
+r2 = '^<missing> refs='
+verdict = "r2s-right"
+upstream = "aa makes no function at the DT_INIT and DT_FINI addresses of a stripped ELF"
+reason = "class A: ls: objdump -p states `INIT 0x4000` and `FINI 0x16784`; r2s lists fcn.00004000 (27 bytes, `f30f1efa endbr64; 4883ec08 sub rsp, 8`), radare2 only flags section..init"
+
+[[judged]]
+command = "afl"
+binaries = "static-glibc-2.27"
+corpus = "elf"
+function = 'entry\.(init|fini)1'
+verdict = "r2s-right"
+upstream = "ie lists no init or fini entry of a static binary: .init_array and .fini_array are read only through DT_INIT_ARRAY"
+reason = "class A: static-glibc-2.27 .init_array (0x6b6140) holds 0x400b20 and 0x4005a0, .fini_array (0x6b6150) 0x400ae0 and 0x400570; r2s lists entry.init1 and entry.fini1, radare2's ie prints only the program entry"
+
+[[judged]]
+command = "afl"
+binaries = ["x86-64-ovl-ptload.so", "x86_64-tailrela-memimg"]
+corpus = "elf"
+function = 'entry0$'
+lacking = "r2"
+verdict = "deliberate"
+reason = "class A: x86-64-ovl-ptload.so e_entry 0x5100 holds 256 zero bytes (`0000 add byte [rax], al`); r2s lists the entry the header states, radare2 makes no function of zero bytes"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = ' basis=(called|handed)$'
+r2 = '^<missing> refs='
+verdict = "deliberate"
+reason = "class A: r2s's aa follows each direct call and each code address handed to a call; radare2's aa is `af@@ sym.*;af@entry0;afva` (6.2.4 cmd_anal.inc.c:180) and follows neither (aaa's aac does). rust_nonnull_x86_64 0x5137b: r2s's fcn.502b0 calls it at 0x502d7, radare2 never analyses 0x502b0; ts3server 0x7bde70: fcn.79d0c0 hands it in `lea rdi, [0x7bde70]` at 0x79d110"
+
+[[judged]]
+command = "afl"
+binaries = "fedora_32_bin_ls"
+corpus = "elf"
+lacking = "r2s"
+r2 = ' sym\.[A-Za-z_]+\.cold$'
+verdict = "unfilled"
+reason = "class A: fedora_32_bin_ls carries its symbols in .gnu_debugdata (LZMA MiniDebugInfo, 0xe9c bytes); radare2 reads it and lists sym.main.cold (0x4e15, `e876f9ffff call sym.imp.abort`) and twelve more; r2s's `is` states none of them. Owner ROADMAP I (.gnu_debugdata symbols)"
+
+[[judged]]
+command = "afl"
+binaries = "libarm64.so"
+corpus = "elf"
+lacking = "r2s"
+verdict = "unfilled"
+reason = "class A: libarm64.so has no section headers for its .plt or dynamic symbols: radare2 lists the stubs at 0x6b0 (sym.imp.realloc) and 0x6c0 (sym.imp.__cxa_finalize, slot 0x1ffc0 R_AARCH64_JUMP_SLOT) and sym.Java_o__003dc_e at 0xaa20; r2s's `is` states none. Owner ROADMAP I (libarm64's section-less .plt; the dynamic symbols of an ELF without section headers)"
+
+[[judged]]
+command = "afl"
+binaries = "x86_64-pie-memimg"
+corpus = "elf"
+lacking = "r2s"
+verdict = "unfilled"
+reason = "class A: x86_64-pie-memimg entry0 hands 0x1139 to __libc_start_main (`lea rdi`), and 0x1030 is its PLT stub; radare2 lists main and fcn.00001030, r2s states neither, as the memory image's import is not stated. Owner ROADMAP I (the dynamic symbols of an ELF without section headers)"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> refs=\S+ inside=0x[0-9a-f]+ in=\S+:-r-x$'
+r2 = ' (try\.\d+\.[0-9a-f]+\.(cleanup|catch|filter))$'
+verdict = "r2s-right"
+upstream = "aa makes a function (try.N.cleanup) at each landing pad the LSDA states; the pad is inside the function its FUNC symbol states"
+reason = "class A: 0pack 0x4556de try.987.4556dd.cleanup lies inside sym.std::experimental::filesystem::absolute .cold.190 (FUNC 0x4556dd, 137 bytes, r2s's extent); a landing pad is entered by the unwinder inside its function"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> refs=\S+ inside=0x[0-9a-f]+ in=\S+:-r-x$'
+r2 = ' (fcn\.[0-9a-f]+|case\.0x[0-9a-f]+\.\d+)$'
+verdict = "r2s-right"
+upstream = "aa makes a function at a jump target inside another function's body (libc-2.31 fcn.00076780 inside _IO_gets)"
+reason = "class A: libc-2.31.so 0x76780 is a jmp target inside _IO_gets (FUNC 0x766c0, 421 bytes); rust 0x172a6 case.0x167fe.4 is a switch arm inside core::fmt::write (0x16e10, 1306 bytes). radare2 makes each a function, r2s keeps it in the body the symbol states"
+
+[[judged]]
+command = "afl"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> refs=\S+ in=(none|\S+:-[-r][-w]-)$'
+verdict = "r2s-right"
+upstream = "aa makes a function where no executable section holds bytes: at an STT_TLS symbol's value (libc sym.errno at 0x10) and at fs-relative displacements"
+reason = "class D: libc-2.27.so 0x10 sym.errno is an STT_TLS symbol (its value is an offset in the TLS block, inside the ELF header); radare2 makes a function there and at 0x18 and 0x29 from fs-relative `mov` displacements; libc-2.27.so 0xf00 lies in .gnu.hash (-r--). r2s places these in no executable section"
+
+[[judged]]
+command = "afl"
+binaries = ["aarch64-relative-linkbase.so", "aarch64-relr-linkbase.so", "x86_64-relative-linkbase.so", "libflutterapp.so"]
+corpus = "elf"
+lacking = "r2s"
+r2 = ' entry0$'
+verdict = "r2s-right"
+upstream = "ie invents a program entry for an ELF whose e_entry is 0 (aarch64-relative-linkbase.so 0x502c8)"
+reason = "class A: objdump -f: aarch64-relative-linkbase.so `start address: 0x0`; radare2's ie prints a program entry at 0x502c8 (a `c0035fd6 ret`) and makes entry0 there, r2s states no entry"
+
+[[judged]]
+command = "afl"
+binaries = ["fedora_32_bin_ls", "vim"]
+corpus = "elf"
+lacking = "r2s"
+r2 = ' sym\.register_tm_clones$'
+r2s = '^<missing> refs=JUMP:jmp'
+verdict = "deliberate"
+reason = "class A: vim 0x55ab0 is reached only by frame_dummy's tail `jmp` and no symbol, FDE or call states it; r2s keeps a jmp target nothing else states in the jumping body, radare2 names it register_tm_clones by its crtstuff heuristic"
+
+[[judged]]
+command = "afl"
+binaries = ["aarch64-*.o", "x86_64-*.o"]
+corpus = "elf"
+lacking = "r2s"
+r2 = ' loc\.f$'
+verdict = "deliberate"
+reason = "class A: aarch64-common-got.s declares `.globl f` and `f:` with no `.type f, %function`, so `is` states f GLOBAL NOTYPE at 0x8000040; r2s takes a FUNC symbol, an entry, an FDE or a call as a function start and none states one here, radare2 analyses every loc. and sym. flag"
+
+[[judged]]
+command = "axt"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = ' \[(JUMP|CODE):--x\] (jmp|b) '
+r2 = '^<missing> from=0x[0-9a-f]+ listed=yes$'
+verdict = "r2s-right"
+upstream = "axt lists no reference from a tail jmp to another function's entry (dectest64 0x401164 `eb8a jmp sym.register_tm_clones`)"
+reason = "class D: dectest64 entry.init0 (frame_dummy, 6 bytes) ends `eb8a jmp sym.register_tm_clones` at 0x401164; radare2 draws the jump in pd but `axt @ 0x4010f0` prints nothing; r2s lists the JUMP reference"
+
+[[judged]]
+command = "axt"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2 = '^<missing> from=0x[0-9a-f]+ listed=no$'
+verdict = "r2s-right"
+upstream = "seed function entries from .eh_frame FDE initial locations: aa analyses only sym.* flags and entry0, and no analysis command reads an FDE"
+reason = "class D: a reference from code radare2 never analyses: bash 0x3f0a3 `call sym.make_new_array_variable` lies in r2s's fcn.3f070, an FDE function (pc=3f070..3f0c2) radare2 does not list, so radare2 records no reference from it"
+
+[[judged]]
+command = "axt"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = '^\(nofunc\) 0x[0-9a-f]+ \[DATA:---\] \.qword 0x[0-9a-f]+$'
+r2 = '^<missing> from=none listed=no$'
+verdict = "r2s-right"
+upstream = "axt lists no reference from a function pointer stored in data (an .init_array entry)"
+reason = "class D: ClassCpp.out 0x3d48 is the second .init_array slot (0x3d40, 16 bytes) and holds 0x13a3; r2s lists that DATA reference to the function at 0x13a3, radare2's axt does not"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+function = ' sym\.imp\.'
+verdict = "deliberate"
+reason = "class F: an import stub's afv. bomb 0x400bd0 sym.imp.strtol (`jmp qword [reloc.strtol]`): r2s spells the cited prototype's parameters (stdlib.h strtol(const char *, char **, int): rdi, rsi, edx), radare2 keeps an import's prototype in its type database (afs) and lists no afv variable for a stub"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2s = '^arg r2sleigh_unread_u64 arg\d+ @ '
+verdict = "deliberate"
+reason = "class F: 0pack 0x4767d0 _start reads rdx (`4989d1 mov r9, rdx`), the third integer argument; the psABI assigns registers by position, so r2s states arg0 (rdi) and arg1 (rsi) below it as unread slots, radare2 lists only registers read"
+
+[[judged]]
+command = "afv"
+binaries = "dwarf_go_tree"
+corpus = "elf"
+r2s = '^refused: under the golang_abi0 convention'
+verdict = "unfilled"
+reason = "class F: dwarf_go_tree 0x401000 runtime.text is Go ABI0, which returns results on the stack; r2s refuses its afv (`refused: under the golang_abi0 convention: Go ABI0 returns results on the stack, which no call boundary states`), radare2 lists rsp slots. Owner ROADMAP LP (Go assembly ABIs)"
+
+[[judged]]
+command = "afv"
+binaries = "r2pay-arm64.so"
+corpus = "elf"
+function = '^0x00009080 '
+lacking = "r2"
+r2s = '^var \S+ stack_m\d+ @ entry\.sp-0x[0-9a-f]+$'
+verdict = "r2s-right"
+upstream = "afva states no stack slot accessed through a register copied from sp (r2pay-arm64.so 0x9288 `mov x8, sp`, 0x9784 `stur w11, [x8, -0x10]`)"
+reason = "class E: r2pay-arm64.so 0x9080 (16,774 instructions) reaches its frame through registers copied from sp (`e8030091 mov x8, sp` at 0x9288, then `0b011fb8 stur w11, [x8, -0x10]` at 0x9784) and names sp or x29 directly at 3 offsets; r2s states each slot from the entry stack pointer (1,474), radare2 lists the 2 sp-relative spills"
+
+# ── D490 judged in full (round 12): each class below names its mechanism and witness; `inside=`, `holds=`,
+# `above formals=` and `refused:` are the frame witnesses diff_r2.py prints on the lacking side ──
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+r2s = '^(<missing> )?refused: under the golang_abi0 convention'
+verdict = "unfilled"
+reason = "class F: a Go ABI0 function's frame and registers where r2s refuses its afv. dwarf_go_tree 0x47ba80 reflect.copyVal: r2s prints `refused: under the golang_abi0 convention: Go ABI0 returns results on the stack, which no call boundary states`; radare2 lists arg_30h to arg_58h (rsp+0x30..0x58, the ABI0 argument and result slots) and arg1 @ rdi. Owner ROADMAP LP (Go assembly ABIs)"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> inside=\S+ struct r2sleigh_bits_\d+$'
+verdict = "deliberate"
+reason = "class E, definitional: r2s states one object per frame region whose accesses it cannot separate (an address of it escapes), spelled struct r2sleigh_bits_N at its base; radare2 makes one var per accessed offset. 0pack 0x5f8290 el::base::Writer::construct: r2s `struct r2sleigh_bits_704 stack_m136 @ entry.sp-0x88` (88 bytes, the va_list register save area, `lea rax, [rsp+0x50]` takes its address); radare2 var_38h..var_78h at rsp+0x38..0x78 inside it. The gate compares the base offset both state; an offset inside the r2s object's spelled extent is this class"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> inside=\S+ .+\[\d+\]$'
+verdict = "deliberate"
+reason = "class E, definitional: r2s states a declared array once at its base (DWARF or a typed object); radare2 makes one var per accessed element. pigz 0x413750 GetDynamicLengths: r2s `size_t[32] d_counts @ entry.sp-0x18b8` (deflate.c's size_t d_counts[32]); radare2's vars at rsp+0x50..0x2c0 (16 bytes apart) each lie inside d_lengths2, d_counts or d_counts2. The gate compares base offsets; an offset inside the spelled extent is this class"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+lacking = "r2"
+r2 = '^<missing> holds='
+verdict = "deliberate"
+reason = "class E, definitional, the converse of `inside`: r2s's object base where radare2 lists vars only inside it. true 0x2210: r2s `struct r2sleigh_bits_1024 stack_m152 @ entry.sp-0x98` written at its base by `mov qword [rsp], rax` (0x231d); radare2 makes no var at rsp+0 (var.c:1232) and lists var_8h..var_48h inside the 128 bytes"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> above formals=[1-9]\d*$'
+verdict = "unfilled"
+reason = "class F: r2s states a stack formal by position with no offset (`arg r2sleigh_word_u32 arg6`), so the gate cannot place it; radare2 states the slot. bfile_o 0x8000bb1 string_scan_range: r2s arg6, arg7 unplaced, radare2 arg_10h @ rbp+0x10 and arg_18h @ rbp+0x18 (entry.sp+0x8, +0x10). r2ssa's FormalHome::Frame holds the offset; afv does not spell it. Owner ROADMAP D507"
+
+[[judged]]
+command = "afv"
+binaries = ["pumasim", "rust"]
+corpus = "elf"
+function = '^(0x00003240|0x004d2400) '
+lacking = "r2s"
+r2 = '^(var int32_t var_38h @ rbp\-0x38|var int32_t var_bch @ rbp\-0xbc|var int32_t var_e4h @ rbp\-0xe4|var int32_t var_e8h @ rbp\-0xe8|var int32_t var_ech @ rbp\-0xec|var int32_t var_f0h @ rbp\-0xf0|var int32_t var_f4h @ rbp\-0xf4|var int64_t var_18h @ rsp\-0x18|var int64_t var_40h @ rbp\-0x40|var int64_t var_48h @ rbp\-0x48|var int64_t var_50h @ rbp\-0x50|var int64_t var_58h @ rbp\-0x58|var int64_t var_60h @ rbp\-0x60|var int64_t var_68h @ rbp\-0x68|var int64_t var_78h @ rbp\-0x78|var int64_t var_80h @ rbp\-0x80|var int64_t var_88h @ rbp\-0x88|var int64_t var_8h @ rsp\-0x28|var int64_t var_90h @ rbp\-0x90|var int64_t var_98h @ rbp\-0x98|var int64_t var_a0h @ rbp\-0xa0|var int64_t var_a8h @ rbp\-0xa8|var int64_t var_b0h @ rbp\-0xb0|var int64_t var_b8h @ rbp\-0xb8|var int64_t var_c8h @ rbp\-0xc8|var int64_t var_d8h @ rbp\-0xd8|var int64_t var_e0h @ rbp\-0xe0)$'
+verdict = "r2s-right"
+upstream = "afv lists vars whose every access lies outside the function's blocks: r_anal_block_chop_noreturn (libr/anal/block.c:988) drops blocks without clear_bb_vars or r_anal_function_delete_unused_vars (fcn.c:3735, :3805)"
+reason = "class A: rust 0x3240 begin_panic ends at `call rust_panic_with_hook` (noreturn); radare2's afvR/afvW put var_38h..var_f4h at 0x32f9..0x352c, past its last block (0x32c7), in the code its first pass ran into and the noreturn chop removed. pumasim 0x4d2400 QDockWindow::~QDockWindow keeps var_8h and var_18h accessed only at 0x2f49b6..0x2f4bdf, in the function its tail jmp 0x4d24ae reaches. r2s states the frame its blocks access"
+
+[[judged]]
+command = "afv"
+binaries = ["fedora_32_bin_ls", "ld-2.27.so", "ld-2.32.so", "libc-2.26.so", "libc-2.31.so", "libstdc++.so.6", "pigz", "server-zigrefs"]
+corpus = "elf"
+function = '^(0x000125e0|0x00017940|0x0001ce60|0x00082280|0x0010f6d0|0x00111b20|0x00413750|0x00420f80) '
+lacking = "r2"
+r2s = '^(var __uint128_t stack_m56 @ entry\.sp\-0x38|var uint64_t stack_m104 @ entry\.sp\-0x68|var uint64_t stack_m136 @ entry\.sp\-0x88|var uint64_t stack_m152 @ entry\.sp\-0x98|var uint64_t stack_m232 @ entry\.sp\-0xe8|var uint64_t stack_m280 @ entry\.sp\-0x118|var uint64_t stack_m6520 @ entry\.sp\-0x1978)$'
+verdict = "r2s-right"
+upstream = "afva makes no var for an x86 [rsp] access with no displacement (var.c:1232 zero_ok holds only where the return address is in a register)"
+reason = "class E: pigz 0x413750 `48893424 mov qword [rsp], rsi` (0x41378b) and `mov rax, qword [rsp]` (0x41387f) at depth 0x1978 write and read entry.sp-0x1978; r2s states stack_m6520 there, radare2 no var. ld-2.32.so 0x1ce74 and libc-2.31.so 0x111b3e are the same `mov qword [rsp], rdi`"
+
+[[judged]]
+command = "afv"
+binaries = ["7786-utf16le", "bfile_o", "endbr-main", "freebsd-ls", "glibc-2.34-39.el9.x86_64_libc.so.6", "glibc-heap-2.27", "glibc-heap-2.31", "glibc-heap-2.32", "ieee.elf", "l2rbin", "ld-2.27.so", "ld-2.31.so", "libc-2.31.so", "libc.so.6", "libtoolocore.so", "ls", "ls-toybox", "mtk-su", "padding_in_func", "static-glibc-2.27", "strenc-ctrlchars", "strenc-guess-utf32le", "test.ko"]
+corpus = "elf"
+function = '^(0x00000740|0x00001660|0x00003f50|0x00004070|0x0000ee90|0x0001b790|0x0002f014|0x00040600|0x000d9950|0x000e29b0|0x00203bc0|0x00400400|0x004004a0|0x004004d0|0x00400500|0x00400530|0x00400de0|0x004010f0|0x00401100|0x0800007c|0x08000bb1) '
+lacking = "r2"
+r2s = '^(var uint64_t stack_m144 @ entry\.sp\-0x90|var uint64_t stack_m152 @ entry\.sp\-0x98|var uint64_t stack_m16 @ entry\.sp\-0x10|var uint64_t stack_m2392 @ entry\.sp\-0x958|var uint64_t stack_m24 @ entry\.sp\-0x18|var uint64_t stack_m32 @ entry\.sp\-0x20|var uint64_t stack_m40 @ entry\.sp\-0x28|var uint64_t stack_m48 @ entry\.sp\-0x30|var uint64_t stack_m8 @ entry\.sp\-0x8)$'
+verdict = "r2-right"
+reason = "class E: r2s lists a callee-saved register's save slot as a local, which r2s's own frame model calls frame management (program/info.rs `locals` drops only the return-address slot). 7786-utf16le 0x4004a9 `55 push rbp` gives `var uint64_t stack_m8 @ entry.sp-0x8`; libtoolocore.so 0x3f54 `stp x29, x30, [sp, -0x30]!` gives stack_m40 (x30's save). AArch64 stp saves elsewhere and Go's `mov [rsp+0x50], rbp` are left out, so r2s is inconsistent with itself; radare2 makes no var for a push (var.c:1361). Owner ROADMAP D508"
+
+[[judged]]
+command = "afv"
+binaries = ["dwarf_rust_bubble", "server-zigrefs", "upxtest"]
+corpus = "elf"
+function = '^(0x00005660|0x00005854|0x00017ed0|0x0047e9c0) '
+lacking = "r2"
+r2s = '^(var uint64_t stack_m1016 @ entry\.sp\-0x3f8|var uint64_t stack_m1024 @ entry\.sp\-0x400|var uint64_t stack_m1032 @ entry\.sp\-0x408|var uint64_t stack_m16 @ entry\.sp\-0x10|var uint64_t stack_m24 @ entry\.sp\-0x18|var uint64_t stack_m240 @ entry\.sp\-0xf0|var uint64_t stack_m248 @ entry\.sp\-0xf8|var uint64_t stack_m32 @ entry\.sp\-0x20|var uint64_t stack_m40 @ entry\.sp\-0x28|var uint64_t stack_m48 @ entry\.sp\-0x30|var uint64_t stack_m56 @ entry\.sp\-0x38|var uint64_t stack_m8 @ entry\.sp\-0x8)$'
+verdict = "deliberate"
+reason = "class E, definitional: data a push puts on the stack (an outgoing stack argument, or the UPX stub's pushed registers its callee reads); r2s states each pushed slot as memory, radare2 makes no var for a push or pop (var.c:1361). upxtest 0x5660 `push rax; push rdx; call 0x58d0`; server-zigrefs 0x47eb3c `sub rsp, 8; push rbp; push rax` before a call; dwarf_rust_bubble 0x17f68 `push rdx`, 0x17f7a `push qword [rdi]` before the error call, where radare2's pdr depth reads -8"
+
+[[judged]]
+command = "afv"
+binaries = ["bfile_o", "go-cdetect", "ld-2.31.so", "librsjni_androix.so", "libtool-checker.so", "libtoolocore.so", "ls-toybox", "mtk-su", "r2pay-arm64.so", "switch-hello-world.elf"]
+corpus = "elf"
+function = '^(0x0000020c|0x00000b98|0x00001660|0x00001860|0x000029c0|0x00003f50|0x000054fc|0x000060e0|0x00006f0c|0x00009080|0x0000ee90|0x0002f014|0x0003b160|0x00060930|0x00401000|0x00458b40|0x0047a880|0x08000bb1) '
+lacking = "r2s"
+r2 = '^(var int64_t var_10h @ rsp\+0x10|var int64_t var_10h @ sp\+0x10|var int64_t var_10h @ sp\+0x1d90|var int64_t var_18h @ rsp\+0x18|var int64_t var_20h @ sp\+0x1da0|var int64_t var_20h @ sp\+0x20|var int64_t var_28h @ rbp\-0x28|var int64_t var_30h @ sp\+0x30|var int64_t var_40h @ sp\+0x40|var int64_t var_50h @ rsp\+0x50|var int64_t var_50h @ sp\+0x50|var int64_t var_60h @ sp\+0x60|var int64_t var_70h @ sp\+0x70|var int64_t var_8h @ rbp\-0x8|var int64_t var_90h @ sp\+0x90|var int64_t var_a0h @ sp\+0xa0|var int64_t var_b0h @ sp\+0xb0|var int64_t var_c0h @ sp\+0xc0|var int64_t var_d0h @ sp\+0xd0|var int64_t var_e0h @ sp\+0xe0)$'
+verdict = "deliberate"
+reason = "class E, definitional: radare2 makes a var of a callee-saved register's save slot where an sp or bp operand names it; r2s keeps register saves out of the locals (frame management, the target D508 sets for every save). ls-toybox 0x3b168 `stp x29, x30, [sp, 0x20]` .. 0x3b17c `stp x20, x19, [sp, 0x70]`: radare2 var_20h..var_70h; go-cdetect 0x47a88e `mov qword [rsp+0x50], rbp`: radare2 var_50h; bfile_o 0x8000bb9 `push rbx` (entry.sp-0x10): radare2 var_8h @ rbp-0x8"
+
+[[judged]]
+command = "afv"
+binaries = ["bashbot.x86_64.O0.elf", "demangle-test-cpp", "dwarf2_many_comp_units.elf", "dwarf3_many_comp_units.elf", "dwarf_rust_bubble", "game_of_thrones", "libstdc++.so.6", "tcache", "tcache-2.27", "true"]
+corpus = "elf"
+function = '^(0x000011eb|0x00001bce|0x00002e17|0x00004960|0x00017ed0|0x000b49e0|0x0010f6d0|0x00400bb8|0x00401146) '
+lacking = "r2s"
+r2 = '^(var int64_t var_28h @ rsp\+0x28|var int64_t var_78h @ rsp\+0x78|var int64_t var_8h @ rbp\-0x8|var int64_t var_a8h @ rsp\+0xa8|var int64_t var_c8h @ rsp\+0xd8)$'
+verdict = "deliberate"
+reason = "class E, definitional: the stack-protector guard slot. tcache 0x401155 `mov rax, qword fs:[0x28]; mov qword [rbp-8], rax` and 0x401213 `mov rcx, qword [rbp-8]; sub rcx, qword fs:[0x28]` before __stack_chk_fail: radare2 var_8h @ rbp-0x8; r2s states the guard as frame management (no local), as tcache's pdd prints neither the guard nor __stack_chk_fail. dwarf_rust_bubble 0x17eeb and libstdc++.so.6 0xb49f9 store the same guard at [rsp+0xc8] and [rsp+0x28]"
+
+[[judged]]
+command = "afv"
+binaries = ["rust_nonnull_x86_64"]
+corpus = "elf"
+function = '^(0x00017790) '
+lacking = "r2s"
+r2 = '^(var int64_t var_110h @ rsp\+0x110|var int64_t var_118h @ rsp\+0x118|var int64_t var_1a0h @ rsp\+0x1a0|var int64_t var_1a8h @ rsp\+0x1a8|var int64_t var_1b0h @ rsp\+0x1b0|var int64_t var_88h @ rsp\+0x88|var int64_t var_c0h @ rsp\+0xc0|var int64_t var_c8h @ rsp\+0xc8)$'
+verdict = "r2s-right"
+upstream = "afva places sp vars after `and rsp, -16` at entry offsets that ignore the realignment, which no instruction states"
+reason = "class E: rust_nonnull_x86_64 entry0 0x1779d `and rsp, 0xfffffffffffffff0; sub rsp, 0x1c0`: r2s states its objects from the realigned stack pointer (`stack_m320 @ realigned.sp-0x140`, unplaced), radare2 var_88h..var_1b0h at entry offsets that assume the and moved nothing"
+
+[[judged]]
+command = "afv"
+binaries = ["ls-silent"]
+corpus = "elf"
+function = '^(0x00004070) '
+lacking = "r2s"
+r2 = '^(var int16_t var_32h @ rsp\+0x42|var int16_t var_45h @ rsp\+0x55|var int64_t var_18h @ rsp\+0x28|var int64_t var_28h @ rsp\+0x38|var int64_t var_30h @ rsp\+0x40|var int64_t var_38h @ rsp\+0x48|var int64_t var_48h @ rsp\+0x58|var int8_t var_17h @ rsp\+0x27|var int8_t var_46h @ rsp\+0x56|var int8_t var_47h @ rsp\+0x57|var int8_t var_8h @ rsp\+0x18)$'
+verdict = "r2-right"
+reason = "class E: ls-silent 0x4070 (ls main, 1318 instructions): afv prints two arguments and no local while pdd refuses (`native effect obligations refused: 0 refused, 159 unaccounted`); radare2 lists 11 rsp slots (`mov byte [rsp+8], 0` at 0x42cc, `mov qword [rsp+0x18], rdx` at 0x498f). An unknown frame prints as an empty list, not as a refusal. Owner ROADMAP D509"
+
+[[judged]]
+command = "afv"
+binaries = ["0pack", "gnome-extensions", "ld-2.27.so", "ld-2.31.so", "libstdc++.so.6", "static-glibc-2.27", "true", "upxtest"]
+corpus = "elf"
+function = '^(0x00004960|0x00004f40|0x00005854|0x00017620|0x00017940|0x00089020|0x00400de0|0x005f8290) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg_0h @ sp\+0x0|arg int64_t arg_100h @ rsp\+0x100|arg int64_t arg_10h @ rsp\+0x10|arg int64_t arg_18h @ rsp\+0x18|arg int64_t arg_18h @ rsp\+0x28|arg int64_t arg_20h @ rsp\+0x20|arg int64_t arg_240h @ rsp\+0x240|arg int64_t arg_248h @ rsp\+0x248|arg int64_t arg_250h @ rsp\+0x250|arg int64_t arg_258h @ rsp\+0x258|arg int64_t arg_260h @ rsp\+0x260|arg int64_t arg_268h @ rsp\+0x268|arg int64_t arg_270h @ rsp\+0x270|arg int64_t arg_278h @ rsp\+0x278|arg int64_t arg_28h @ rsp\+0x28|arg int64_t arg_30h @ rsp\+0x30|arg int64_t arg_8h @ rsp\+0x8|arg int64_t arg_8h @ sp\+0x8|arg int64_t arg_a0h @ rsp\+0xa0|arg int64_t arg_c0h @ rsp\+0xc0|arg int64_t arg_d0h @ rsp\+0xd0)$'
+verdict = "unfilled"
+reason = "class F: a caller-frame slot read or addressed beyond the formals. ld-2.31.so 0x17620 _dl_runtime_resolve_xsave reads its incoming stack at 0x176bd..0x176d6 (radare2 arg_8h..arg_30h, the slots above the return address its PLT0 caller and the saved registers fill); 0pack 0x5f82cd `lea rax, [rsp+0xc0]` takes the va_list overflow area. r2s keeps the caller's frame out of the locals and states no formal there. Owner ROADMAP D510"
+
+[[judged]]
+command = "afv"
+binaries = ["go-cdetect"]
+corpus = "elf"
+function = '^(0x00401000|0x00458b40|0x0047a880) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg_10h @ rsp\+0x28|arg int64_t arg_10h @ rsp\+0x30|arg int64_t arg_10h @ rsp\+0x68|arg int64_t arg_18h @ rsp\+0x38|arg int64_t arg_8h @ rsp\+0x20|arg int64_t arg_8h @ rsp\+0x28|arg int64_t arg_8h @ rsp\+0x60)$'
+verdict = "deliberate"
+reason = "class F, definitional: Go ABIInternal's register-argument spill slots are in the caller's frame (Go internal ABI: the caller reserves spill space above the return address). go-cdetect 0x47a8a4 `mov qword [rsp+0x68], rbx; mov qword [rsp+0x60], rax`: radare2 arg_8h, arg_10h; r2s states the arguments in rax and rbx and keeps the caller's frame out of the locals"
+
+[[judged]]
+command = "afv"
+binaries = ["libstdc++.so.6"]
+corpus = "elf"
+function = '^(0x00089020) '
+lacking = "r2"
+r2s = '^(arg r2sleigh_word_u64 arg0 @ rdi|arg r2sleigh_word_u64 arg1 @ rsi)$'
+verdict = "r2-right"
+reason = "class F: an entry register an instruction reads and r2s states no formal for. dwarf_rust_bubble 0xe0d0 CString::_new reads `mov rbx, rsi; mov r14, rdi` (0xe0d9) while afv lists no argument and pdd declares `(void)`; static-glibc-2.27 0x410214 `mov r12, rdi`; libtool-checker.so 0x9d8 `strb w2, [sp, 0xf]` reloaded at 0x9dc; libstdc++.so.6 0x10f6d0 spills rsi, rdx, rcx, r8 and reads its stack formals at rsp+0xf0, 0xf8 while r2s states `this` alone. The converse: libstdc++.so.6 0x89020 .cold.34 states arg0 @ rdi and arg1 @ rsi, whose first instructions write them (`mov rdi, rbx` 0x89076, `mov rsi, [rax-0x18]` 0x8904c). Owner ROADMAP D512"
+
+[[judged]]
+command = "afv"
+binaries = ["dwarf_rust_bubble", "libstdc++.so.6", "libtool-checker.so", "static-glibc-2.27"]
+corpus = "elf"
+function = '^(0x000009cc|0x0000e0d0|0x0010f6d0|0x00410210) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg1 @ rdi|arg int64_t arg1 @ rsi|arg int64_t arg2 @ rdx|arg int64_t arg2 @ rsi|arg int64_t arg3 @ rcx|arg int64_t arg3 @ x2|arg int64_t arg4 @ r8|arg int64_t arg5 @ r9|arg int64_t arg_f0h @ rsp\+0xf0|arg int64_t arg_f8h @ rsp\+0xf8)$'
+verdict = "r2-right"
+reason = "class F: an entry register an instruction reads and r2s states no formal for. dwarf_rust_bubble 0xe0d0 CString::_new reads `mov rbx, rsi; mov r14, rdi` (0xe0d9) while afv lists no argument and pdd declares `(void)`; static-glibc-2.27 0x410214 `mov r12, rdi`; libtool-checker.so 0x9d8 `strb w2, [sp, 0xf]` reloaded at 0x9dc; libstdc++.so.6 0x10f6d0 spills rsi, rdx, rcx, r8 and reads its stack formals at rsp+0xf0, 0xf8 while r2s states `this` alone. The converse: libstdc++.so.6 0x89020 .cold.34 states arg0 @ rdi and arg1 @ rsi, whose first instructions write them (`mov rdi, rbx` 0x89076, `mov rsi, [rax-0x18]` 0x8904c). Owner ROADMAP D512"
+
+[[judged]]
+command = "afv"
+binaries = ["libc-2.21.so", "libc-2.27.so"]
+corpus = "elf"
+function = '^(0x000f6ea0|0x0010f910) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg2 @ rsi|arg int64_t arg3 @ rdx|arg int64_t arg4 @ rcx|arg int64_t arg5 @ r8)$'
+verdict = "r2-right"
+reason = "class F: libc-2.27.so 0x10f910 __fxstatat moves esi, rdx, rcx, r8d into the newfstatat syscall (0x106) and libc-2.21.so 0xf6ea0 __lxstat moves rsi, rdx into lstat (6); r2s states `uint32_t arg0` alone, as no syscall row states what the syscall reads. Owner ROADMAP D511"
+
+[[judged]]
+command = "afv"
+binaries = ["0pack", "ld-2.27.so", "true"]
+corpus = "elf"
+function = '^(0x00004960|0x00017940|0x005f8290) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg1 @ r8|arg int64_t arg2 @ r9|arg int64_t arg4 @ rcx|arg int64_t arg5 @ r8|arg int64_t arg6 @ r9)$'
+verdict = "deliberate"
+reason = "class F, definitional: a variadic function stores its unnamed register arguments to the va_list register save area; radare2 counts each store as an argument read, r2s states the named formals and the variadic tail. 0pack 0x5f82b1 `mov qword [rsp+0x68], rcx`..`mov [rsp+0x78], r9` in el::base::Writer::construct(int, const char*, ...)"
+
+[[judged]]
+command = "afv"
+binaries = ["arg_down_prop", "cfile_o", "demangle-test-cpp"]
+corpus = "elf"
+function = '^(0x00000724|0x00001830|0x08001e22) '
+lacking = "r2s"
+r2 = '^(arg char \*\* argv @ rsi|arg int argc @ rdi|arg int64_t arg1 @ rdi|arg int64_t arg3 @ rdx)$'
+verdict = "deliberate"
+reason = "class F, definitional: a register stored to a slot nothing reads. demangle-test-cpp 0x1830 (11 bytes) `push rbp; mov rbp, rsp; mov [rbp-8], rdi; nop; pop rbp; ret`; arg_down_prop 0x72c `mov [rbp-0x14], edi` and 0x72f `mov [rbp-0x20], rsi` (afvR: never read); cfile_o 0x8001e36 `mov [rbp-0x24], edx` (never read); radare2's argument is a register any instruction reads, r2s's an entry value a live computation uses"
+
+[[judged]]
+command = "afv"
+binaries = ["go-cdetect", "ld-2.31.so", "ld-2.32.so", "upxtest"]
+corpus = "elf"
+function = '^(0x00002090|0x00002100|0x000058d0|0x00401000|0x00458b40|0x0047a880) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg1 @ rdi|arg int64_t arg1 @ rsi|arg int64_t arg2 @ rdx|arg int64_t arg2 @ rsi)$'
+verdict = "deliberate"
+reason = "class F, definitional: radare2 counts a callee's argument registers as read at each call or tail jmp under the function's convention (var.c:1705 op_forwards_args, :1821), where no instruction of the function reads them; r2s states a forwarded formal only where the callee's interface reads it. go-cdetect 0x458b40 reflect.typedmemmove reads neither rdi nor rsi and calls runtime.typedmemmove at 0x458b54; ld-2.31.so 0x2100 entry0 calls _dl_start at 0x2103 and writes rsi at 0x2119 (`mov rsi, rdx`); upxtest 0x58d1 calls 0x5854"
+
+[[judged]]
+command = "afv"
+binaries = ["freebsd-ls", "upxtest"]
+corpus = "elf"
+function = '^(0x00005660|0x00203bc0) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg1 @ rdi|arg int64_t arg2 @ rsi|arg int64_t arg3 @ rdx|arg int64_t arg4 @ rcx)$'
+verdict = "deliberate"
+reason = "class F, definitional: a process entry has no C formals (psABI 3.4.1: rsp holds argc, rdx the exit function); upxtest 0x5660 `push rdx; ... add rsi, rdi` and freebsd-ls 0x203bc0 read registers radare2 lists as arguments; r2s states what the entry's ABI row states"
+
+[[judged]]
+command = "afv"
+binaries = ["upxtest"]
+corpus = "elf"
+function = '^(0x00005854) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg1 @ rsi|arg int64_t arg2 @ r8|arg int64_t arg3 @ r9)$'
+verdict = "r2s-right"
+upstream = "argument detection counts `sub reg, reg` and `or reg, -1` as reads of reg (var.c:1557 is_used_like_arg exempts only an xor that zeroes)"
+reason = "class F: upxtest 0x5854 `sub esi, esi` (0x5855), `sub r9, r9` (0x5887), `or r8d, 0xffffffff` (0x588a): each result is independent of the register's entry value; radare2 lists rsi, r8, r9 as arguments"
+
+[[judged]]
+command = "afv"
+binaries = ["go-cdetect"]
+corpus = "elf"
+function = '^(0x00401000|0x0042d700|0x00458b40|0x0047a880) '
+lacking = "r2"
+r2s = '^(arg r2sleigh_word_u64 arg0 @ rax|arg r2sleigh_word_u64 arg1 @ rbx|arg r2sleigh_word_u64\* arg0 @ rax|arg void\* arg1 @ rbx)$'
+verdict = "r2s-right"
+upstream = "afv applies the amd64 SysV registers to Go ABIInternal functions (Go 1.17+: integer arguments in rax, rbx, rcx, rdi, rsi, r8..r11)"
+reason = "class F: go-cdetect 0x47a880 syscall.Getenv(key string) spills its string's pointer and length from rax and rbx (`mov qword [rsp+0x60], rax`, `mov [rsp+0x68], rbx`); r2s states rax, rbx under Go ABIInternal, radare2 lists neither"
+
+[[judged]]
+command = "afv"
+binaries = ["0pack", "libstdc++.so.6", "ls-silent", "true"]
+corpus = "elf"
+function = '^(0x00004070|0x00004960|0x000b49e0|0x0010f6d0|0x00491b20) '
+lacking = "r2"
+r2s = '^(arg const void\* this @ rdi|arg r2sleigh_word_u64 arg0 @ rdi|arg r2sleigh_word_u64 arg1 @ rsi|arg r2sleigh_word_u64 arg2 @ rdx|arg r2sleigh_word_u64 arg3 @ rcx|arg state_type\* arg1 @ rsi|arg void\* arg0 @ rdi)$'
+verdict = "deliberate"
+reason = "class F, definitional: r2s states the formals the interface declares or hands on (a demangled C++ `this`, DWARF's state_type* parameter, a register a tail call forwards), where no instruction of the body reads them; radare2 lists registers an instruction reads. 0pack 0x491b20 spdlog color_stop_formatter deleting destructor forwards rdi to `jmp operator delete`; libstdc++ 0xb49e0 do_out's `state_type* arg1` first written (`mov esi, r9d`)"
+
+[[judged]]
+command = "afv"
+binaries = ["switch-hello-world.elf", "truechin.so", "upxtest"]
+corpus = "elf"
+function = '^(0x00000120|0x00000d78|0x000056d5) '
+lacking = "r2"
+r2s = '^(arg r2sleigh_word_u64 arg0 @ x0|arg r2sleigh_word_u64 arg1 @ x1|arg r2sleigh_word_u64 arg2 @ rdx)$'
+verdict = "r2s-right"
+upstream = "afva lists no argument for a register a cbz, a br or an 8-bit store reads first (truechin.so 0xd80 `cbz x0`, switch-hello-world.elf 0x12c `br x1`, upxtest 0x56e7 `mov byte [rdi], dl`)"
+reason = "class F: truechin.so 0xd78 __atexit_handler_wrapper reads x0 first at 0xd80 `cbz x0, 0xd88`; switch-hello-world.elf 0x120 __nx_exit branches to x1 (`br x1`); upxtest 0x56d5 stores dl. r2s states each formal, radare2 none"
+
+[[judged]]
+command = "afl"
+binaries = ["rust"]
+corpus = "elf"
+function = '^(0x0001742c|0x000174a9|0x00017532|0x00017557|0x0001760f|0x0001762f|0x00019d6c|0x00019d7c|0x00019d9c) '
+lacking = "r2s"
+r2 = '^(0x0001742c 2 125 case\.0x172b4\.1|0x000174a9 12 361 case\.0x172b4\.4|0x00017532 1 32 case\.0x167fe\.10|0x00017557 1 32 case\.0x167fe\.11|0x0001760f 1 13 case\.0x167fe\.9|0x0001762f 24 860 case\.0x174b7\.1|0x00019d6c 1 9 case\.0x172b4\.13|0x00019d7c 1 9 case\.0x174b7\.9|0x00019d9c 85 2711 case\.0x19b4f\.1)$'
+verdict = "unfilled"
+reason = "class C: rust 0x172b4 `jmp rdx` dispatches through a 23-case table at 0x20f40 (radare2's switch); r2s's block 0x1728a..0x172b6 of core::fmt::write 0x16e10 ends with no edge, so r2s never reaches case.0x172b4.1 (0x1742c) or the other eight arms and records no reference to them. radare2 also makes each arm a function. Owner ROADMAP D514"
+
+[[judged]]
+command = "axt"
+binaries = ["bfile_o", "radare2.c.obj"]
+corpus = "elf"
+function = '^(0x08000195|0x08002e96) '
+lacking = "r2"
+r2s = '^(\(nofunc\) 0x8000239 \[DATA:\-\-\-\] \.qword 0x08000195|sym\.r_bin_file_set_cur_by_name 0x80032a1 \[CALL:\-\-x\] call sym\.r_bin_file_find_by_name|sym\.r_bin_file_xtr_load 0x8003559 \[CALL:\-\-x\] call sym\.r_bin_file_find_by_name)$'
+verdict = "r2s-right"
+upstream = "an ET_REL object's relocated call or data target gives no xref: pd names it (RELOC 32 r_bin_file_find_by_name) while axf says CALL 0x80032a6, the unrelocated field"
+reason = "class D: bfile_o 0x80032a1 `e800000000 call` with R_X86_64_PLT32 r_bin_file_find_by_name; radare2.c.obj 0x8000239 `.qword` with R_X86_64_64 loading_thread. r2s applies the relocation and lists the reference"
+
+[[judged]]
+command = "axt"
+binaries = ["ifunc_rel64", "pumasim"]
+corpus = "elf"
+function = '^(0x001c3030|0x00412010) '
+lacking = "r2"
+r2s = '^(sym\._ZN22QMultiByteUnicodeTableD1Ev 0x406c3e \[JUMP:\-\-x\] jmp sym\.imp\._ZdaPvm|sym\.memalign_hook_ini 0x413010 \[JUMP:\-\-x\] jmp sym\._mid_memalign)$'
+verdict = "r2s-right"
+upstream = "axt lists no reference from a tail jmp to another function's entry (dectest64 0x401164 `eb8a jmp sym.register_tm_clones`)"
+reason = "class D: ifunc_rel64 0x413010 memalign_hook_ini `jmp sym._mid_memalign` and pumasim 0x406c3e `jmp sym.imp._ZdaPvm` end their functions; radare2 records no JUMP reference, r2s does. r2s's holder shows `from=none` as both are named symbols outside r2s's afl extents"
+
+[[judged]]
+command = "axt"
+binaries = ["truechin.so"]
+corpus = "elf"
+function = '^(0x00000d78) '
+lacking = "r2"
+r2s = '^(sym\.atexit 0xde0 \[DATA:\-\-\-\] add x0, x0, sym\.__atexit_handler_wrapper)$'
+verdict = "r2s-right"
+upstream = "axt lists no reference from an adrp+add pair that forms a function's address (truechin.so 0xddc..0xde0 `add x0, x0, sym.__atexit_handler_wrapper`)"
+reason = "class D: truechin.so atexit forms __atexit_handler_wrapper's address (0xd78) by `adrp x0, 0` (0xdd8) and `add x0, x0, 0xd78` (0xde0); pd names the symbol, axt @ 0xd78 prints nothing"
+
+[[judged]]
+command = "afv"
+binaries = "*"
+corpus = "elf"
+lacking = "r2s"
+r2s = '^<missing> inside=\S+ __uint128_t$'
+verdict = "deliberate"
+reason = "class E, definitional: r2s states one 16-byte object where the body writes or passes the region as a pair; radare2 makes one var per 8-byte access. libstdc++.so.6 0xb49e0 do_out: r2s `__uint128_t from @ entry.sp-0x38` written by `mov qword [rsp], rdx` (0xb4a0a) and `mov qword [rsp+8], rcx` (0xb4a1f); radare2 var_8h at rsp+0x8 inside it. go-cdetect 0x47a8b3 zeroes its 16-byte object with `movups xmmword [rsp+0x28], xmm15`"
+
+[[judged]]
+command = "afl"
+binaries = ["0pack"]
+corpus = "elf"
+function = '^(0x0046a206) '
+lacking = "r2s"
+r2 = '^(0x0046a206 10 332 fcn\.0046a206)$'
+verdict = "deliberate"
+reason = "class A, definitional: r2s keeps a jmp target nothing else states in the jumping body. 0pack 0x633d8f `e97264e3ff jmp 0x46a206`: r2s's function at 0x633d8f holds 0x46a206's blocks (minaddr 0x46a1f6, `afb` 0x46a302 j 0x633d7a); radare2 makes fcn.0046a206"
+
+[[judged]]
+command = "afv"
+binaries = ["ld-2.31.so"]
+corpus = "elf"
+function = '^(0x0000ee90) '
+lacking = "r2s"
+r2 = '^(var int64_t var_fh_2 @ rsp\+0xf)$'
+verdict = "r2s-right"
+upstream = "afva places vars after `sub rsp, reg` (alloca) at a static depth no instruction states"
+reason = "class E: ld-2.31.so 0xee90 _dl_map_object_deps moves rsp by `sub rsp, rax` (0xeec5, 0xf42d); radare2 places var_fh_2 (`lea rdx, [rsp+0xf]` at 0xf233) at entry.sp-0x529 as if the depth were 1336; r2s refuses the dynamic frame (`the stack pointer at 0xeec5 moves by an amount no constant states`)"
+
+[[judged]]
+command = "afv"
+binaries = ["swift-klass"]
+corpus = "elf"
+function = '^(0x00001ae0) '
+lacking = "r2"
+r2s = '^(var uint32_t stack_m28 @ entry\.sp\-0x1c)$'
+verdict = "r2s-right"
+upstream = "arm's fuzzy var match attaches a 4-byte store at sp+4 to the int32 var at sp+0 (var.c:1415, get_stack_var at :1177)"
+reason = "class E: swift-klass 0x1b20 `str w8, [sp, 4]` at depth 0x20 writes entry.sp-0x1c; radare2 lists var_0h int32_t @ sp+0x0 and none at sp+4; r2s states stack_m28"
+
+[[judged]]
+command = "afv"
+binaries = ["ifunc_rel64", "ls-toybox", "r2pay-arm64.so", "switch-hello-world.elf"]
+corpus = "elf"
+function = '^(0x000060e0|0x00009080|0x00060930|0x00412010) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg1 @ x0|arg int64_t arg1 @ x2|arg int64_t arg2 @ x3|arg int64_t arg3 @ rdx)$'
+verdict = "r2s-right"
+upstream = "the register-argument scan keeps one reg_set across a function's blocks in analysis order (var.c:1783), so a read in a block it analyses before the block that writes the register counts as an argument"
+reason = "class F: switch-hello-world.elf 0x60f8 `ldxr w3, [x19]` writes w3 before every read (0x6108..0x614c in the loop); radare2 lists arg2 @ x3. ls-toybox 0x6097c `adr x0` writes x0 before its read at 0x609b8; r2pay-arm64.so 0x9868 `ldr x2, [x19, 0x1560]`; ifunc_rel64 0x412097 `mov rdx, r12` is the first instruction naming rdx"
+
+[[judged]]
+command = "afv"
+binaries = ["radare2.c.obj"]
+corpus = "elf"
+function = '^(0x08000195) '
+lacking = "r2s"
+r2 = '^(arg int64_t arg2 @ rdx)$'
+verdict = "r2s-right"
+upstream = "argument detection misses cdq's implicit write of edx and counts the next read of edx as an argument"
+reason = "class F: radare2.c.obj 0x80001bc `cdq; shr edx, 0x1f` (signed division by 2): cdq writes edx from eax, so rdx is no argument; radare2 lists arg2 @ rdx"
+
+[[judged]]
+command = "afv"
+binaries = ["bashbot.x86_64.O0.elf", "libstdc++.so.6"]
+corpus = "elf"
+function = '^(0x00002e17|0x0010f6d0) '
+lacking = "r2s"
+r2 = '^(var int64_t var_1010h @ rbp\-0x1010|var int64_t var_9fh @ rsp\+0x9f)$'
+verdict = "r2-right"
+reason = "class E: an address-taken frame region with no object in afv. bashbot.x86_64.O0.elf 0x2e59 `lea rax, [rbp-0x1010]` (four times) hands a 4,096-byte buffer to callees; libstdc++.so.6 0x11004e `lea rsi, [rsp+0x9f]` hands a byte. radare2 lists var_1010h and var_9fh; afv states nothing at or around them. Owner ROADMAP D513"

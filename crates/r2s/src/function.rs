@@ -227,9 +227,5 @@ mod tests {
             spelled(&Never::unreached()).as_deref(),
             Some("noreturn: unproven (no return reached)")
         );
-        assert_eq!(
-            spelled(&Never::uncited()).as_deref(),
-            Some("noreturn: unproven (uncited row)")
-        );
     }
 }

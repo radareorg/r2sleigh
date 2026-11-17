@@ -62,7 +62,7 @@ fn model(
     let overridden = (built.results.iter()).filter(|lane| lane.stated_by == LaneSource::Override);
     let lanes = row.overrides.iter().map(|item| match item {
         r2abi::SpecOverride::Results { lanes, .. } => lanes.len(),
-        r2abi::SpecOverride::Extension { .. } => 0,
+        r2abi::SpecOverride::Extension { .. } | r2abi::SpecOverride::Preserved { .. } => 0,
     });
     assert_eq!(
         overridden.count(),
@@ -541,4 +541,165 @@ fn param_class_of_answers_each_class_and_each_model_places_it() {
     places_each_class("SysV", &model_of_sysv(), &nodes);
     places_each_class("Microsoft x64", &win64, &nodes);
     places_each_class("AAPCS64", &aapcs64, &nodes);
+}
+
+/// D476: a specification's `unaffected` list proves no survival. An x86-64-gcc profile that also
+/// lists RCX states no preserved RCX, because System V's cited set (psABI Figure 3.4) omits it.
+#[test]
+fn an_unaffected_lane_no_document_states_is_clobbered() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("an embedded machine");
+    let spec = machine.compiler_spec_of("gcc").expect("x86-64-gcc");
+    let rbx = "<register name=\"RBX\"/>";
+    let widened = spec.replacen(rbx, &format!("{rbx}<register name=\"RCX\"/>"), 1);
+    let profile = LanguageProfile::parse(&widened).expect("parses");
+    let unaffected = &profile.default_prototype().expect("a prototype").unaffected;
+    let rcx = r2sleigh_lift::profile::SpecStorage::Register("RCX".to_owned());
+    assert!(unaffected.contains(&rcx), "{unaffected:?}");
+    let library = (Kernel::Linux, CLibrary::Glibc, Default::default());
+    let row = ConventionId::SysVAmd64.row();
+    let built = convention_model(&machine.arch, 64, library, &profile, row).expect("the model");
+    let register = r2sleigh_lift::lifted_register_storage(&machine.arch, "rcx").expect("rcx");
+    assert!(built.clobbers(register), "{:?}", built.preserved);
+    let rbx = r2sleigh_lift::lifted_register_storage(&machine.arch, "rbx").expect("rbx");
+    assert!(built.preserves(rbx), "the cited set keeps RBX");
+}
+
+/// The register bytes `name` covers on `arch`, keyed by offset; none where it does not resolve.
+fn register_bytes(arch: &r2il::ArchSpec, name: &str) -> Vec<u64> {
+    let storage = r2sleigh_lift::lifted_register_storage(arch, name);
+    storage.map_or_else(Vec::new, |at| {
+        (at.offset..at.offset + u64::from(at.size)).collect()
+    })
+}
+
+/// Every convention a program on `sleigh` can run under, as `default_for` and `go` select it.
+fn selectable(sleigh: &str, bits: u32) -> std::collections::BTreeSet<ConventionId> {
+    let go = |kernel, version| ConventionId::go(sleigh, bits, kernel, version);
+    let picks = KERNELS.into_iter().flat_map(|kernel| {
+        [
+            ConventionId::default_for(sleigh, bits, kernel),
+            go(kernel, Some((1, 22))),
+            go(kernel, None),
+            ConventionId::go_abi0(sleigh, bits),
+            ConventionId::go_unstated(sleigh, bits),
+        ]
+    });
+    picks.flatten().collect()
+}
+
+/// The bytes a model keeps and its cspec's `unaffected` list states (less the link) that differ,
+/// where no platform row speaks and no `SpecOverride::Preserved` names them: `<side> <register>`.
+fn unnamed_differences(
+    arch: &r2il::serialize::ArchSpec,
+    bits: u32,
+    kernel: Kernel,
+    profile: &LanguageProfile,
+    row: &r2abi::ConventionRow,
+) -> Option<Vec<String>> {
+    use std::collections::BTreeSet;
+    let at = (kernel, library(kernel), Default::default());
+    let model = convention_model(arch, bits, at, profile, row).ok()?;
+    let lanes = model.preserved.iter().chain(model.reserved.iter());
+    let kept = (lanes.map(|lanes| lanes.narrowed()))
+        .flat_map(|at| at.offset..at.offset + u64::from(at.size))
+        .collect::<BTreeSet<_>>();
+    let platform = r2abi::architecture_registers(&arch.name)
+        .iter()
+        .chain(r2abi::platform_registers(&arch.name, bits, kernel));
+    let spoken =
+        (platform.flat_map(|row| register_bytes(arch, row.register))).collect::<BTreeSet<_>>();
+    let link = (profile.return_address.as_deref())
+        .map_or_else(Vec::new, |name| register_bytes(arch, name));
+    let prototype = profile.default_prototype().expect("a prototype");
+    let stated = (prototype.unaffected.iter())
+        .filter_map(|storage| match storage {
+            r2sleigh_lift::profile::SpecStorage::Register(name) => Some(name),
+            r2sleigh_lift::profile::SpecStorage::Address { .. } => None,
+        })
+        .flat_map(|name| register_bytes(arch, name))
+        .filter(|byte| !link.contains(byte))
+        .collect::<BTreeSet<_>>();
+    let named = |byte: u64, side: bool| {
+        row.overrides.iter().any(|item| match *item {
+            r2abi::SpecOverride::Preserved { register, kept, .. } => {
+                kept == side && register_bytes(arch, register.0).contains(&byte)
+            }
+            _ => false,
+        })
+    };
+    let dropped = stated
+        .difference(&kept)
+        .filter(|byte| !named(**byte, false));
+    let added = kept.difference(&stated).filter(|byte| !named(**byte, true));
+    let sides = dropped
+        .map(|b| ("dropped", b))
+        .chain(added.map(|b| ("added", b)));
+    let spelled = sides
+        .filter(|(_, byte)| !spoken.contains(byte))
+        .map(|(side, byte)| {
+            let at = |reg: &&r2il::serialize::RegisterDef| {
+                reg.offset <= *byte && *byte < reg.offset + u64::from(reg.size)
+            };
+            let register = arch.registers.iter().filter(at).min_by_key(|reg| reg.size);
+            let register = register.map_or("?", |reg| reg.name.as_str());
+            format!("{side} {register}")
+        });
+    Some(spelled.collect())
+}
+
+/// D476 gate: each model keeps its cspec's `unaffected` less the link, but where a platform row
+/// speaks or a `SpecOverride::Preserved` names the difference (doc/adr-call-boundary.md, D476).
+#[test]
+fn each_preserved_set_is_the_specification_s_or_names_each_difference() {
+    use std::collections::BTreeSet;
+    let mut checked = BTreeSet::new();
+    let mut unnamed = BTreeSet::new();
+    let machines = [
+        ("x86-64", 64),
+        ("x86", 32),
+        ("aarch64", 64),
+        ("arm", 32),
+        ("riscv64", 64),
+    ];
+    for (sleigh, bits) in machines {
+        let Ok(machine) = r2sleigh_lift::embedded_machine(sleigh) else {
+            continue;
+        };
+        let arch = &machine.arch;
+        let models = selectable(sleigh, bits).into_iter().flat_map(|id| {
+            let specs = specifications(&machine, id.row());
+            specs
+                .into_iter()
+                .map(move |(compiler, spec)| (id, compiler, spec))
+        });
+        for (id, compiler, spec) in models {
+            let row = id.row();
+            let Some(profile) = profile_of(spec, row) else {
+                continue;
+            };
+            let kernel = match compiler {
+                "windows" => Kernel::Windows,
+                "apple" => Kernel::Darwin,
+                _ => Kernel::Linux,
+            };
+            let Some(differences) = unnamed_differences(arch, bits, kernel, &profile, row) else {
+                continue;
+            };
+            checked.insert(format!("{sleigh}/{compiler}/{id:?}"));
+            let at = |difference| format!("{sleigh}/{compiler}/{id:?}: {difference}");
+            unnamed.extend(differences.into_iter().map(at));
+        }
+    }
+    for pair in [
+        "x86-64/gcc/SysVAmd64",
+        "x86-64/windows/Win64",
+        "x86-64/golang/GoAmd64",
+        "x86/default/I386Cdecl",
+        "aarch64/default/Aapcs64",
+        "aarch64/apple/AppleArm64",
+        "aarch64/golang/GoArm64",
+    ] {
+        assert!(checked.contains(pair), "{pair}: {checked:?}");
+    }
+    assert_eq!(unnamed, BTreeSet::new(), "checked {checked:?}");
 }

@@ -1300,8 +1300,7 @@ mod tests {
             .iter()
             .find(|value| {
                 value.var.size == 4
-                    && (value.var.name().eq_ignore_ascii_case("w1")
-                        || value.var.name().starts_with("tmp:lane:"))
+                    && (value.var.name().eq_ignore_ascii_case("w1") || value.var.is_lane())
             })
             .expect("narrow formal read");
         assert!(

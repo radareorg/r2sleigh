@@ -243,6 +243,7 @@ fn rendered_returning_object(declared: bool) -> String {
         string_literals: Vec::new(),
         immutable_literals: Vec::new(),
         read_only: Vec::new(),
+        load: r2abi::statement::LoadBase::Unstated,
         data_symbols: vec![r2source::SourceDataObject::new(
             0x2000,
             "obj.counter",

@@ -182,15 +182,20 @@ pub(crate) fn inferred_signature_to_spec(
     let params = signature
         .params
         .iter()
+        // Local inference names no parameter: `prepare.rs` spells each by its position (D480).
         .map(|param| FunctionParamSpec {
-            name: param.name.clone(),
+            name: None,
             ty: Some(preserving_c_typedefs(&param.ty)),
         })
         .collect::<Vec<_>>();
     if ret_type.is_none() && params.is_empty() {
         return None;
     }
-    Some(FunctionSignatureSpec { ret_type, params })
+    Some(FunctionSignatureSpec {
+        ret_type,
+        params,
+        basis: SignatureBasis::Inferred,
+    })
 }
 
 pub(crate) fn is_generic_signature_type(ty: Option<&CTypeLike>) -> bool {
@@ -231,22 +236,4 @@ pub(crate) fn estimate_type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Op
 
 pub(crate) fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
     crate::render_signature_type(ty, ptr_bits)
-}
-
-pub(crate) fn type_name_is_opaque_placeholder(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    let stripped = lower
-        .trim_start_matches("struct ")
-        .trim_start_matches("union ")
-        .trim_start_matches("enum ")
-        .trim_end_matches('*')
-        .trim_end();
-    stripped.starts_with("anon_") || stripped.starts_with("type_0x") || lower.contains(" type_0x")
-}
-
-pub(crate) fn is_generated_local_struct_name(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    lower
-        .trim_start_matches("struct ")
-        .starts_with("sla_struct_")
 }

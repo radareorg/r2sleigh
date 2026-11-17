@@ -95,10 +95,6 @@ type.int64_t.size=64
 uid_t=typedef
 typedef.uid_t=uint32_t
 
-arc4random=func
-func.arc4random.args=0
-func.arc4random.ret=uint32_t
-
 srandomdev=func
 func.srandomdev.args=0
 func.srandomdev.ret=void
@@ -110,13 +106,6 @@ func.strtonum.arg.1=long long,minval
 func.strtonum.arg.2=long long,maxval
 func.strtonum.arg.3=const char **,errstr
 func.strtonum.ret=long long
-
-ioctl=func
-func.ioctl.args=3
-func.ioctl.arg.0=int,fd
-func.ioctl.arg.1=unsigned long,request
-func.ioctl.arg.2=,...
-func.ioctl.ret=int
 
 main=func
 func.main.args=3
@@ -150,54 +139,6 @@ func.group_from_gid.arg.1=int,nogroup
 func.group_from_gid.ret=char *
 func.group_from_uid.include=grp.h
 
-dcgettext=func
-func.dcgettext.args=3
-func.dcgettext.arg.0=const char *,domainname
-func.dcgettext.arg.1=const char *,msgid
-func.dcgettext.arg.2=int,category
-func.dcgettext.ret=char *
-func.dcgettext.include=libintl.h
-
-dcngettext=func
-func.dcngettext.args=5
-func.dcngettext.arg.0=const char *,domainname
-func.dcngettext.arg.1=const char *,msgid1
-func.dcngettext.arg.2=const char *,msgid2
-func.dcngettext.arg.3=unsigned long int,n
-func.dcngettext.arg.4=int,category
-func.dcngettext.ret=char *
-func.dcngettext.include=libintl.h
-
-dgettext=func
-func.dgettext.args=2
-func.dgettext.arg.0=const char *,domainname
-func.dgettext.arg.1=const char *,msgid
-func.dgettext.ret=char *
-func.dgettext.include=libintl.h
-
-dngettext=func
-func.dngettext.args=4
-func.dngettext.arg.0=const char *,domainname
-func.dngettext.arg.1=const char *,msgid1
-func.dngettext.arg.2=const char *,msgid2
-func.dngettext.arg.3=unsigned long int,n
-func.dngettext.ret=char *
-func.dngettext.include=libintl.h
-
-gettext=func
-func.gettext.args=1
-func.gettext.arg.0=const char *,msgid
-func.gettext.ret=char *
-func.gettext.include=libintl.h
-
-ngettext=func
-func.ngettext.args=3
-func.ngettext.arg.0=const char *,msgid1
-func.ngettext.arg.1=const char *,msgid2
-func.ngettext.arg.2=unsigned long int,n
-func.ngettext.ret=char *
-func.ngettext.include=libintl.h
-
 compat_mode=func
 func.compat_mode.args=2
 func.compat_mode.arg.0=const char *,function
@@ -207,25 +148,6 @@ func.compat_mode.ret=bool
 getprogname=func
 func.getprogname.args=0
 func.getprogname.ret=const char *
-
-strlcpy=func
-func.strlcpy.args=3
-func.strlcpy.arg.0=char *,dest
-func.strlcpy.arg.1=const char *,src
-func.strlcpy.arg.2=size_t, n
-func.strlcpy.ret=char *
-
-usleep=func
-func.usleep.args=1
-func.usleep.arg.0=int,s
-func.usleep.ret=int
-
-bind=func
-func.bind.args=3
-func.bind.arg.0=int,socket
-func.bind.arg.1=struct sockaddr*,address
-func.bind.arg.2=socklen_t,address_len
-func.bind.ret=int
 
 imaxdiv=func
 func.imaxdiv.args=2
@@ -238,26 +160,6 @@ func.maskrune.args=2
 func.maskrune.arg.0=long,c
 func.maskrune.arg.1=long,f
 func.maskrune.ret=int
-
-fesetexceptflag=func
-func.fesetexceptflag.args=2
-func.fesetexceptflag.arg.0=const,fexcept_t*
-func.fesetexceptflag.arg.1=int,excepts
-func.fesetexceptflag.ret=int
-
-fesetenv=func
-func.fesetenv.args=1
-func.fesetenv.arg.0=const,fenv_t*
-func.fesetenv.ret=int
-
-feupdateenv=func
-func.feupdateenv.args=1
-func.feupdateenv.arg.0=const,fenv_t*
-func.feupdateenv.ret=int
-
-localeconv=func
-func.localeconv.args=0
-func.localeconv.ret=lconv*
 
 signbit=func
 func.signbit.args=1
@@ -273,16 +175,6 @@ isfinite=func
 func.isfinite.args=1
 func.isfinite.arg.0=arithmetic,x
 func.isfinite.ret=bool
-
-isinf=func
-func.isinf.args=1
-func.isinf.arg.0=arithmetic,x
-func.isinf.ret=bool
-
-isnan=func
-func.isnan.args=1
-func.isnan.arg.0=arithmetic,x
-func.isnan.ret=bool
 
 isnormal=func
 func.isnormal.args=1
@@ -325,27 +217,6 @@ func.isunordered.arg.0=arithmetic,x
 func.isunordered.arg.1=arithmetic,y
 func.isunordered.ret=bool
 
-longjmp=func
-func.longjmp.args=2
-func.longjmp.arg.0=jmp_buf,env
-func.longjmp.arg.1=int,val
-func.longjmp.ret=void
-
-bsearch=func
-func.bsearch.args=5
-func.bsearch.arg.0=const void *,key
-func.bsearch.arg.1=const void *,base
-func.bsearch.arg.2=size_t,nmemb
-func.bsearch.arg.3=size_t,size
-func.bsearch.arg.4=int,(*compar)(const void *,const void *)
-
-qsort=func
-func.qsort.args=4
-func.qsort.arg.0=void *,base
-func.qsort.arg.1=size_t,nmemb
-func.qsort.arg.2=size_t,size
-func.qsort.arg.3=int(*compar)(const void *,const void *)
-
 div=func
 func.div.args=2
 func.div.arg.0=int,numer
@@ -363,20 +234,6 @@ func.lldiv.args=2
 func.lldiv.arg.0=long long,numer
 func.lldiv.arg.1=long long,denom
 func.lldiv.ret=lldiv_t
-
-bzero=func
-func.bzero.args=2
-func.bzero.arg.0=void *,s
-func.bzero.arg.1=size_t,n
-func.bzero.ret=void
-
-memmem=func
-func.memmem.args=4
-func.memmem.arg.0=const void *,big
-func.memmem.arg.1=int,big_len
-func.memmem.arg.2=const void *,little
-func.memmem.arg.3=int,little_len
-func.memmem.ret=void *
 
 fts_open_INODE64=func
 func.fts_open_INODE64.args=4
@@ -409,70 +266,15 @@ func.fts_children_INODE64.arg.0=void*,ftsp
 func.fts_children_INODE64.arg.1=int,opotions
 func.fts_children_INODE64.ret=void *
 
-mktime=func
-func.mktime.args=1
-func.mktime.arg.0=tm *,timeptr
-func.mktime.ret=time_t
-
-asctime=func
-func.asctime.args=1
-func.asctime.arg.0=const tm *,timeptr
-func.asctime.ret=char *
-
-gmtime=func
-func.gmtime.args=1
-func.gmtime.arg.0=const time_t *,timer
-func.gmtime.ret=tm*
-
-localtime=func
-func.localtime.args=1
-func.localtime.arg.0=const time_t *,timer
-func.localtime.ret=tm*
-
-strftime=func
-func.strftime.args=4
-func.strftime.arg.0=char *,s
-func.strftime.arg.1=size_t,maxsize
-func.strftime.arg.2=const char *,format
-func.strftime.arg.3=const tm *,timeptr
-func.strftime.ret=size_t
-
-wcsftime=func
-func.wcsftime.args=4
-func.wcsftime.arg.0=wchar_t *,s
-func.wcsftime.arg.1=size_t,maxsize
-func.wcsftime.arg.2=const wchar_t *,format
-func.wcsftime.arg.3=const tm *,timeptr
-func.wcsftime.ret=size_t
-
 gets=func
 func.gets.args=1
 func.gets.arg.0=char *,s
 func.gets.ret=char *
 
-inet_aton=func
-func.inet_aton.args=2
-func.inet_aton.arg.0=const char *,cp
-func.inet_aton.arg.1=void *,pin
-func.inet_aton.ret=int
-
 inet_ntoa=func
 func.inet_ntoa.args=1
 func.inet_ntoa.arg.0=void *,in
 func.inet_ntoa.ret=char *
-
-connect=func
-func.connect.args=3
-func.connect.arg.0=int,socket
-func.connect.arg.1=void *,addr
-func.connect.arg.2=size_t,addrlen
-func.connect.ret=ssize_t
-
-bzero=func
-func.bzero.args=2
-func.bzero.arg.0=void *,s
-func.bzero.arg.1=size_t,n
-func.bzero.ret=void
 
 maskrune=func
 func.maskrune.args=2
@@ -493,11 +295,6 @@ func.tgoto.arg.1=int,col
 func.tgoto.arg.2=int,row
 func.tgoto.ret=char *
 
-basename=func
-func.basename.args=1
-func.basename.arg.0=char *,path
-func.basename.ret=char *
-
 humanize_number=func
 func.humanize_number.args=1
 func.humanize_number.arg.0=char *,buf
@@ -507,40 +304,6 @@ func.humanize_number.arg.3=const char *,suffix
 func.humanize_number.arg.4=int,scale
 func.humanize_number.arg.5=int,flags
 func.humanize_number.ret=int
-
-pututxline=func
-func.pututxline.args=1
-func.pututxline.arg.0=void *,utx
-func.pututxline.ret=void *
-
-mktemp=func
-func.mktemp.args=1
-func.mktemp.arg.0=char *,template
-func.mktemp.ret=char *
-
-bindtextdomain=func
-func.bindtextdomain.args=2
-func.bindtextdomain.arg.0=char *,domainname
-func.bindtextdomain.arg.1=char *,dirname
-func.bindtextdomain.ret=char *
-
-textdomain=func
-func.textdomain.args=1
-func.textdomain.arg.0=char *,domainname
-func.textdomain.ret=char *
-
-setjmp=func
-func.setjmp.args=1
-func.setjmp.arg.0=jmpbuf,env
-func.setjmp.ret=int
-
-ptrace=func
-func.ptrace.args=4
-func.ptrace.arg.0=__ptrace_request,request
-func.ptrace.arg.1=pid_t,pid
-func.ptrace.arg.2=void*,addr
-func.ptrace.arg.3=void*,data
-func.ptrace.ret=long
 
 swift_bridgeObjectRelease=func
 func.swift_bridgeObjectRelease.args=1
@@ -656,23 +419,6 @@ func.tgetnum.args=1
 func.tgetnum.arg.0=char *,id
 func.tgetnum.ret=int
 
-listxattr=func
-func.listxattr.args=4
-func.listxattr.arg.0=const char *,path
-func.listxattr.arg.1=char*,namebuf
-func.listxattr.arg.2=int,fsize
-func.listxattr.arg.3=int,options
-func.listxattr.ret=int
-
-getopt_long=func
-func.getopt_long.args=5
-func.getopt_long.arg.0=int,argc
-func.getopt_long.arg.1=char **,argv
-func.getopt_long.arg.2=const char*,optstring
-func.getopt_long.arg.3=void *,longopts
-func.getopt_long.arg.4=int,longidx
-func.getopt_long.ret=int
-
 getbsize=func
 func.getbsize.args=2
 func.getbsize.arg.0=int *,hdrlenp
@@ -684,31 +430,7 @@ func.fflagtostr.args=1
 func.fflagtostr.arg.0=int,flags
 func.fflagtostr.ret=char*
 
-sigprocmask=func
-func.sigprocmask.args=3
-func.sigprocmask.arg.0=int,how
-func.sigprocmask.arg.1=void *,set
-func.sigprocmask.arg.2=void *,oldset
-func.sigprocmask.ret=pid_t
-
-fflush_unlocked=func
-func.fflush_unlocked.args=1
-func.fflush_unlocked.arg.0=FILE *,stream
-func.fflush_unlocked.ret=int
-
 func=type
 type.func=p
 type.func.size=8
-
-utime=func
-func.utime.args=2
-func.utime.arg.0=const char *,filename
-func.utime.arg.1=const void *,times
-func.utime.ret=int
-
-utimes=func
-func.utimes.args=2
-func.utimes.arg.0=const char *,filename
-func.utimes.arg.1=const void *,times
-func.utimes.ret=int
 

@@ -135,6 +135,12 @@ impl DeclaredSuccessors {
         self.by_block.entry(block).or_default().extend(successors);
     }
 
+    /// State that the source could not follow `block`'s last transfer.
+    #[cfg(test)]
+    pub(crate) fn mark_unresolved(&mut self, block: u64) {
+        self.unresolved.insert(block);
+    }
+
     /// The block the source says control enters at.
     ///
     /// It is not always the lowest-addressed one: a function GCC split across a
@@ -157,6 +163,35 @@ impl DeclaredSuccessors {
             .filter(|(block, successors)| successors.is_empty() && !self.unresolved.contains(block))
             .map(|(block, _)| *block)
             .collect()
+    }
+
+    /// Of each unresolved source block, the one chunk `cfg` ends where it ends; `None` where a block
+    /// is undeclared or no single chunk ends there. O((B + C) log C): one index of chunk ends.
+    pub(crate) fn unresolved_in(&self, blocks: &[R2ILBlock], cfg: &CFG) -> Option<BTreeSet<u64>> {
+        if blocks
+            .iter()
+            .any(|block| !self.by_block.contains_key(&block.addr))
+        {
+            return None;
+        }
+        let ends: BTreeSet<(u64, u64)> = (cfg.blocks())
+            .filter_map(|chunk| Some((chunk.addr.checked_add(u64::from(chunk.size))?, chunk.addr)))
+            .collect();
+        let mut chunks = BTreeSet::new();
+        for block in blocks
+            .iter()
+            .filter(|block| self.unresolved.contains(&block.addr))
+        {
+            let end = block.addr.checked_add(u64::from(block.size))?;
+            let mut ending = ends
+                .range((end, block.addr)..(end, end))
+                .map(|&(_, addr)| addr);
+            let (Some(chunk), None) = (ending.next(), ending.next()) else {
+                return None;
+            };
+            chunks.insert(chunk);
+        }
+        Some(chunks)
     }
 
     /// Whether the source lets control run off the end of `block` into

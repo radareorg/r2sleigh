@@ -177,6 +177,7 @@ pub struct LibraryRow {
     pub passing: crate::mangled::Passing,
     /// Whether the row states what the function returns.
     pub result: RowResult,
+    /// Whether a cited source states the function never returns; an uncited row states false (D485).
     pub noreturn: bool,
     /// A parameter that, holding this value, makes the call not return.
     pub halts_on: Option<(u8, Halt)>,
@@ -279,7 +280,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 12] = [
+pub const SOURCES: [&str; 13] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -292,6 +293,7 @@ pub const SOURCES: [&str; 12] = [
     "Microsoft",
     "Itanium C++ ABI",
     "macOS SDK",
+    "Apple Libc",
 ];
 
 /// What a row read from a mangled name cites.
@@ -357,6 +359,7 @@ impl LibraryRows {
         for embedded in shared.iter().chain(own) {
             rows.read_text(embedded, embedded.text);
         }
+        rows.quotient();
         rows
     }
 
@@ -382,6 +385,14 @@ impl LibraryRows {
                 rows.insert(name.into(), row);
             }
         }
+        self.quotient();
+    }
+
+    /// Two spellings of one type are one node (D487, D491's relation, C17 6.2.7p1): the graph's
+    /// quotient, every prototype retyped through it. O((N + E) log N) over the graph's N nodes.
+    fn quotient(&mut self) {
+        let classes = self.graph.quotient();
+        (self.prototypes.iter_mut()).for_each(|prototype| prototype.retype(&classes));
     }
 
     /// The parameters only: a mangled name states no result, so the return type is refused.
@@ -500,7 +511,8 @@ impl LibraryRows {
             tail,
             passing: crate::mangled::Passing::Stated,
             result: RowResult::Stated,
-            noreturn: declared.noreturn,
+            // An uncited table states no noreturn: its rows cite nothing that says so (D485).
+            noreturn: declared.noreturn && embedded.cited,
             halts_on: declared.halts_on,
             yields: declared.yields,
             citation: citation.into(),
@@ -840,12 +852,22 @@ mod tests {
         );
     }
 
+    /// An uncited table states no noreturn, as it states no tail and no effects (D485).
+    #[test]
+    fn an_uncited_table_states_no_noreturn() {
+        let text = "f=func\nfunc.f.args=0\nfunc.f.noreturn=true\nfunc.f.ret=void\n";
+        let rows = LibraryRows::parse(LibraryId::Glibc, text);
+        let row = rows.row(LibraryId::Glibc, "f").expect("f");
+        assert!(!row.noreturn);
+    }
+
     /// A row of an uncited table is `Unstated` whatever it spells; the cited one states its tail.
     #[test]
     fn only_a_cited_row_states_its_tail() {
         let glibc = LibraryRows::embedded(CLibrary::Glibc);
-        let gettext = (glibc.row(LibraryId::Portable, "dcgettext")).expect("dcgettext");
-        assert_eq!((gettext.tail, &*gettext.citation), (Tail::Unstated, ""));
+        let uncited = glibc.row(LibraryId::Portable, "user_from_uid");
+        let uncited = uncited.expect("user_from_uid, which spells `.include=pwd.h`");
+        assert_eq!((uncited.tail, &*uncited.citation), (Tail::Unstated, ""));
         let puts = glibc.row(LibraryId::Portable, "puts").expect("puts");
         assert_eq!(puts.tail, Tail::None);
         assert!(puts.citation.contains("ISO C17"), "{}", puts.citation);

@@ -90,3 +90,10 @@ Reading failures
   outside the allowed shape and source call-site accessors, or a method handing
   either out, lets a callee's statement reach a phase a kept build does not run
   again (doc/adr-callee-builds.md, D289).
+- `NAME_DECIDES_FACT` (deny, D460): a call of `r2abi::SymbolName::text` in
+  r2engine, r2ssa, r2types or r2dec (D492) outside an item that allows the lint with a reason from
+  `NAME_READ_REASONS`: printed, handed to an output contract, or a table lookup
+  by C identifier. A symbol name is a hint (AGENTS.md, Non-Negotiable 6), and
+  `SymbolName` has no `PartialEq<str>`, `Deref`, `AsRef<str>` or `Borrow<str>`,
+  so a comparison with a literal does not compile. The lint's test reads every
+  allow's reason and holds their count (`NAME_READS_ALLOWED`), which only falls.

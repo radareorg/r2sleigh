@@ -43,8 +43,8 @@ impl InternedName {
         self.id
     }
 
-    /// Which kind of location this spelling names.
-    pub const fn kind(&self) -> SSAVarNameKind {
+    /// Which prefix this spelling carries, for display.
+    pub(crate) const fn kind(&self) -> SSAVarNameKind {
         self.kind
     }
 

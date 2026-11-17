@@ -92,6 +92,8 @@ pub struct NativeFunction {
     pub immutable_literals: Vec<u64>,
     /// Bytes the program never writes at each address the body loads from, as the file holds them.
     pub read_only: Vec<(u64, Vec<u8>)>,
+    /// Where the loader places the image, as its header states it.
+    pub load: r2abi::statement::LoadBase,
     /// Program data the body points at, named.
     pub data_symbols: Vec<SourceDataObject>,
     /// The graph each data object's type is a node of.
@@ -241,6 +243,7 @@ pub fn capture(
             string_literals: function.string_literals.into_boxed_slice(),
             immutable_literals: function.immutable_literals.into_boxed_slice(),
             read_only: function.read_only.into_boxed_slice(),
+            load: function.load,
             data_symbols: function.data_symbols.into_boxed_slice(),
             data_types: function.data_types,
             code_pointer_tables: function.code_pointer_tables.into_boxed_slice(),
@@ -375,6 +378,7 @@ mod tests {
             string_literals: Vec::new(),
             immutable_literals: Vec::new(),
             read_only: Vec::new(),
+            load: r2abi::statement::LoadBase::Unstated,
             data_symbols: Vec::new(),
             data_types: None,
             code_pointer_tables: Vec::new(),

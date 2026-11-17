@@ -15,7 +15,8 @@ is a merge that keeps them rather than a copy that drops them.
   radare2's, so a refresh leaves it alone; each block cites its source.
 - `types-cxx-cited.sdb.txt`: the C++ runtime's rows that carry their header, on the same terms
   as `types-posix.sdb.txt`: `__cxa_atexit`, the noreturn `__cxa_*`, `_Unwind_Resume`,
-  `std::terminate` and libstdc++'s `std::__throw_*`, read from GCC 13's headers (D406).
+  `std::terminate` and libstdc++'s `std::__throw_*`, read from GCC 13's headers, and
+  `__cxa_call_unexpected`, read from GCC 13.2's `unwind-cxx.h`, which no package installs (D406).
 - `types-posix.sdb.txt`: ISO C17, POSIX and 4.4BSD rows that carry the header they are read
   from, portable like `types.sdb.txt`, each with its tail stated (see "Cited rows").
 - `types-linux.sdb.txt`: what the GNU C library declares for itself.
@@ -35,7 +36,8 @@ is a merge that keeps them rather than a copy that drops them.
   takes `this`, the header that does (see "Mangled names").
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
 - `types-darwin-cited.sdb.txt`: libSystem's rows that carry their macOS SDK header (`_exit`,
-  `_Exit`, `__assert_rtn`, `errc`), read with `types-darwin.sdb.txt` on the same terms as
+  `_Exit`, `__assert_rtn`, `errc`), and `__stack_chk_fail`, read from Apple Libc's
+  `stack_protector.c`, read with `types-darwin.sdb.txt` on the same terms as
   `types-posix.sdb.txt` (D406).
 - `types-objc.sdb.txt`: what objc4's `libobjc.A.dylib` exports; read only for an import whose
   two-level namespace ordinal names that dylib.
@@ -93,7 +95,7 @@ stripping underscores at lookup:
 | `fread_chk`       | `__fread_chk`       | linux       |
 | `read_chk`        | `__read_chk`        | linux       |
 | `realpath_chk`    | `__realpath_chk`    | linux       |
-| `longjmp_chk`     | `__longjmp_chk`     | linux       |
+| `longjmp_chk`     | `__longjmp_chk`     | glibc (cited) |
 | `fdelt_chk`       | `__fdelt_chk`       | linux       |
 | `libc_start_main` | `__libc_start_main` | glibc (cited, LSB) |
 | `cxa_throw`       | `__cxa_throw`       | cxx |
@@ -146,24 +148,28 @@ Where radare2 scopes differently:
   `__strcat_chk`, `__strncat_chk`, `__vsprintf_chk`, `__vsnprintf_chk` -- are
   in the portable table; radare2 has them in `types-linux` only, so Darwin gets
   none of them. This is the move the maintainer's rework of #26743 proposes.
-- The ten that are glibc's alone are in `types-linux.sdb.txt`, as radare2 has
-  them.
+- The ten that are glibc's alone, which radare2 has in `types-linux`, are cited in
+  `types-glibc.sdb.txt` (D449; `__longjmp_chk`, D406).
 - `types-android.sdb.txt` declares bionic's `__fgets_chk` and `__fread_chk` in
   bionic's order, which radare2 does not declare at all, and leaves out
   radare2's `android_log_*` (liblog's `__android_log_*` under a key with the
   underscores dropped, with arities that are not `<android/log.h>`'s) and
   `xalloc_die` (gnulib's, not bionic's).
+- No table declares radare2's `xalloc_die`: it is gnulib's, linked into the program, and neither
+  glibc 2.39's `libc.so.6` nor libSystem exports it (D406).
 
 ## Cited rows
 
 Every row of `types-posix.sdb.txt` and `types-glibc.sdb.txt` names the header it is read from on
 a `func.<name>.include=` line and sits under a comment naming its source (`r2abi::library::SOURCES`:
 ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic, musl, Microsoft, the
-Itanium C++ ABI or the macOS SDK). The bionic,
+Itanium C++ ABI, the macOS SDK or Apple Libc). The bionic,
 KERNEL32 and UCRT tables are cited the same way; a Microsoft row adds `func.<name>.cite=`, the
 reference page and its minimum supported client. A binary-only LSB 5.0 interface
 (`__stack_chk_fail`) has no header: it cites its LSB section on `func.<name>.cite=` instead, under
-a comment saying it is in the binary standard only. A row that spells `...`
+a comment saying it is in the binary standard only. A row no installed header declares (musl's
+`__libc_start_main`, GCC's `__cxa_call_unexpected`, Apple Libc's `__stack_chk_fail`) cites the
+source file and line on `func.<name>.cite=`, under a comment naming that file. A row that spells `...`
 states its tail on `func.<name>.tail=`: `variadic`, `format(printf|scanf|wprintf|wscanf,<index>)`
 or `va_list(<index>)`, the index counting fixed parameters from zero. A row with no `...` and no
 `.tail=` states a fixed prototype (`Tail::None`). Every row of the other tables is

@@ -128,11 +128,3 @@ pub fn sanitize_c_identifier(name: &str) -> Option<String> {
         Some(out)
     }
 }
-
-pub fn is_generic_arg_name(name: &str) -> bool {
-    let lower = name.trim().to_ascii_lowercase();
-    lower
-        .strip_prefix("arg")
-        .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
-        .unwrap_or(false)
-}

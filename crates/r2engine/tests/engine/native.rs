@@ -241,11 +241,11 @@ impl Program for Fixture {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == BASE).then(|| self.name.to_owned())
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == BASE).then(|| r2abi::SymbolName::new(self.name))
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -283,11 +283,11 @@ impl Program for Halting {
         self.fixture.extents()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.name_at(vaddr)
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.import_at(vaddr)
     }
 }
@@ -402,11 +402,11 @@ impl Program for PanickingCallee {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == BASE).then(|| "caller".to_owned())
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == BASE).then(|| r2abi::SymbolName::new("caller"))
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -627,15 +627,15 @@ impl Program for Importing {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
     /// The binary says this address is an import's stub, which is what makes
     /// the declaration apply to it.
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x100a).then(|| "strlen".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x100a).then(|| r2abi::SymbolName::new("strlen"))
     }
 }
 
@@ -765,13 +765,13 @@ impl Program for Texts {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x1018).then(|| "strlen".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x1018).then(|| r2abi::SymbolName::new("strlen"))
     }
 }
 
@@ -845,13 +845,13 @@ impl Program for PagedText {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x1018).then(|| "strlen".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x1018).then(|| r2abi::SymbolName::new("strlen"))
     }
 }
 
@@ -923,11 +923,11 @@ impl Program for HalfWords {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == BASE).then(|| "caller".to_owned())
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == BASE).then(|| r2abi::SymbolName::new("caller"))
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -1003,13 +1003,13 @@ impl Program for MangledImporting {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x100a).then(|| "_ZNSo9_M_insertImEERSoT_".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x100a).then(|| r2abi::SymbolName::new("_ZNSo9_M_insertImEERSoT_"))
     }
 }
 
@@ -1093,13 +1093,13 @@ impl Program for CallsImport {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x1020).then(|| self.name.to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x1020).then(|| r2abi::SymbolName::new(self.name))
     }
 }
 
@@ -1310,16 +1310,16 @@ impl Program for Globals {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         match vaddr {
-            BASE => Some("sum".to_owned()),
-            0x2000 => Some("counter".to_owned()),
-            0x2010 => Some("total".to_owned()),
+            BASE => Some(r2abi::SymbolName::new("sum")),
+            0x2000 => Some(r2abi::SymbolName::new("counter")),
+            0x2010 => Some(r2abi::SymbolName::new("total")),
             _ => None,
         }
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -1834,11 +1834,11 @@ impl Program for Metered {
         self.fixture.extents()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.name_at(vaddr)
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.import_at(vaddr)
     }
 
@@ -2258,13 +2258,13 @@ impl Program for WithSink {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         (vaddr == BASE)
-            .then(|| "pick".to_owned())
-            .or_else(|| (vaddr == self.sink).then(|| "sink".to_owned()))
+            .then(|| r2abi::SymbolName::new("pick"))
+            .or_else(|| (vaddr == self.sink).then(|| r2abi::SymbolName::new("sink")))
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -2726,11 +2726,11 @@ impl Program for Unbounded {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == BASE).then(|| "classify".to_owned())
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == BASE).then(|| r2abi::SymbolName::new("classify"))
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -3613,13 +3613,13 @@ impl Program for TailToRand {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "wrapper".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("wrapper")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x1010).then(|| "rand".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x1010).then(|| r2abi::SymbolName::new("rand"))
     }
 }
 
@@ -3699,13 +3699,13 @@ impl Program for WideOrTail {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "wide_or_tail".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("wide_or_tail")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x1020).then(|| "rand".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x1020).then(|| r2abi::SymbolName::new("rand"))
     }
 }
 
@@ -5170,14 +5170,14 @@ impl Program for ImportCaller {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
     /// No prototype table declares this name, so nothing says what it touches.
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == self.stub).then(|| "undeclared_import".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == self.stub).then(|| r2abi::SymbolName::new("undeclared_import"))
     }
 }
 
@@ -6944,11 +6944,11 @@ impl Program for Entered {
         self.fixture.extents()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.name_at(vaddr)
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.import_at(vaddr)
     }
 }
@@ -7274,11 +7274,11 @@ impl Program for HaltingSlot {
         self.fixture.extents()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.name_at(vaddr)
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.import_at(vaddr)
     }
 }
@@ -7707,11 +7707,11 @@ impl Program for LookupTable {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == BASE).then(|| "classify".to_owned())
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == BASE).then(|| r2abi::SymbolName::new("classify"))
     }
 
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
+    fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
         None
     }
 }
@@ -8450,13 +8450,13 @@ impl Program for Ldexpf {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("caller")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x1010).then(|| "ldexpf".to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == 0x1010).then(|| r2abi::SymbolName::new("ldexpf"))
     }
 }
 
@@ -8799,7 +8799,7 @@ const GO_STACK_CHECK_EFFECTFUL: &[u8] = &[
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
 ];
 
-/// The Go prologue's bytes, its stack-growth routine under the name a test gives it.
+/// The Go prologue's bytes, stated Go, its stack-growth routine under the name a test gives it.
 struct GoStack {
     fixture: Fixture,
     growth: String,
@@ -8828,15 +8828,19 @@ impl Program for GoStack {
         self.fixture.extents()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         match vaddr.checked_sub(BASE) {
-            Some(0x30) => Some(self.growth.clone()),
+            Some(0x30) => Some(r2abi::SymbolName::new(self.growth.as_str())),
             _ => self.fixture.name_at(vaddr),
         }
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.fixture.import_at(vaddr)
+    }
+
+    fn language_at(&self, _vaddr: u64) -> r2engine::program::SourceLanguage {
+        r2engine::program::SourceLanguage::Go
     }
 }
 
@@ -9498,13 +9502,13 @@ impl Program for CallsAFunction {
         NONE
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.import_at(vaddr)
-            .or_else(|| (vaddr == BASE).then(|| "scan".to_owned()))
+            .or_else(|| (vaddr == BASE).then(|| r2abi::SymbolName::new("scan")))
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == self.import.0).then(|| self.import.1.to_owned())
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
+        (vaddr == self.import.0).then(|| r2abi::SymbolName::new(self.import.1))
     }
 }
 
@@ -9637,8 +9641,8 @@ fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
     let (error, count) = names(&sysv, &sysv.target(), "error");
     assert_eq!(error.len(), 6 + 8, "{error:?}");
     assert_eq!(count.as_deref(), Some("al"));
-    // radare2's `dcgettext` row is uncited, so a call may read past it; `puts` cites ISO C17.
-    assert_eq!(names(&sysv, &sysv.target(), "dcgettext").0.len(), 6 + 8);
+    // radare2's `user_from_uid` row is uncited, so a call may read past it; `puts` cites ISO C17.
+    assert_eq!(names(&sysv, &sysv.target(), "user_from_uid").0.len(), 6 + 8);
     assert_eq!(
         names(&sysv, &sysv.target(), "puts").0,
         vec!["rdi".to_owned()]

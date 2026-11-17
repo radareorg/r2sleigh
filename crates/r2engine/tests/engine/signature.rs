@@ -315,3 +315,55 @@ fn a_declared_double_on_the_stack_is_declared_beside_the_register_ones() {
         "{text}"
     );
 }
+
+/// What the debug information would say of the body at `BASE`: `int f(int, char *)`, with no
+/// parameter named. DWARF states each `DW_TAG_formal_parameter` with or without `DW_AT_name`.
+fn unnamed() -> r2abi::Declarations {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let scalar = |kind, bits, name: &str| {
+        Type::Scalar(Scalar {
+            kind,
+            width: Width::Bits(bits),
+            name: Some(name.to_owned()),
+        })
+    };
+    let int = graph.add(scalar(ScalarKind::Signed, 32, "int"));
+    let char_ = graph.add(scalar(ScalarKind::Signed, 8, "char"));
+    let pointer = graph.add(Type::Pointer { target: char_ });
+    let prototype = Prototype {
+        name: "f".to_owned(),
+        parameters: vec![
+            Parameter::new(int, "int", None::<&str>),
+            Parameter::new(pointer, "char *", None::<&str>),
+        ],
+        returns: "int".into(),
+        return_type: int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    declarations
+}
+
+/// `mov eax, edi; ret`: reads one parameter register.
+const READS_ONE: &[u8] = &[0x89, 0xf8, 0xc3];
+
+/// `lea eax, [rdi + rsi]; add eax, edx; ret`: reads three.
+const READS_THREE: &[u8] = &[0x8d, 0x04, 0x37, 0x01, 0xd0, 0xc3];
+
+/// An unnamed declared parameter is still declared: the prototype's two parameters stand however
+/// many registers the body reads (D480).
+#[test]
+fn a_declared_prototype_with_unnamed_parameters_keeps_its_arity() {
+    for code in [READS_ONE, READS_THREE] {
+        let literal = Literal::of_code(code, &[("f", BASE, code.len() as u64)]);
+        let text = (OpenProgram::of(literal.with_declarations(unnamed())).rendered(BASE))
+            .expect("it renders")
+            .response
+            .output
+            .into_text();
+        let header = text.lines().next().unwrap_or_default();
+        assert_eq!(common::parameters(header).len(), 2, "{text}");
+    }
+}

@@ -225,5 +225,5 @@ pub use slot_promotion::promoted_slot_offset;
 pub use strided::StridedInterval;
 pub use value_table::{ValueTable, VarId};
 pub use values::{InstructionBound, ValueRanges, instruction_bound, solve_value_ranges};
-pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};
+pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 pub use view::{Representative, ValueView, ValueViews, ViewExtension, ViewRelation};
