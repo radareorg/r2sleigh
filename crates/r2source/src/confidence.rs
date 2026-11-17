@@ -191,6 +191,95 @@ impl Premise {
     }
 }
 
+/// A set of premises: one bit per [`Premise`], so a confidence costs two bytes, ordered as the
+/// sorted sequence it holds.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Premises(u8);
+
+impl Premises {
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    const fn bit(premise: Premise) -> u8 {
+        1 << premise as u8
+    }
+
+    /// Whether `premise` was not already held.
+    pub fn insert(&mut self, premise: Premise) -> bool {
+        let fresh = !self.contains(&premise);
+        self.0 |= Self::bit(premise);
+        fresh
+    }
+
+    pub const fn contains(&self, premise: &Premise) -> bool {
+        self.0 & Self::bit(*premise) != 0
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn len(&self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    pub const fn is_subset(&self, other: &Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    pub const fn is_superset(&self, other: &Self) -> bool {
+        other.is_subset(self)
+    }
+
+    /// The premises held, in [`Premise`]'s order.
+    pub fn iter(&self) -> impl Iterator<Item = Premise> + Clone + '_ {
+        Premise::ALL
+            .into_iter()
+            .filter(|premise| self.contains(premise))
+    }
+}
+
+impl Ord for Premises {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+impl PartialOrd for Premises {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Extend<Premise> for Premises {
+    fn extend<I: IntoIterator<Item = Premise>>(&mut self, premises: I) {
+        for premise in premises {
+            self.insert(premise);
+        }
+    }
+}
+
+impl FromIterator<Premise> for Premises {
+    fn from_iter<I: IntoIterator<Item = Premise>>(premises: I) -> Self {
+        let mut set = Self::new();
+        set.extend(premises);
+        set
+    }
+}
+
+impl std::fmt::Debug for Premises {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
+impl serde::Serialize for Premises {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
 /// A source that states a fact (D410): a cited row, debug information, a kernel's document or a
 /// runtime model, minted only from that owner's statement.
 #[doc = "```compile_fail,E0423\nlet forged = r2source::Citation(());\n```"]
@@ -395,9 +484,8 @@ impl Mark {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Confidence {
     pub basis: Basis,
-    /// What the fact takes for granted. Empty where it assumes nothing beyond
-    /// its basis, which is every fact the engine derives today.
-    pub premises: BTreeSet<Premise>,
+    /// What the fact takes for granted. Empty where it assumes nothing beyond its basis.
+    pub premises: Premises,
 }
 
 impl Confidence {
@@ -405,7 +493,7 @@ impl Confidence {
     pub const fn of(basis: Basis) -> Self {
         Self {
             basis,
-            premises: BTreeSet::new(),
+            premises: Premises::new(),
         }
     }
 
@@ -438,7 +526,7 @@ impl Confidence {
     #[must_use]
     pub fn and(mut self, other: &Self) -> Self {
         self.basis = self.basis.max(other.basis);
-        self.premises.extend(other.premises.iter().copied());
+        self.premises.extend(other.premises.iter());
         self
     }
 }
@@ -462,7 +550,7 @@ impl PartialOrd for Confidence {
 impl std::fmt::Display for Confidence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.basis.spelled())?;
-        for premise in &self.premises {
+        for premise in self.premises.iter() {
             write!(f, "+{}", premise.spelled())?;
         }
         Ok(())
@@ -611,7 +699,7 @@ mod tests {
     }
 
     /// Every set of premises: `Premise` has 4 variants, so 16 sets.
-    fn every_premise_set() -> Vec<BTreeSet<Premise>> {
+    fn every_premise_set() -> Vec<Premises> {
         (0..1u8 << Premise::ALL.len())
             .map(|bits| {
                 let held = Premise::ALL.iter().enumerate();
@@ -632,7 +720,7 @@ mod tests {
             for premises in &sets {
                 let confidence = Confidence {
                     basis,
-                    premises: premises.clone(),
+                    premises: *premises,
                 };
                 let cell = confidence.mark().cell();
                 let exact = strong(basis.grade()) && premises.is_empty();

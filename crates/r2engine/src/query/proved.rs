@@ -251,7 +251,7 @@ fn never_returns(closed: &r2ssa::ExitSite) -> Option<Fact<bool>> {
     };
     let confidence = Confidence {
         basis,
-        premises: premises.clone(),
+        premises: premises.iter().copied().collect(),
     };
     Some(Fact::new(true, confidence))
 }
