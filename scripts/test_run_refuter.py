@@ -68,6 +68,23 @@ class Judge(unittest.TestCase):
         )
         self.assertEqual(verdict["refuted"], [])
 
+    def test_a_wide_store_covers_each_byte_the_store_trace_lists(self):
+        verdict = refuter.judge(
+            recording(
+                store_trace=True,
+                stores=["0x8000", "0x8001", "0x8002", "0x8003"],
+                writes=[{"address": "0x8000", "bytes": "01020304"}],
+            ),
+            answer(writes=[{"address": "0x8000", "bytes": "01020304"}]),
+            self.IMAGE,
+        )
+        self.assertEqual(verdict["refuted"], [])
+
+    def test_readbacks_of_two_widths_at_one_address_both_compare(self):
+        writes = [{"address": "0x8000", "bytes": "01020304"}, {"address": "0x8000", "bytes": "01"}]
+        verdict = refuter.judge(recording(writes=writes), answer(writes=writes), self.IMAGE)
+        self.assertEqual(verdict["refuted"], [])
+
     def test_leaving_the_body_refutes_and_an_unmodelled_operation_is_unreplayed(self):
         left = refuter.judge(recording(), answer(stop={"kind": "left-body", "at": "0x10", "to": "0x99"}), self.IMAGE)
         self.assertEqual(len(left["refuted"]), 1)

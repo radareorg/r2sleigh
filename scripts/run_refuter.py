@@ -121,14 +121,20 @@ def judge(recording: dict, answer: dict, image: tuple[int, int]) -> dict:
             slid += 1
             continue
         reasons.append(f"{name}: the lift {ours:#x}, the machine {theirs:#x}")
-    stored = {int(write["address"], 16): write["bytes"] for write in machine["writes"]}
+    # Final memory, one byte per address: readbacks of two widths at one address agree byte by byte.
+    held = {
+        int(write["address"], 16) + at: byte
+        for write in machine["writes"]
+        for at, byte in enumerate(bytes.fromhex(write["bytes"]))
+    }
     for write in answer["writes"]:
         address = int(write["address"], 16)
         at = address + bias if inside(address) else address
-        theirs = stored.get(at)
-        if theirs is None:
+        span = range(at, at + len(bytes.fromhex(write["bytes"])))
+        if any(byte not in held for byte in span):
             reasons.append(f"the lift writes {address:#x}, which the recording never read back")
             continue
+        theirs = bytes(held[byte] for byte in span).hex()
         if write["bytes"] == theirs:
             continue
         ours = bytes.fromhex(write["bytes"])
@@ -139,10 +145,11 @@ def judge(recording: dict, answer: dict, image: tuple[int, int]) -> dict:
                 continue
         reasons.append(f"[{at:#x}]: the lift stores {write['bytes']}, the machine holds {theirs}")
     if machine.get("store_trace"):
-        ours = {
-            (int(write["address"], 16) + bias if inside(int(write["address"], 16)) else int(write["address"], 16))
-            for write in answer["writes"]
-        }
+        ours = set()
+        for write in answer["writes"]:
+            address = int(write["address"], 16)
+            at = address + bias if inside(address) else address
+            ours.update(range(at, at + len(bytes.fromhex(write["bytes"]))))
         for address in machine.get("stores", []):
             if int(address, 16) not in ours:
                 reasons.append(f"the machine stores at {address}, the lift does not")
