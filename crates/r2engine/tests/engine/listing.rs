@@ -984,18 +984,8 @@ fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
     assert!(refused.contains(&defect), "{refused}");
     // The same defect refused the analysis first, and that is said too.
     assert!(refused.contains("the analysis panicked at "), "{refused}");
-    // The next function still lists; its closed world reads every body, so its analysis names
-    // the same defect (D573).
+    // The next function is untouched by it: the survey refuses that one body's walk (D587).
     let one = program.function_listing(ONE).expect("the session goes on");
-    let reason = one
-        .refused
-        .as_ref()
-        .map(|refused| refused.reason.to_string());
-    assert!(
-        reason
-            .as_ref()
-            .is_some_and(|reason| reason.contains(&defect)),
-        "{reason:?}"
-    );
+    assert!(one.refused.is_none());
     assert_eq!(one.lines.value.first().map(|line| line.address), Some(ONE));
 }

@@ -221,24 +221,28 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             true => thumb && self.thumb.is_some(),
             false => self.program.thumb_at(address),
         };
-        let halts = Halts::default();
-        let knowing = Knowing {
-            program: &self.program,
-            thumb,
-            returns,
-            halts: &halts,
-        };
-        let disasm = self.target(thumb).disasm;
-        let mut trace = Trace::start(address, disasm, &knowing).map_err(NativeRefusal::Body)?;
-        let transfers = Self::step(&mut trace, thumb);
-        let walk = BodyWalk {
-            entry: address,
-            trace,
-            thumb,
-            tables: Tabled::Unread,
-            halts,
-        };
-        Ok((walk, transfers))
+        // A defect reading one body refuses that body's walk, never the survey (D587).
+        let walked = crate::isolation::isolated(|| {
+            let halts = Halts::default();
+            let knowing = Knowing {
+                program: &self.program,
+                thumb,
+                returns,
+                halts: &halts,
+            };
+            let disasm = self.target(thumb).disasm;
+            let mut trace = Trace::start(address, disasm, &knowing).map_err(NativeRefusal::Body)?;
+            let transfers = Self::step(&mut trace, thumb);
+            let walk = BodyWalk {
+                entry: address,
+                trace,
+                thumb,
+                tables: Tabled::Unread,
+                halts,
+            };
+            Ok((walk, transfers))
+        });
+        walked.unwrap_or_else(|panicked| Err(NativeRefusal::from(panicked)))
     }
 
     fn open(
