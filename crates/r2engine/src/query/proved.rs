@@ -9,6 +9,7 @@ use r2ssa::{
 };
 
 use super::records::{AnnotationKind, Answered, ArgumentSlot, CallArgument, Operand, Trips};
+use super::result::ResultStanding;
 use crate::native::Prepared;
 use r2source::confidence::Basis;
 
@@ -19,15 +20,16 @@ pub struct Proved<'a> {
 }
 
 impl<'a> Proved<'a> {
-    /// One pass over each family of certificates: calls with their arguments, dispatches, loops and returns.
-    pub fn new(prepared: &'a Prepared) -> Self {
+    /// One pass over each family of certificates: calls with their arguments, dispatches, loops and
+    /// returns, each return standing as the sealed `result` states it (`None` where the seal refused).
+    pub fn new(prepared: &'a Prepared, result: Option<&r2types::ReturnTypeFact>) -> Self {
         let artifact = prepared.artifact().artifact();
         let mut anchored = Anchored::default();
         anchored.calls(artifact);
         anchored.switches(prepared, artifact);
         anchored.unresolved(prepared);
         anchored.loops(artifact);
-        anchored.returns(artifact);
+        anchored.returns(artifact, result);
         Self {
             prepared,
             anchored: anchored.0,
@@ -182,20 +184,41 @@ impl Anchored {
         }
     }
 
-    /// Each return says which register carries what it hands back.
-    fn returns(&mut self, artifact: &SsaArtifact) {
+    /// Each return says which register carries the result and how the sealed fact stands: the
+    /// certificate's carrier, else the convention's that `afi` names. No fact or a void, no note.
+    fn returns(&mut self, artifact: &SsaArtifact, result: Option<&r2types::ReturnTypeFact>) {
+        let Some(fact) = result else { return };
+        if fact.decided() == Some(&r2types::CTypeLike::Void) {
+            return;
+        }
+        let Some(standing) = ResultStanding::of(fact, artifact) else {
+            return;
+        };
         let graph = artifact.graph();
+        let decided = matches!(standing, ResultStanding::Decided(_));
+        let convention = artifact.machine_context().return_value_carrier();
         for certificate in &artifact.certificates().returns {
-            // A pair returns in both of its registers.
+            // A pair returns in both of its registers; a result in memory is no register's.
             let storages = match certificate.carrier {
-                Some(ReturnCarrier::Register { storage }) => vec![storage],
-                Some(ReturnCarrier::Pair { low, high }) => vec![low, high],
-                _ => continue,
+                Some(ReturnCarrier::Register { storage }) => vec![Some(storage)],
+                Some(ReturnCarrier::Pair { low, high }) => vec![Some(low), Some(high)],
+                Some(ReturnCarrier::StackSlot { .. }) => continue,
+                None => vec![convention],
             };
-            if let Some(line) = graph.instruction_for_inst(certificate.at) {
-                for storage in storages {
-                    self.push(line, AnnotationKind::Returns { storage }, Basis::Certified);
-                }
+            if decided && certificate.carrier.is_none() {
+                r2il::refusal_evidence!("result-note", "a decided result no return certifies");
+            }
+            // The register rests on the certificate where it names one, else on the convention.
+            let support = match decided && certificate.carrier.is_some() {
+                true => Basis::Certified,
+                false => Basis::Convention,
+            };
+            let Some(line) = graph.instruction_for_inst(certificate.at) else {
+                continue;
+            };
+            for storage in storages {
+                let standing = standing.clone();
+                self.push(line, AnnotationKind::Returns { storage, standing }, support);
             }
         }
     }

@@ -35,6 +35,7 @@ mod ranges;
 mod references;
 mod rendered;
 mod result_lanes;
+mod result_note;
 mod result_reads;
 mod results;
 mod reuse;

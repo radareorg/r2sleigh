@@ -571,7 +571,15 @@ impl<S: Source + 'static> OpenProgram<S> {
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
         let lifted = walking.0.as_ref().map_err(Clone::clone)?.lifted();
         let body = WalkedBody::new(entry, &lifted, target.arch);
-        let proved = Proved::new(prepared);
+        // The `ret` notes read the sealed fact `afi` reads; a refused seal states none (D584).
+        let sealed = match self.sealing(entry) {
+            super::analysis::Sealing::Sealed(sealed) => Some(sealed.0),
+            _ => None,
+        };
+        let result = sealed
+            .as_ref()
+            .and_then(|sealed| sealed.facts().return_type());
+        let proved = Proved::new(prepared, result);
         let answered = Answered {
             body: Some(&body),
             ..self.answered(Some(&proved))

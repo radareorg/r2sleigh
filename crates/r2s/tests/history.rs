@@ -53,3 +53,17 @@ fn a_cold_answer_names_the_closed_world_it_reads() {
     let text = shell(HASHES, &format!("pdd @ {FNV1A32:#x}"));
     assert!(text.contains("assuming closed-world"), "{text}");
 }
+
+/// `_init` writes RAX on its path to `ret` and nothing reads it: the `ret` note states the result
+/// `afi` states, never `returns rax` (D584; bomb `phase_3` is the same class).
+#[test]
+fn a_ret_note_states_the_result_afi_states() {
+    let listing = shell(HASHES, "pdf @ 0x401000");
+    let info = shell(HASHES, "afi @ 0x401000");
+    assert!(info.contains("result: unproven (rax, Written)"), "{info}");
+    assert!(
+        listing.contains("ret ; result unproven (rax, Written)"),
+        "{listing}"
+    );
+    assert!(!listing.contains("returns rax"), "{listing}");
+}

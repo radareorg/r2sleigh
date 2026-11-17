@@ -20,6 +20,7 @@ pub mod proved;
 pub mod records;
 pub mod references;
 pub mod replay;
+pub mod result;
 
 pub use decode::{instructions, listing};
 
@@ -78,6 +79,7 @@ pub use records::{
     Trips, Unexpressed, Unlifted, WalkedBody,
 };
 pub use references::{Claimant, Coverage, Reference, References, Role, Unread};
+pub use result::ResultStanding;
 
 /// How much work a request permits.
 ///
