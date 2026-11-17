@@ -46,6 +46,7 @@ and `run_coverage.sh` builds and uses the release binary.
 |----------|---------|
 | Does every named function render, reading nothing never written? | `python3 scripts/certify_render.py --bins <radare2>/test/bins/elf --limit 24 --functions 8` |
 | Where do discovery, naming and decoding disagree with radare2? | `python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30` |
+| Where do function entries, blocks, noreturn, frames and references disagree with radare2 (D490)? | `python3 scripts/diff_r2.py --bins <testbins>/elf --verbose`: one `aa` session per tool, x86-64 and AArch64 ELF, a sampled function set; `--upstream` lists the judged radare2 defects |
 | How much of each corpus binary renders, against a baseline? | `./tests/coverage/run_coverage.sh [--accept-baseline]` |
 | Does the rendered C compute what the binary computes (x86-64 Linux)? | `tests/equiv/run_equiv.py --r2s target/debug/r2s --baseline tests/equiv/baseline.json` |
 | The same for Win64 PEs, built by clang-cl against UCRT? | `EQUIV_XWIN=<xwin> bash tests/equiv/run_win64.sh <r2s>` (x86-64 Linux; setup below) |

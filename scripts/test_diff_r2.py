@@ -331,5 +331,145 @@ class Registers(unittest.TestCase):
         )
         self.assertIsNone(diff_r2.judgment_for(table, "a", "aoj", eax))
 
+
+def session(**answers):
+    """A fenced session: each keyword `verb_address` (or `verb`) to its lines."""
+    text = []
+    for name, lines in answers.items():
+        verb, _, address = name.partition("_")
+        text += [" ".join([diff_r2.SESSION_FENCE, verb, address or "0x0"])] + lines
+    return diff_r2.fenced("\n".join(text))
+
+
+def afl(*rows):
+    return ["0x{:08x}    1     16 {}".format(address, name) for address, name in rows]
+
+
+class Analysis(unittest.TestCase):
+    def facts(self, verb, ours, theirs):
+        context = diff_r2.context_of(ours, theirs)
+        return diff_r2.fact_differences(verb, ours, theirs, context)
+
+    def test_an_entry_r2s_lists_alone_is_a_disagreement_and_one_radare2_lists_alone_is_also_unfilled(self):
+        found, missed = self.facts(
+            "afl",
+            session(
+                afl=afl((0x10, "main"), (0x20, "fcn.00000020")),
+                aflj=['[{"addr": 32, "confidence": "called"}]'],
+                fde=["20 2f"],
+                iS=["nth paddr size vaddr vsize perm flags type name", "1 0x10 0x20 0x00000010 0x20 -r-x 0x6 PROGBITS .text"],
+                refs_0x30=["main 0x12 [CALL:--x] call sym.helper", "main 0x18 [CODE:--x] jmp sym.helper"],
+            ),
+            session(afl=afl((0x10, "main"), (0x30, "sym.helper"), (0x14, "fcn.00000014"))),
+        )
+        self.assertEqual([(item[1][2], item[1][3]) for item in found], [(0x14, "r2s"), (0x20, "r2"), (0x30, "r2s")])
+        # An entry radare2 lists inside an r2s function's extent names that function.
+        self.assertEqual(found[0][1][4], "<missing> refs=none inside=0x10 in=.text:-r-x")
+        # A row shows its section, basis and the FDE starting there; the lacking side what references it.
+        self.assertEqual(found[1][1][4:6], ("0x00000020 1 16 fcn.00000020 in=.text basis=called fde=0x20-0x2f", "<missing> refs=none"))
+        self.assertEqual(found[2][1][4:6], ("<missing> refs=CALL:call,CODE:jmp in=none", "0x00000030 1 16 sym.helper"))
+        self.assertEqual(missed, [("afl", 0x14), ("afl", 0x30)])
+
+    def test_a_block_either_side_lacks_is_a_disagreement_shown_beside_the_other_sides_block_there(self):
+        found, missed = self.facts(
+            "afb",
+            session(afb_0x10=["0x00000010 0x00000018 8 j 0x18", "0x00000018 0x00000020 8"]),
+            session(afb_0x10=["0x00000010 0x00000018 00:0000 8 j 0x18", "0x00000018 0x00000024 00:0000 12"]),
+        )
+        self.assertEqual([(item[1][2], item[1][3]) for item in found], [((0x18, 8), "r2"), ((0x18, 12), "r2s")])
+        # A size disagreement shows both rows at the address.
+        self.assertEqual(found[0][1][5], "0x00000018 0x00000024 00:0000 12")
+        self.assertEqual(missed, [])
+
+    def test_noreturn_disagrees_when_r2s_proves_it_alone_or_radare2_states_it_and_r2s_does_not(self):
+        def one(mine, theirs):
+            found, _ = self.facts("afi", session(afi_0x10=mine), session(afi_0x10=theirs))
+            return [(item[1][3], item[1][4]) for item in found]
+
+        self.assertEqual(one(["noreturn: true"], ["noreturn: false"]), [("r2", "noreturn: true")])
+        self.assertEqual(one(["noreturn: unproven (uncited row)"], ["noreturn: true"]), [("r2s", "noreturn: unproven (uncited row)")])
+        self.assertEqual(one(["args: 0"], ["noreturn: true"]), [("r2s", "<absent>")])
+        self.assertEqual(one(["noreturn: unproven (no return reached)"], ["noreturn: false"]), [])
+        self.assertEqual(one(["noreturn: true (assuming go-runtime)"], ["noreturn: true"]), [])
+
+    def test_frame_offsets_are_from_the_entry_stack_pointer_and_registers_whole(self):
+        variables = {
+            "reg": [{"name": "arg1", "kind": "reg", "type": "int64_t", "ref": "rdi"}],
+            "sp": [{"name": "var_10h", "kind": "var", "type": "int64_t", "ref": {"base": "rsp", "offset": 16}}],
+            "bp": [
+                {"name": "var_8h", "kind": "var", "type": "int64_t", "ref": {"base": "rbp", "offset": -8}},
+                {"name": "arg_10h", "kind": "arg", "type": "int64_t", "ref": {"base": "rbp", "offset": 16}},
+            ],
+        }
+        theirs = session(
+            afi_0x10=["stackframe: 48"],
+            afvj_0x10=[json.dumps(variables)],
+            # -delta for a var at or below 0, delta - 0x6a for an argument (6.2.4 cmd_anal.inc.c:2005).
+            afvf_0x10=["0x00000010  var_8h:    int64_t", "0xffffffffffffff9e  arg_10h:   int64_t"],
+        )
+        mine = session(afv_0x10=[
+            "arg void* arg0 @ edi",
+            "arg int64_t arg1 @ entry.sp+0x8",
+            "var uint64_t stack_m16 @ entry.sp-0x10",
+            "var uint64_t stack_m32 @ entry.sp-0x20",
+            "var uint32_t frame_m4 @ fp-0x4",
+        ])
+        found, _ = self.facts("afv", mine, theirs)
+        # edi is rdi; the sp var is at 16 - 48, the bp var at -8 - 8 and the bp argument at 16 - 8;
+        # fp-0x4 states no entry offset, so it is counted unplaced and not compared.
+        self.assertEqual(found, [])
+        sides = [side for _, _, side in diff_r2.analysis_facts("afv", mine, theirs).values()]
+        self.assertEqual(sorted(sides), ["equal"] * 4 + ["unplaced"])
+        self.assertEqual(
+            diff_r2.their_frame(json.dumps(variables), theirs[("afvf", 0x10)], 48),
+            {
+                ("register", "rdi"): "arg int64_t arg1 @ rdi",
+                ("offset", -32): "var int64_t var_10h @ rsp+0x10",
+                ("offset", -16): "var int64_t var_8h @ rbp-0x8",
+                ("offset", 8): "arg int64_t arg_10h @ rbp+0x10",
+            },
+        )
+
+    def test_a_bp_var_whose_delta_two_offsets_explain_is_unstated(self):
+        variables = {"bp": [{"name": "var_8h", "kind": "var", "type": "int64_t", "ref": {"base": "rbp", "offset": 8}}]}
+        # 0x10 is -delta (delta -0x10, bp at +0x18) or delta - 0x6a (delta 0x7a, bp at -0x72): no other var decides.
+        frame = diff_r2.their_frame(json.dumps(variables), ["0x00000010  var_8h:    int64_t"], 0)
+        self.assertEqual(list(frame), [("unstated", "var_8h")])
+
+    def test_a_reference_r2s_states_alone_is_a_disagreement_and_one_radare2_states_alone_unfilled(self):
+        found, missed = self.facts(
+            "axt",
+            session(
+                afl=afl((0x10, "main"), (0x20, "fcn.20")),
+                axt_0x40=["main 0x10 [CALL:--x] call sym.imp.puts", "fcn.20 0x24 [CALL:--x] call sym.imp.puts"],
+            ),
+            session(afl=afl((0x10, "main")), axt_0x40=["main 0x10 [CALL:--x] call sym.imp.puts", "(nofunc) 0x30 [DATA:r--] mov rax, 0x40"]),
+        )
+        self.assertEqual([(item[1][2], item[1][3]) for item in found], [(0x24, "r2")])
+        # radare2's side names the r2s function the reference lies in, which radare2 does not list.
+        self.assertEqual(found[0][1][5], "<missing> from=0x20 listed=no")
+        self.assertEqual(missed, [("axt", 0x30)])
+
+    def test_the_sample_is_the_entry_points_both_list_and_spaced_common_entries(self):
+        ours = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90}
+        theirs = ours - {0x30} | {0x100}
+        self.assertEqual(diff_r2.analysis_sample({0x90, 0x200}, ours, theirs), [0x90, 0x10, 0x20, 0x40, 0x50])
+        lines = ["4   0x00001050 0x00401050 GLOBAL FUNC   16       imp.printf",
+                 "5   ---------- ---------- GLOBAL FUNC   0        imp.__libc_start_main",
+                 "6   0x00001166 0x00401166 GLOBAL FUNC   12       get_global_var"]
+        self.assertEqual(diff_r2.import_slots(lines), {0x401050})
+
+    def test_a_fact_judgment_reads_the_side_lacking_both_rows_and_the_function(self):
+        table = diff_r2.load_judgments(None, tomllib.loads(
+            '[[judged]]\ncommand = "afl"\nbinaries = "*"\nlacking = "r2s"\nr2s = \'^<missing> refs=none$\'\n'
+            'function = \'sym\\.imp\\.\'\nverdict = "unfilled"\nreason = "stubs"\n'
+        ))
+        found, _ = self.facts(
+            "afl", session(afl=afl((0x10, "main"))), session(afl=afl((0x10, "main"), (0x20, "sym.imp.puts"), (0x30, "fcn.30"))),
+        )
+        covered = [diff_r2.judgment_for(table, "a", "afl", item) is not None for item in found]
+        self.assertEqual(covered, [True, False])
+
+
 if __name__ == "__main__":
     unittest.main()
