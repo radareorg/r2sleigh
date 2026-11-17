@@ -412,14 +412,6 @@ reason = "two exported WEAK aliases at one address: r2s names the first by name,
 
 [[judged]]
 command = "pd"
-binaries = "libarm64.so"
-r2 = 'sym\.imp\.'
-r2s = 'b 0x'
-verdict = "unfilled"
-reason = "no section headers: r2s's stub walk reads code sections, so the .plt's stubs are unnamed; owner r2engine naming"
-
-[[judged]]
-command = "pd"
 binaries = "libverifyPass.so"
 verdict = "r2-right"
 reason = "ARM32 (ungraded): PLT0's literal word (0xed4) does not decode, so the stub walk refuses the .plt and its stubs go unnamed, and a listing steps one byte past an undecodable ARM word; the adr spelling is Sleigh's UAL; owners r2engine naming and the listing"
@@ -1623,16 +1615,6 @@ reason = "class B: freebsd-ls 0x203cc2 `e8d9440000 call sym.imp.exit`; radare2's
 
 [[judged]]
 command = "afb"
-binaries = "libarm64.so"
-corpus = "elf"
-function = 'entry0$'
-lacking = "r2"
-r2s = '^0x000006c0 0x000006d0 16$'
-verdict = "r2-right"
-reason = "class A: libarm64.so entry0 0x738 `e2ffff17 b 0x6c0` is a tail branch to the PLT entry for the slot at 0x1ffc0, whose R_AARCH64_JUMP_SLOT relocation names __cxa_finalize; r2s states no stub there and takes the stub (adrp, ldr, add, br x17) as entry0's block; radare2 ends entry0 at the branch. Owner ROADMAP D530 (built and held at round 12 on the radare2-only ratchet)"
-
-[[judged]]
-command = "afb"
 binaries = ["ls", "ls-silent"]
 corpus = "elf"
 function = 'sym\._obstack_begin$'
@@ -1828,14 +1810,6 @@ lacking = "r2s"
 r2 = ' sym\.[A-Za-z_]+\.cold$'
 verdict = "unfilled"
 reason = "class A: fedora_32_bin_ls carries its symbols in .gnu_debugdata (LZMA MiniDebugInfo, 0xe9c bytes); radare2 reads it and lists sym.main.cold (0x4e15, `e876f9ffff call sym.imp.abort`) and twelve more; r2s's `is` states none of them. Owner ROADMAP I (.gnu_debugdata symbols)"
-
-[[judged]]
-command = "afl"
-binaries = "libarm64.so"
-corpus = "elf"
-lacking = "r2s"
-verdict = "unfilled"
-reason = "class A: libarm64.so has no section headers for its .plt or dynamic symbols: radare2 lists the stubs at 0x6b0 (sym.imp.realloc) and 0x6c0 (sym.imp.__cxa_finalize, slot 0x1ffc0 R_AARCH64_JUMP_SLOT) and sym.Java_o__003dc_e at 0xaa20; r2s's `is` states none. Owner ROADMAP I (libarm64's section-less .plt; the dynamic symbols of an ELF without section headers)"
 
 [[judged]]
 command = "afl"
@@ -2406,35 +2380,14 @@ verdict = "r2s-right"
 reason = "radare2 6.2.4 `aeaj 1` prints nothing anywhere in this image after `aei; aeim` (asm.bits 16 or 32), while its `aoj` decodes the same instruction with its ESIL (0x1212 `mov r4, r1`: `r1,r4,=`); r2s states each sampled instruction's reads and writes from the IL. Sampled since D542 states the image's dynamic symbols (23 section headers, none SHT_DYNSYM; DT_HASH count)"
 
 [[judged]]
-command = "afb"
+command = "afi"
 binaries = "libarm64.so"
 corpus = "elf"
-function = 'sym\.Java_o__003dc_e$'
+function = 'sym\.imp\.__stack_chk_fail$'
 lacking = "r2s"
-verdict = "r2-right"
-row = "D550"
-reason = "class C: libarm64.so 0xaab0 `br x8` after `ldrsw x8, [x24, x8, lsl 2]; add x8, x8, x24`, the index masked by `and w8, w8, 7` and bounded by `cmp w8, 7; b.eq 0xab60`: r2s leaves UnresolvedIndirectBranch at 0xaaa8 and walks 132 of the 1,176 bytes the symbol states; radare2 follows the 7 arms (48 blocks). Sampled since D542 lists Java_o__003dc_e. Owner ROADMAP D550"
-
-[[judged]]
-command = "afv"
-binaries = "libarm64.so"
-corpus = "elf"
-function = 'sym\.Java_o__003dc_e$'
-lacking = "r2s"
-verdict = "r2-right"
-row = "D550"
-reason = "class C: the frame accesses and the x0 and x2 reads radare2 lists lie past the unresolved table at 0xaab0 r2s does not walk (var_88h..var_5ch @ x29-0x88..-0x5c, arg x0 and x2). Owner ROADMAP D550"
-
-[[judged]]
-command = "afv"
-binaries = "libarm64.so"
-corpus = "elf"
-function = 'sym\.Java_o__003dc_e$'
-lacking = "r2"
-r2s = '^var uint64_t stack_m(96|88|72|56|40|24|8) @ entry\.sp-0x(60|58|48|38|28|18|8)$'
-verdict = "r2-right"
-row = "D508"
-reason = "class E: libarm64.so 0xaa20..0xaa34 `stp x28, x27, [sp, -0x60]!` .. `stp x29, x30, [sp, 0x50]` save callee-saved registers; r2s lists save slots as locals (entry.sp-0x60 x28 .. entry.sp-0x8 x30). Owner ROADMAP D508"
+verdict = "unfilled"
+row = "D551"
+reason = "class B: libarm64.so 0x6d0 is the stub D530 names for __stack_chk_fail (slot 0x1ffd0); radare2 says it never returns, r2s holds no cited bionic row for it. Sampled since D530 names the stubs. Owner ROADMAP D551"
 
 # ── Judged radare2-only values (D541) ──
 
@@ -2461,3 +2414,11 @@ values = ["0xf7269", "0xf7479", "0xf74d9", "0xf7b09"]
 verdict = "r2s-right"
 r2_line = "libr/core/canal.c:552-554"
 reason = "as dwarf_go_tree (D506): `is` states open FUNC 0xf7260 size 90 around 0xf7269, read FUNC 0xf7470 size 90 around 0xf7479, write FUNC 0xf74d0 size 90 around 0xf74d9, close FUNC 0xf7b00 size 90 around 0xf7b09 (each the cancellable syscall path after the single-thread check)"
+
+[[missed]]
+command = "axt"
+binaries = ["libarm64.so"]
+values = ["0xaeb4"]
+verdict = "unfilled"
+row = "D550"
+reason = "0xaeb4 `bl sym.imp.__stack_chk_fail` lies in Java_o__003dc_e past the relative table at 0xaab0 r2s does not read (D550), so no r2s walk reaches it; sampled since D530 names the stub"
