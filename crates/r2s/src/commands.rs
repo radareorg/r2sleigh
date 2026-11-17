@@ -1470,11 +1470,40 @@ fn low_tier(session: &mut Session, argument: &str) -> Result<String, String> {
 /// `pdie <recording>`: the lift of a recorded function run by `r2il::eval` from the recording's
 /// entry state, as JSON; `scripts/run_refuter.py` sets it beside the machine's run (ROADMAP D467).
 fn replayed(session: &mut Session, argument: &str) -> Result<String, String> {
-    use r2engine::query::replay::{ReplayRefusal, ReplayRequest, ReplayStop, replay};
     let path = argument.trim();
     if path.is_empty() {
         return Err("pdie: name a recording".to_owned());
     }
+    let request = recorded_request(path)?;
+    let response = r2engine::query::replay::replay(&session.program, &request)
+        .map_err(|refusal| refused_replay(&refusal))?;
+    let hex = |value: u128| format!("{value:#x}");
+    let stop = replay_stop(response.stop);
+    let results = (response.results.iter())
+        .map(|(name, value)| (name.clone(), serde_json::Value::String(hex(*value))))
+        .collect::<serde_json::Map<_, _>>();
+    let writes = (response.writes.iter())
+        .map(|write| {
+            let bytes = write
+                .bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            serde_json::json!({"address": hex(write.address.into()), "bytes": bytes})
+        })
+        .collect::<Vec<_>>();
+    let answer = serde_json::json!({
+        "entry": hex(request.entry.into()),
+        "stop": stop,
+        "instructions": response.instructions,
+        "results": results,
+        "writes": writes,
+    });
+    serde_json::to_string(&answer).map_err(|error| error.to_string())
+}
+
+/// The typed request a `pdie` recording states: entry, bias, registers, memory cells, results.
+fn recorded_request(path: &str) -> Result<r2engine::query::replay::ReplayRequest, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("pdie: {path}: {error}"))?;
     let recording: serde_json::Value =
         serde_json::from_str(&text).map_err(|error| format!("pdie: {path}: {error}"))?;
@@ -1489,10 +1518,10 @@ fn replayed(session: &mut Session, argument: &str) -> Result<String, String> {
     let address = |value: &serde_json::Value, what: &str| {
         u64::try_from(number(value, what)?).map_err(|_| format!("pdie: {what} is past 64 bits"))
     };
-    let mut request = ReplayRequest {
+    let mut request = r2engine::query::replay::ReplayRequest {
         entry: address(field("entry")?, "entry")?,
         bias: address(field("bias")?, "bias")?,
-        ..ReplayRequest::default()
+        ..r2engine::query::replay::ReplayRequest::default()
     };
     let object = |name: &str| {
         field(name)?
@@ -1520,7 +1549,13 @@ fn replayed(session: &mut Session, argument: &str) -> Result<String, String> {
                 .ok_or("pdie: a result is no name".to_owned())
         })
         .collect::<Result<_, _>>()?;
-    let response = replay(&session.program, &request).map_err(|refusal| match refusal {
+    Ok(request)
+}
+
+/// Why `pdie` refused, as one line.
+fn refused_replay(refusal: &r2engine::query::replay::ReplayRefusal) -> String {
+    use r2engine::query::replay::ReplayRefusal;
+    match refusal {
         ReplayRefusal::Unloaded(why) => format!("pdie: {why}"),
         ReplayRefusal::NoDecoder { entry } => format!("pdie: no decoder holds {entry:#x}"),
         ReplayRefusal::UnnamedRegister(name) => format!("pdie: the specification names no {name}"),
@@ -1531,9 +1566,14 @@ fn replayed(session: &mut Session, argument: &str) -> Result<String, String> {
         ReplayRefusal::Unordered => {
             "pdie: the program states no byte order the evaluator reads".to_owned()
         }
-    })?;
+    }
+}
+
+/// Why the replay ended, as the JSON `pdie` prints.
+fn replay_stop(stop: r2engine::query::replay::ReplayStop) -> serde_json::Value {
+    use r2engine::query::replay::ReplayStop;
     let hex = |value: u128| format!("{value:#x}");
-    let stop = match response.stop {
+    match stop {
         ReplayStop::Returned { to } => {
             serde_json::json!({"kind": "returned", "to": hex(to.into())})
         }
@@ -1553,28 +1593,7 @@ fn replayed(session: &mut Session, argument: &str) -> Result<String, String> {
             serde_json::json!({"kind": "undefined", "at": hex(at.into())})
         }
         ReplayStop::Exhausted => serde_json::json!({"kind": "exhausted"}),
-    };
-    let results = (response.results.iter())
-        .map(|(name, value)| (name.clone(), serde_json::Value::String(hex(*value))))
-        .collect::<serde_json::Map<_, _>>();
-    let writes = (response.writes.iter())
-        .map(|write| {
-            let bytes = write
-                .bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            serde_json::json!({"address": hex(write.address.into()), "bytes": bytes})
-        })
-        .collect::<Vec<_>>();
-    let answer = serde_json::json!({
-        "entry": hex(request.entry.into()),
-        "stop": stop,
-        "instructions": response.instructions,
-        "results": results,
-        "writes": writes,
-    });
-    serde_json::to_string(&answer).map_err(|error| error.to_string())
+    }
 }
 
 /// `pdd`: decompile the function at the cursor, with no radare2 anywhere.

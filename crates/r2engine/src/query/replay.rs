@@ -128,33 +128,7 @@ pub fn replay<S: Source + 'static>(
             value: *value,
         })?;
     }
-    let mut pc = request.entry;
-    let mut executed = 0u64;
-    let mut writes = Vec::new();
-    let stop = loop {
-        let Some((ops, size)) = instructions.get(&pc) else {
-            break ReplayStop::LeftBody { at: pc, to: pc };
-        };
-        let flow = r2il::eval::run(ops, &mut state);
-        state.end_instruction();
-        executed += 1;
-        let accesses = state.take_accesses().into_iter();
-        writes.extend(accesses.filter(|access| access.kind == AccessKind::Write));
-        pc = match flow {
-            Flow::Next => pc + size,
-            Flow::Transfer(transfer) => match transfer.kind {
-                TransferKind::Return => break ReplayStop::Returned { to: transfer.to },
-                TransferKind::Jump if instructions.contains_key(&transfer.to) => transfer.to,
-                TransferKind::Jump | TransferKind::Call => {
-                    break ReplayStop::LeftBody {
-                        at: pc,
-                        to: transfer.to,
-                    };
-                }
-            },
-            Flow::Stop(stop) => break stopped(stop, pc, &machine_address),
-        };
-    };
+    let (stop, executed, writes) = run(&instructions, &mut state, request.entry, &machine_address);
     let results = (request.results.iter())
         .filter_map(|name| {
             let (offset, size) = registers.get(name.as_str())?;
@@ -179,6 +153,44 @@ pub fn replay<S: Source + 'static>(
         stop,
         instructions: executed,
     })
+}
+
+/// Step the lift from `entry` until a return, a transfer out of the body or a stop: the stop, the
+/// instructions executed and the writes in order. `O(executed operations)`.
+fn run<M: r2il::eval::Mapped>(
+    instructions: &BTreeMap<u64, (&[r2il::R2ILOp], u64)>,
+    state: &mut State<M>,
+    entry: u64,
+    machine_address: &dyn Fn(u64) -> u64,
+) -> (ReplayStop, u64, Vec<r2il::eval::Access>) {
+    let mut pc = entry;
+    let mut executed = 0u64;
+    let mut writes = Vec::new();
+    let stop = loop {
+        let Some((ops, size)) = instructions.get(&pc) else {
+            break ReplayStop::LeftBody { at: pc, to: pc };
+        };
+        let flow = r2il::eval::run(ops, state);
+        state.end_instruction();
+        executed += 1;
+        let accesses = state.take_accesses().into_iter();
+        writes.extend(accesses.filter(|access| access.kind == AccessKind::Write));
+        pc = match flow {
+            Flow::Next => pc + size,
+            Flow::Transfer(transfer) => match transfer.kind {
+                TransferKind::Return => break ReplayStop::Returned { to: transfer.to },
+                TransferKind::Jump if instructions.contains_key(&transfer.to) => transfer.to,
+                TransferKind::Jump | TransferKind::Call => {
+                    break ReplayStop::LeftBody {
+                        at: pc,
+                        to: transfer.to,
+                    };
+                }
+            },
+            Flow::Stop(stop) => break stopped(stop, pc, machine_address),
+        };
+    };
+    (stop, executed, writes)
 }
 
 /// The file addresses the image's segments span.
