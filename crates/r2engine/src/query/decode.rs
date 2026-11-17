@@ -436,7 +436,7 @@ mod tests {
 
     /// The one run of bytes is the one section the program loads.
     impl crate::native::Program for Mapped {
-        fn name_at(&self, _vaddr: u64) -> Option<String> {
+        fn name_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
             None
         }
 
@@ -448,7 +448,7 @@ mod tests {
             &self.extents
         }
 
-        fn import_at(&self, _vaddr: u64) -> Option<String> {
+        fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
             None
         }
     }

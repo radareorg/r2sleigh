@@ -67,6 +67,14 @@ impl Inputs {
 
 fn from_direct_call_targets() {}
 
+struct SymbolName(Box<str>);
+
+impl SymbolName {
+    fn text(&self) -> &str {
+        &self.0
+    }
+}
+
 #[allow(non_snake_case)]
 fn Return() {}
 
@@ -110,4 +118,7 @@ fn main() {
     let _ = DecompilerConfig::for_arch("x86-64");
     let _ = VariableRecovery::new();
     let _ = VariableRecovery::new_with_abi("sysv");
+
+    let name = SymbolName("exit".into());
+    let _ = name.text() == "exit";
 }

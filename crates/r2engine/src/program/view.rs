@@ -415,12 +415,10 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         composed.writes.clone()
     }
 
-    fn name_at(&self, vaddr: u64) -> Option<String> {
+    fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         // The plain name: it keys the prototype table; a slot the loader fills is asked separately.
-        self.names
-            .text_at(vaddr)
-            .map(str::to_owned)
-            .or_else(|| self.db.inputs().slots.get(&vaddr).cloned())
+        let slot = || self.db.inputs().slots.get(&vaddr).map(String::as_str);
+        (self.names.text_at(vaddr).or_else(slot)).map(r2abi::SymbolName::new)
     }
 
     fn holds_static_data(&self, vaddr: u64) -> bool {
@@ -476,13 +474,13 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.source().container().posture.load
     }
 
-    fn import_at(&self, vaddr: u64) -> Option<String> {
+    fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
         self.imports
             .stubs
             .get(&vaddr)
             .map(|stub| &stub.symbol)
             .or_else(|| self.db.inputs().slots.get(&vaddr))
-            .cloned()
+            .map(|name| r2abi::SymbolName::new(name.as_str()))
     }
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
@@ -503,12 +501,16 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         (*summary).as_ref().map(|summary| summary.reads.clone())
     }
 
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "table lookup by C identifier")
+    )]
     fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
         let inputs = self.db.inputs();
         let id = match self.import_at(callee) {
             Some(name) => {
                 let machines = inputs.machines().ok()?;
-                machines.imports.bound(&name).then_some(())?;
+                machines.imports.bound(name.text()).then_some(())?;
                 inputs.assembled()?.convention
             }
             // A body takes its own model where it is stated; one under a refused row runs under the join.

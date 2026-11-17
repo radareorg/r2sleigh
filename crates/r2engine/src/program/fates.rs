@@ -194,6 +194,10 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
 
     /// Work: an import's placement; a function's forwarding component, read once, and `O(LANES)`
     /// to decide.
+    #[cfg_attr(
+        dylint_lib = "r2sleigh_lints",
+        allow(name_decides_fact, reason = "table lookup by C identifier")
+    )]
     fn compute(db: &Db<ProgramInputs<S>>, &(callee, world): &(CalleeKey, World)) -> Self::Value {
         let view = View::new(db, true);
         match (callee, world) {
@@ -202,7 +206,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
                 let name = crate::native::Program::import_at(&view, at)?;
                 let target = walker.target(view.thumb_at(at));
                 Some(CallBoundary::Import {
-                    reads: crate::native::import_reads(target, &name),
+                    reads: crate::native::import_reads(target, name.text()),
                 })
             }
             // A cold `pdd` joins no sites.

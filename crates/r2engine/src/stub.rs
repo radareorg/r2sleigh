@@ -3,6 +3,10 @@
 
 /// The stub at `prepared`'s entry, where the program says that address is an import's and the body
 /// is only the transfer to that import. A body that merely ends in one, or goes to another, is no stub.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "handed to an output contract")
+)]
 pub(crate) fn import_stub(
     prepared: &r2ssa::SsaArtifact,
     facts: &r2types::FunctionFacts,
@@ -59,7 +63,7 @@ pub(crate) fn import_stub(
         .and_then(|fact| fact.callee_signature.clone());
     Some(r2types::ImportStub {
         entry: prepared.function().entry,
-        name: stated,
+        name: stated.text().to_owned(),
         signature: certified.or_else(|| identity.signature.clone()),
     })
 }

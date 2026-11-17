@@ -7,12 +7,20 @@ LL |     name.starts_with("tmp:")
    = note: `#[warn(string_prefix_semantic_classification)]` on by default
 
 warning: internal analysis must use typed radare2 collector APIs instead of JSON command strings
-  --> $DIR/main.rs:78:13
+  --> $DIR/main.rs:86:13
    |
 LL |     let _ = "afcfj";
    |             ^^^^^^^
    |
    = note: `#[warn(r2_json_command_internal_seam)]` on by default
 
-warning: 2 warnings emitted
+error: a symbol name's text is read here; allow `name_decides_fact` on the item with one of its reasons, or decide from a fact
+  --> $DIR/main.rs:123:13
+   |
+LL |     let _ = name.text() == "exit";
+   |             ^^^^^^^^^^^
+   |
+   = note: `#[deny(name_decides_fact)]` on by default
+
+error: aborting due to 1 previous error; 2 warnings emitted
 
