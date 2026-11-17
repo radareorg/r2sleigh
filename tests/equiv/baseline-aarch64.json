@@ -1268,11 +1268,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_function_pointer": {
-   "cause": "[P7, D369] The function's own indirect call (blr x8) states no arity or writes, so D369 keeps its frame record in memory: the x30 save is stored from the entry value and read back, the first residual is that held entry value (held-from-entry) where it was the call's CallNotRendered gap. Closing fact: the common prototype and writes of the call's target set (P7's indirect-call arity).",
+   "cause": "[P7, #264] The function's own indirect call (blr x8) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Under frame isolation (D471, rebuild-design-13) the call writes no slot this function did not expose, so the x30 save no longer reads back as a held entry value (the held-from-entry residual D369 left) and the first trap is the call's CallNotRendered gap again. Closing fact: the common prototype of the call's target set (P7's indirect-call arity).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_u64 held-from-entry",
-   "site": "crates/r2ssa/src/semantic/frame_reach/walk.rs",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_multiword_return": {
