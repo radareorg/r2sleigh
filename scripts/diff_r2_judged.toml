@@ -2160,6 +2160,16 @@ reason = "class F, definitional: radare2 counts a callee's argument registers as
 
 [[judged]]
 command = "afv"
+binaries = ["freebsd-ls"]
+corpus = "elf"
+function = '^0x00203bc0 '
+lacking = "r2"
+r2s = '^var uint64_t stack_m56 @ entry\.sp\-0x38$'
+verdict = "r2s-right"
+reason = "D471: freebsd-ls entry0 stores [rbp-0x30] (entry.sp-0x38) at 0x203c7d, makes the indirect call `call qword [r13 + 0x10]` at 0x203c86 and reloads it at 0x203c8f; no address of the slot is exposed, so frame isolation keeps it a local. radare2 names the same slot var_30h @ rbp-0x30, but its `afvf` prints 0x70 for it, which gives two candidate entry offsets, so the gate leaves radare2's var unplaced"
+
+[[judged]]
+command = "afv"
 binaries = ["freebsd-ls", "upxtest"]
 corpus = "elf"
 function = '^(0x00005660|0x00203bc0) '

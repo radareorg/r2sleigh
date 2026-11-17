@@ -898,8 +898,9 @@ fn isolated(
         .filter(|((call, _), area)| !call.tail && area.is_none() && site.isolates(call))
         .filter_map(|((_, base), _)| *base)
         .min();
-    // The lowest base's span holds every other's, so one range query decides.
-    lowest.is_some_and(|base| {
+    // The lowest base's span holds every other's, so one range query decides; a base at or above
+    // the entry's stack pointer spans nothing.
+    lowest.filter(|base| *base < 0).is_some_and(|base| {
         (accesses.range(base..0)).any(|(_, list)| list.iter().any(|access| !access.store))
     })
 }

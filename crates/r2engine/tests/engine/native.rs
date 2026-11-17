@@ -10123,3 +10123,27 @@ fn a_composed_write_past_the_entry_pointer_bounds_nothing() {
     let text = surveyed_cycle(Vec::leak(code), None, BASE);
     assert!(text.contains("r2sleigh_load_u32("), "{text}");
 }
+
+/// `pop rax; pop rax; call rdi; sub rsp, 0x10; ret`: the indirect call's pointer lies above the
+/// entry's stack pointer (upxtest 0x56d5), so the span frame isolation bounds is empty.
+const AN_INDIRECT_CALL_ABOVE_THE_ENTRY_STACK_POINTER: &[u8] = &[
+    0x58, // 1000 pop rax
+    0x58, // 1001 pop rax
+    0xff, 0xd7, // 1002 call rdi
+    0x48, 0x83, 0xec, 0x10, // 1004 sub rsp, 0x10
+    0xc3, // 1008 ret
+];
+
+/// An indirect call made above the entry's stack pointer bounds no place under frame isolation,
+/// and the function renders (D471: an empty span was a reversed range query, a panic).
+#[test]
+fn an_indirect_call_above_the_entry_stack_pointer_renders() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: AN_INDIRECT_CALL_ABOVE_THE_ENTRY_STACK_POINTER.to_vec(),
+        name: "above",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("panicked"), "{text}");
+}
