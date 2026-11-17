@@ -397,13 +397,6 @@ impl SSAFunction {
     }
 
     /// Construct SSA over the graph `lifted_cfg` built from the lifted blocks.
-    #[cfg_attr(
-        dylint_lib = "r2sleigh_lints",
-        allow(
-            entity_keyed_map,
-            reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
-        )
-    )]
     pub(crate) fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
         cfg: CFG,
         arch: Option<&crate::Arch>,
@@ -527,7 +520,7 @@ impl SSAFunction {
         let mut renamed_blocks = renamed.blocks;
         let mut renamed_origins = renamed.origins;
         let renamed_block_order = renamed.block_order;
-        let renamed_storage = renamed.canonical_storage_by_var;
+        let renamed_storage = renamed.storage;
         let mut shaped = Vec::with_capacity(renamed_block_order.len());
         for &addr in &renamed_block_order {
             control.poll()?;
@@ -587,9 +580,9 @@ impl SSAFunction {
             .map(|block| block.map_operands(&mut |var| values.intern(var)))
             .collect::<Vec<_>>();
         // What the renamer learned of each variable's lifted storage joins
-        // its row, including variables no operation names any more.
-        for (var, storage) in renamed_storage {
-            values.intern_with_storage(&var, storage);
+        // its row; one no operation names any more is appended in record order.
+        for (_, var, storage) in renamed_storage.stored() {
+            values.intern_with_storage(var, storage);
         }
         let mut cfg = cfg;
         cfg.release_operations();

@@ -15,6 +15,7 @@ use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::RegisterNameMap;
 use crate::op::SSAOp;
 use crate::phi::{DefinitionSitesByIdentity, PhiPlacement, RenameIdentity, register_root_slot};
+use crate::value_table::ValueTable;
 use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -511,13 +512,6 @@ impl Default for RenameContext {
 
 /// Result of renaming a function.
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
-    )
-)]
 pub struct RenamedFunction {
     /// SSA operations for each block (block addr -> ops).
     pub blocks: FxHashMap<u64, Vec<SSAOp>>,
@@ -534,14 +528,9 @@ pub struct RenamedFunction {
     pub origins: FxHashMap<u64, Vec<RenamedOrigin>>,
     /// Block addresses in order.
     pub block_order: Vec<u64>,
-    /// Lifted storage provenance for SSA values.
-    ///
-    /// This map is populated directly from source varnodes while renaming. A
-    /// display name is only the key that associates the already-proven source
-    /// identity with its SSA version; it is never parsed or resolved through
-    /// architecture register names.
-    pub canonical_storage_by_var: BTreeMap<SSAVar, CanonicalStorageId>,
-    ambiguous_storage_vars: BTreeSet<SSAVar>,
+    /// The lifted storage of each variable renaming recorded, from source
+    /// varnodes, in record order; a name is never parsed for it.
+    pub(crate) storage: ValueTable,
 }
 
 /// Where one renamed operation came from.
@@ -566,8 +555,7 @@ impl RenamedFunction {
             blocks: FxHashMap::default(),
             origins: FxHashMap::default(),
             block_order: Vec::new(),
-            canonical_storage_by_var: BTreeMap::new(),
-            ambiguous_storage_vars: BTreeSet::new(),
+            storage: ValueTable::default(),
         }
     }
 }
@@ -733,12 +721,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
             control.poll()?;
             let dst = ctx.write_var(&phi.identity);
             if let Some(storage) = phi.storage {
-                record_canonical_storage(
-                    &mut result.canonical_storage_by_var,
-                    &mut result.ambiguous_storage_vars,
-                    &dst,
-                    storage,
-                );
+                result.storage.record_storage(&dst, storage);
             }
             defined_vars.push(phi.identity.clone());
 
@@ -813,24 +796,14 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 };
                 record_renamed_op_storage(op, &renamed_op, result);
                 for (var, storage) in boundary_reads {
-                    record_canonical_storage(
-                        &mut result.canonical_storage_by_var,
-                        &mut result.ambiguous_storage_vars,
-                        &var,
-                        storage,
-                    );
+                    result.storage.record_storage(&var, storage);
                 }
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 let lifted_at = block_ops.len();
                 block_ops.push(renamed_op);
                 block_ops.append(&mut ctx.lanes.suffix);
                 for (var, storage) in ctx.lanes.storage.drain(..) {
-                    record_canonical_storage(
-                        &mut result.canonical_storage_by_var,
-                        &mut result.ambiguous_storage_vars,
-                        &var,
-                        storage,
-                    );
+                    result.storage.record_storage(&var, storage);
                 }
 
                 let mut written_lanes = Vec::new();
@@ -847,12 +820,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         reg_names,
                     );
                     for (dst, storage) in boundary_defs.retained {
-                        record_canonical_storage(
-                            &mut result.canonical_storage_by_var,
-                            &mut result.ambiguous_storage_vars,
-                            &dst,
-                            storage,
-                        );
+                        result.storage.record_storage(&dst, storage);
                     }
                     written_lanes = boundary_defs.written_lanes;
                 }
@@ -882,23 +850,13 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                             dst: dst.clone(),
                             src: entering.clone(),
                         });
-                    record_canonical_storage(
-                        &mut result.canonical_storage_by_var,
-                        &mut result.ambiguous_storage_vars,
-                        &dst,
-                        identity.storage,
-                    );
+                    result.storage.record_storage(&dst, identity.storage);
                 }
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 for (var, storage) in
                     append_written_lane_inserts(block_ops, ctx, &mut defined_vars, written_lanes)
                 {
-                    record_canonical_storage(
-                        &mut result.canonical_storage_by_var,
-                        &mut result.ambiguous_storage_vars,
-                        &var,
-                        storage,
-                    );
+                    result.storage.record_storage(&var, storage);
                 }
                 // Everything else this iteration appended -- the lane
                 // projections, the carrier reads and clobbers around a call --
@@ -993,12 +951,9 @@ fn record_renamed_op_storage(source: &r2il::R2ILOp, renamed: &SSAOp, result: &mu
     if let (Some(varnode), Some(var)) = (source.output(), renamed.dst())
         && !is_lane_temp(var)
     {
-        record_canonical_storage(
-            &mut result.canonical_storage_by_var,
-            &mut result.ambiguous_storage_vars,
-            var,
-            CanonicalStorageId::from_varnode(varnode),
-        );
+        result
+            .storage
+            .record_storage(var, CanonicalStorageId::from_varnode(varnode));
     }
 
     let source_inputs = source.inputs();
@@ -1013,40 +968,9 @@ fn record_renamed_op_storage(source: &r2il::R2ILOp, renamed: &SSAOp, result: &mu
         if is_lane_temp(var) {
             continue;
         }
-        record_canonical_storage(
-            &mut result.canonical_storage_by_var,
-            &mut result.ambiguous_storage_vars,
-            var,
-            CanonicalStorageId::from_varnode(varnode),
-        );
-    }
-}
-
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
-    )
-)]
-fn record_canonical_storage(
-    storage_by_var: &mut BTreeMap<SSAVar, CanonicalStorageId>,
-    ambiguous_vars: &mut BTreeSet<SSAVar>,
-    var: &SSAVar,
-    storage: CanonicalStorageId,
-) {
-    if ambiguous_vars.contains(var) {
-        return;
-    }
-    match storage_by_var.entry(var.clone()) {
-        std::collections::btree_map::Entry::Vacant(vacant) => {
-            vacant.insert(storage);
-        }
-        std::collections::btree_map::Entry::Occupied(held) if *held.get() != storage => {
-            held.remove();
-            ambiguous_vars.insert(var.clone());
-        }
-        std::collections::btree_map::Entry::Occupied(_) => {}
+        result
+            .storage
+            .record_storage(var, CanonicalStorageId::from_varnode(varnode));
     }
 }
 
@@ -1261,12 +1185,7 @@ fn fill_phi_sources(
             if let Some(storage) = phi.storage
                 && storage.size == source.size
             {
-                record_canonical_storage(
-                    &mut result.canonical_storage_by_var,
-                    &mut result.ambiguous_storage_vars,
-                    &source,
-                    storage,
-                );
+                result.storage.record_storage(&source, storage);
             }
             source
         })
@@ -2183,6 +2102,25 @@ mod tests {
             offset,
             size,
         }
+    }
+
+    /// D477: a variable the lift recorded with two storages states none, and a later record of
+    /// either does not revive it; the table lists only variables with one stated storage.
+    #[test]
+    fn a_variable_recorded_with_two_storages_states_none() {
+        let rax = CanonicalStorageId::from_varnode(&make_reg(0, 8));
+        let rcx = CanonicalStorageId::from_varnode(&make_reg(8, 8));
+        let (one, two) = (SSAVar::new("rax", 0, 8), SSAVar::new("rcx", 0, 8));
+        let mut table = ValueTable::default();
+        table.record_storage(&one, rax);
+        table.record_storage(&one, rax);
+        table.record_storage(&two, rcx);
+        assert_eq!(table.storage_of_var(&one), Some(rax));
+        table.record_storage(&one, rcx);
+        table.record_storage(&one, rax);
+        assert_eq!(table.storage_of_var(&one), None);
+        let stored = (table.stored()).map(|(_, var, storage)| (var.clone(), storage));
+        assert_eq!(stored.collect::<Vec<_>>(), vec![(two, rcx)]);
     }
 
     /// Sleigh scopes a temporary to its instruction (ROADMAP D36): one instruction's read of an
