@@ -79,6 +79,8 @@ pub enum FrameEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnwindFrames {
     by_start: BTreeMap<u64, UnwindFrame>,
+    /// Every call-site range with a pad, sorted and disjoint, as `seal_pads` left them.
+    landing: Vec<CallSiteRange>,
 }
 
 impl UnwindFrames {
@@ -102,11 +104,10 @@ impl UnwindFrames {
     }
 
     /// The landing pad of a call whose last byte is `last`, as the unwinder looks it up from the
-    /// return address less one (GCC `eh_personality.cc`: `--ip`). O(log F + log R).
+    /// return address less one (GCC `eh_personality.cc`: `--ip`). O(log R) over every pad's range.
     pub fn pad_for(&self, last: u64) -> Option<u64> {
-        let pads = &self.covering(last)?.pads;
-        let at = pads.partition_point(|range| range.start <= last);
-        let range = pads.get(at.checked_sub(1)?)?;
+        let at = self.landing.partition_point(|range| range.start <= last);
+        let range = self.landing.get(at.checked_sub(1)?)?;
         (last < range.end).then_some(range.pad).flatten()
     }
 
@@ -114,8 +115,9 @@ impl UnwindFrames {
         self.by_start.is_empty()
     }
 
-    /// Refuse each frame's table where a landing pad lies outside every frame. O(F R log F).
-    pub fn refuse_stray_pads(&mut self) {
+    /// Refuse each frame's table where a landing pad lies outside every frame, then index every
+    /// range with a pad for `pad_for`; call once every frame is inserted. O(R log F + R log R).
+    pub fn seal_pads(&mut self) {
         let stray = (self.frames())
             .filter(|frame| {
                 (frame.pads.iter().filter_map(|range| range.pad))
@@ -129,6 +131,12 @@ impl UnwindFrames {
                 frame.lsda = LsdaRead::Refused(LsdaRefusal::PadOutsideFrames);
             }
         }
+        let landing = (self.by_start.values()).flat_map(|frame| frame.pads.iter());
+        self.landing = landing
+            .filter(|range| range.pad.is_some())
+            .copied()
+            .collect();
+        self.landing.sort_unstable_by_key(|range| range.start);
     }
 
     /// Record a frame, keeping the first one stated at its start.

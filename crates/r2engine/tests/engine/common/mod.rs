@@ -951,6 +951,7 @@ impl Literal {
             pads,
             lsda,
         });
+        self.container.unwind.seal_pads();
         self
     }
 

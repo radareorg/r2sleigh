@@ -185,7 +185,7 @@ pub(crate) fn read(
         });
         read_section(&debug_frame, &bases, call, at, &tables, &mut frames);
     }
-    frames.refuse_stray_pads();
+    frames.seal_pads();
     frames
 }
 

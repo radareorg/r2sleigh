@@ -1008,7 +1008,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 unwinding: 0,
             })));
         }
-        let walker = super::returns::Walking::new(view.clone(), true)?;
+        let walker = super::returns::Walking::new(view.clone(), true)?.recording_unwinds();
         let mut found = crate::discovery::functions(&view, seeds, &walker);
         let keyed = (std::mem::take(&mut found.returns).into_iter())
             .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer));

@@ -75,6 +75,8 @@ pub(super) struct Walking<'p, S: Source + 'static> {
     thumb: Option<NativeTarget<'p>>,
     /// Whether a body is walked in the instruction set its callers enter it in, rather than the one the program places there.
     entered: bool,
+    /// Whether each walk records its calls' unwinds: the survey walks their pads, a return does not (D599).
+    unwinds: bool,
 }
 
 /// The program as one walk in one instruction set reads it, told which callees are known to come back.
@@ -163,7 +165,14 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
             primary,
             thumb,
             entered,
+            unwinds: false,
         })
+    }
+
+    /// The same walker, each walk recording its calls' unwinds for `walk_pads` (D570).
+    pub(super) const fn recording_unwinds(mut self) -> Self {
+        self.unwinds = true;
+        self
     }
 
     /// Walk the landing pads of a body the survey walked, its callees' returns as `returns` says (D570).
@@ -250,7 +259,8 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             halts: &halts,
         };
         let disasm = self.target(thumb).disasm;
-        let mut trace = Trace::start(address, disasm, &knowing).map_err(NativeRefusal::Body)?;
+        let trace = Trace::start(address, disasm, &knowing, self.unwinds);
+        let mut trace = trace.map_err(NativeRefusal::Body)?;
         let transfers = Self::step(&mut trace, thumb);
         let walk = BodyWalk {
             entry: address,
@@ -356,7 +366,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             returns,
             halts: &halts,
         };
-        let mut trace = Trace::start(walk.entry, target.disasm, &knowing).ok()?;
+        let mut trace = Trace::start(walk.entry, target.disasm, &knowing, self.unwinds).ok()?;
         let transfers = Self::step(&mut trace, walk.thumb);
         (walk.trace, walk.halts, walk.tables) = (trace, halts, Tabled::Unread);
         Some(transfers)
