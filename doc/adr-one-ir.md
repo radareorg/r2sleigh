@@ -398,12 +398,17 @@ bytes of each value as a column (`ValueLiveness::bytes`), built by
 `DemandedBytes::of_returning` before the liveness walk at `semantic/mod.rs:370`
 and handed to the facts after the spans (`into_bytes`); the second
 `demanded()` call at the end of the collection is deleted. A value no reader
-needs a byte of holds no range. The witness is the closure itself: it starts
-at every operation with an effect (`demand::has_effect` is an exhaustive
-match), every value a return hands back and every tail read, and only reads
-the certified boundaries drop are left out. Where an exit hands registers to
-code outside the graph (`exits_are_named`) no demand is stated and every byte
-counts as needed. `DemandedBytes` is a dense `Vec<u64>` per value, where it was
+needs a byte of holds no range. The witness is the closure itself
+(`semantic/mod.rs` `demanded`): it starts at every operation with an effect
+(`demand::has_effect` is an exhaustive match), every tail read, and every value
+a return reads, which leaves out two kinds of return. A return whose result the
+boundary states unproven reads no register (D340, `result_unproven` in the
+return boundary), and neither does any return of an interface that returns no
+register (`returns_no_register`); a value only such a return hands back is
+listed by `FunctionLiveOut` and now holds no range. Reads the certified call
+boundaries do not pass are left out (`unpassed_call_reads`). Where an exit
+hands registers to code outside the graph (`exits_are_named`) no demand is
+stated and every byte counts as needed. `DemandedBytes` is a dense `Vec<u64>` per value, where it was
 an `IdMap<ValueId, ByteMask>`: held across the liveness walk, the map cost
 15.7 MB of peak on pumasim 0x23fdf0 (+6.2%), the column costs nothing above
 the peak. `ValueLiveness::interfering_lanes(graph, a, b)` answers D470: no
@@ -413,10 +418,14 @@ are two locations live at once; `O(segments of the two)`, no reader yet.
 `release_undemanded_bytes` keeps its standalone `DemandedBytes::of` over the
 graph before the release, where no value liveness exists.
 
-Measured (Mac, release, median of 3, against 718a898b2): pumasim 0x23fdf0
+Measured (Mac, release, median of 3, against 718a898b2; the range rule alone,
+with the `IdMap` column, read -0.05%, -0.18%, -0.02%, -0.03%): pumasim 0x23fdf0
 -0.257%, 0pack 0x62ecf0 -0.252%, bash `aa; pdd @ 0x2e630` -0.043%, pumasim
 `aa; pdd @ 0x3b6b20` -0.098%; peak RSS -1.60%, -0.16%, -0.49%, -0.04%.
-`pdd` is byte-identical on the 451 goldens and the 2,621 DecBench functions.
+`pdd` is byte-identical on the 451 goldens, the 2,621 DecBench functions and
+certification's selection (24 ELF binaries, 108 functions). Equivalence,
+certification and `scaling.py` on contabo did not run: the queue held three
+multi-hour jobs of other chains.
 
 Open, with the fact that stopped each:
 
@@ -430,8 +439,8 @@ Open, with the fact that stopped each:
 - F2.2a, the exit reach read from an index. Built twice: an `ExitWrites` index
   of each block's writes, calls and merges, filled while the graph is built
   (`O(1)` per operation), with `FunctionLiveOut::compute` reading it by a block
-  walk that scans no operation. On the first build 64,176 old-against-new
-  comparisons on DecBench and the 4 timed commands were equal; the fused
+  walk that scans no operation. On each build 64,176 old-against-new
+  comparisons on DecBench and the 4 timed commands were equal, and the fused
   build kept `pdd` byte-identical on the goldens and DecBench. It costs
   more than the walks: Mac medians over four builds read pumasim `aa; pdd @
   0x3b6b20` +0.12% to +0.16% and 0pack +0.06% to +0.13% (gate +0.10%). The
