@@ -172,6 +172,14 @@ pub enum Premise {
 }
 
 impl Premise {
+    /// Every premise, in order.
+    pub const ALL: [Self; 4] = [
+        Self::ClosedWorld,
+        Self::UbFreeSource,
+        Self::GoRuntime,
+        Self::FrameIsolation,
+    ];
+
     /// The premise as answers spell it.
     pub const fn spelled(self) -> &'static str {
         match self {
@@ -323,6 +331,56 @@ impl Never {
     }
 }
 
+/// A fact's standing as a reader sees it: one ASCII cell after a note's `;`, weakest first
+/// (doc/adr-display.md, D580). `Refused` and `Unknown` come from a fact's kind, never a confidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub enum Mark {
+    /// A refusal, whose reason follows.
+    Refused,
+    /// Asked, and no answer or reason.
+    Unknown,
+    /// A convention's default.
+    Assumed,
+    /// A reading nothing proves.
+    Read,
+    /// A declaration found by a name.
+    Declared,
+    /// A bound.
+    Bound,
+    /// Stated or proven under a premise.
+    Premise,
+    /// Stated or proven, assuming nothing.
+    Holds,
+}
+
+impl Mark {
+    /// Every mark, weakest first.
+    pub const ALL: [Self; 8] = [
+        Self::Refused,
+        Self::Unknown,
+        Self::Assumed,
+        Self::Read,
+        Self::Declared,
+        Self::Bound,
+        Self::Premise,
+        Self::Holds,
+    ];
+
+    /// The cell a listing writes after `;`.
+    pub const fn cell(self) -> char {
+        match self {
+            Self::Refused => '!',
+            Self::Unknown => '?',
+            Self::Assumed => '_',
+            Self::Read => '.',
+            Self::Declared => '^',
+            Self::Bound => '~',
+            Self::Premise => '*',
+            Self::Holds => ' ',
+        }
+    }
+}
+
 /// Why a fact about a program is believed, and what that belief assumes.
 ///
 /// Ordered strongest first: by basis, then by how many premises it takes for
@@ -354,6 +412,24 @@ impl Confidence {
     /// How strongly the fact is known.
     pub const fn grade(&self) -> Grade {
         self.basis.grade()
+    }
+
+    /// The cell a reader sees: a premise marks a stated or proven fact, and a weaker grade
+    /// keeps its own mark whatever it assumes.
+    pub fn mark(&self) -> Mark {
+        match self.grade() {
+            Grade::Stated | Grade::Proven if self.premises.is_empty() => Mark::Holds,
+            Grade::Stated | Grade::Proven => Mark::Premise,
+            Grade::Bounded => Mark::Bound,
+            Grade::Declared => Mark::Declared,
+            Grade::Read => Mark::Read,
+            Grade::Assumed => Mark::Assumed,
+        }
+    }
+
+    /// The order a line's notes take, weakest first: by mark, then the weaker confidence first.
+    pub fn weakest_first(&self, other: &Self) -> std::cmp::Ordering {
+        (self.mark(), std::cmp::Reverse(self)).cmp(&(other.mark(), std::cmp::Reverse(other)))
     }
 
     /// What a fact derived from two others is believed on: the weaker basis,
@@ -531,6 +607,73 @@ mod tests {
                 .to_string(),
             "handed+closed-world+ub-free"
         );
+    }
+
+    /// Every set of premises: `Premise` has 4 variants, so 16 sets.
+    fn every_premise_set() -> Vec<BTreeSet<Premise>> {
+        (0..1u8 << Premise::ALL.len())
+            .map(|bits| {
+                let held = Premise::ALL.iter().enumerate();
+                let held = held.filter(|(index, _)| bits & (1 << index) != 0);
+                held.map(|(_, premise)| *premise).collect()
+            })
+            .collect()
+    }
+
+    /// The mark over every basis and premise set (D580): a space only where nothing is assumed
+    /// past a stated or proven basis, and a premise never hides behind a space.
+    #[test]
+    fn the_mark_is_a_space_only_for_a_stated_or_proven_fact_with_no_premise() {
+        let sets = every_premise_set();
+        assert_eq!(sets.len(), 16);
+        let strong = |grade| matches!(grade, Grade::Stated | Grade::Proven);
+        for basis in Basis::ALL {
+            for premises in &sets {
+                let confidence = Confidence {
+                    basis,
+                    premises: premises.clone(),
+                };
+                let cell = confidence.mark().cell();
+                let exact = strong(basis.grade()) && premises.is_empty();
+                let assumed = strong(basis.grade()) && !premises.is_empty();
+                assert_eq!(cell == ' ', exact, "{confidence}");
+                assert_eq!(cell == '*', assumed, "{confidence}");
+                assert!(!matches!(confidence.mark(), Mark::Refused | Mark::Unknown));
+            }
+        }
+        // Without premises the mark falls as the grade does.
+        for (a, b) in Basis::ALL
+            .iter()
+            .flat_map(|a| Basis::ALL.iter().map(move |b| (a, b)))
+        {
+            if a.grade() <= b.grade() {
+                assert!(
+                    Confidence::of(*a).mark() >= Confidence::of(*b).mark(),
+                    "{a:?} {b:?}"
+                );
+            }
+        }
+        let cells = Mark::ALL.map(Mark::cell);
+        assert!(cells.iter().all(char::is_ascii));
+        assert_eq!(BTreeSet::from(cells).len(), 8);
+        assert!(Mark::ALL.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    /// Notes sort by mark first: `Confidence`'s own order is basis-first, so it puts
+    /// `stated+closed-world` above `certified` while its mark is the weaker.
+    #[test]
+    fn notes_sort_by_mark_before_confidence() {
+        let assumed = Confidence::of(Basis::Stated).assuming(Premise::ClosedWorld);
+        let certified = Confidence::of(Basis::Certified);
+        assert!(assumed < certified);
+        assert!(assumed.mark() < certified.mark());
+        let mut notes = vec![
+            certified.clone(),
+            Confidence::of(Basis::Solved),
+            assumed.clone(),
+        ];
+        notes.sort_by(|a, b| a.weakest_first(b));
+        assert_eq!(notes, [Confidence::of(Basis::Solved), assumed, certified]);
     }
 }
 
