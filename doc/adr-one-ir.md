@@ -318,3 +318,71 @@ transfer (`eval_const_op`).
   `__do_global_dtors_aux` reads one obligation fewer; on aarch64 zig's
   `__libc_csu_init` compares two `adr` of one address (`subs; b.eq`) and the
   `blr` loop is cut. DecBench's 17 binaries are `ET_DYN`, so none moves.
+
+## F2.2 step 0: what liveness costs (2026-11-17)
+
+Measured at master 718a898b2 on the Mac before any F2.2 code. Shares are samply
+inclusive samples of a `--profile profiling` build (1 kHz). Counts come from a
+scratch build that printed each `FunctionLiveOut::compute` call with its caller
+(`#[track_caller]`) and each `ValueLiveness` build with its collection site; it
+was not committed. Instructions and peak RSS are from a clean release build,
+`/usr/bin/time -l`, median of 3.
+
+| Command | Instructions | Peak RSS | `liveout::` | `liveness::` | `deadphi::` | `span::` | `demand::` | Union |
+|---|---|---|---|---|---|---|---|---|
+| pumasim `pdd @ 0x23fdf0` | 18.71 G | 255.0 MB | 0.09% | 2.95% | 2.24% | 1.79% | 0.81% | 6.89% |
+| 0pack `pdd @ 0x62ecf0` | 13.06 G | 257.0 MB | 0.13% | 5.50% | 1.97% | 4.98% | 0.92% | 9.31% |
+| bash `aa; pdd @ 0x2e630` | 13.48 G | 83.5 MB | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% | 0.00% |
+| pumasim `aa; pdd @ 0x3b6b20` | 68.78 G | 261.7 MB | 0.02% | 0.29% | 0.22% | 0.10% | 0.02% | 0.61% |
+
+| Command | `compute` calls | blocks walked | from `recover_interface.rs` | `function/mod.rs:1069` | `semantic/mod.rs:306` | `ValueLiveness` builds (recover / prepare) |
+|---|---|---|---|---|---|---|
+| pumasim `pdd @ 0x23fdf0` | 743 | 1,829 | 609 | 26 | 108 | 144 / 108 |
+| 0pack `pdd @ 0x62ecf0` | 165 | 666 | 134 | 7 | 24 | 27 / 24 |
+| bash `aa; pdd @ 0x2e630` | 79 | 51 | 45 | 27 | 7 | 7 / 7 |
+| pumasim `aa; pdd @ 0x3b6b20` | 390 | 1,335 | 105 | 263 | 22 | 23 / 22 |
+
+Per timed function: pumasim 0x23fdf0 (85 blocks) 8 calls walking 14 blocks;
+0pack 0x62ecf0 (337 blocks) 3 calls walking 3; bash 0x2e630 (3 blocks) 13
+calls walking 39; pumasim 0x3b6b20 (47 blocks) 9 calls walking 24.
+
+What the measurement changes in the F2.2 plan:
+
+- The live-out walks cost at most 0.13% of a command. They visit a few blocks
+  next to each return (3 of 337 on 0pack's function), so any index swept over
+  every operation of every graph costs more than the walks it replaces.
+- `ValueLiveness` is built twice per seal, over two graphs. The first build is
+  the recovery collection (`PreparedFunctionFacts::collect_for_recovery`, site
+  `recover`, `Certified::ReturnControls`) over the provisional graph, before
+  the seal applies boundary constants and forwards copies. The second is the
+  artifact's (`semantic/mod.rs:364`) over the sealed graph.
+  `function/mod.rs:1569` is `#[cfg(test)] recomputed_liveness`, no production
+  build. The recovery build's spans feed its loop facts, which feed the
+  obligations `recover_interface.rs` reads (`obligations.is_complete`).
+- `release_undemanded_bytes` (`function/mod.rs:1069`) asks the live-out of the
+  graph before the demand release; `semantic/mod.rs:306` asks it of the graph
+  after. The two are the same graph only where nothing is released, and no
+  `ValueLiveness` exists at the first.
+- The liveness share that matters is the value liveness and its readers:
+  `liveness::`, `deadphi::` and `span::` together reach 9.3% on 0pack.
+
+Readers at 718a898b2:
+
+- `FunctionLiveOut::by_return`: `liveness.rs:677` (`returned_blocks_by_value`),
+  `recover_interface.rs:3177`, and `without` itself.
+- `unresolved_blocks`: `recover_interface.rs` 1088, 1160, 1186, 1500, 1530,
+  1604, 2123, 2152, 2256, 2272, 3100, 3160, 3192, 3232; `demand.rs:123`.
+- `clobbered_blocks`: `recover_interface.rs` 1168, 1187, 1193, 1501, 1990,
+  3234.
+- `has_returns`: `recover_interface.rs` 1161, 1185, 1192, 1499, 1529, 1984,
+  1989, 2151, 3099, 3195.
+- `without`: `recover_interface.rs` 2149, 3166, 3191, 3230; `semantic/mod.rs:528`.
+- `contains`, `iter`, `is_read`: `demand.rs` (`of_returning`), `deadphi.rs`,
+  `function/dead_frame_stores.rs:107`, `semantic/shared.rs:1472`,
+  `semantic/loops.rs:352`.
+- `over_every_return`: `recover_interface.rs:3274`; `reaching`:
+  `semantic/mod.rs:601`.
+- `ValueLiveness`: `span.rs` (`StorageSpans::compute`, `ComponentLiveness`,
+  `phi_is_unread`) at `semantic/mod.rs:371`; the test-only
+  `recomputed_liveness`. The value liveness and spans are dropped after the
+  collection (doc/adr-memory-model.md, decision 1).
