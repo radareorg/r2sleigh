@@ -231,8 +231,7 @@ fn handed(artifact: &SsaArtifact, call: &CallsiteCertificate) -> (Vec<CallArgume
 }
 
 /// What a call's argument mapping rests on past `rung`: an import's arity is its name-found
-/// declaration's, and any other callee's arity holds only under the closed world, which no
-/// certificate states per call yet (D592), so every one is marked with it.
+/// declaration's; any other callee's holds under the closed world, stated per call by none (D592).
 fn mapped(call: &CallsiteCertificate) -> impl Fn(Basis) -> Confidence {
     let imported = call.callee_linkage == r2source::AdvisoryCalleeLinkage::Imported;
     move |rung| match imported {

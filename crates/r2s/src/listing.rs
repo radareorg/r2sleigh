@@ -302,13 +302,8 @@ fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
     out
 }
 
-/// What this revision holds and what was proved at the line, as notes `; M text`, weakest first
-/// (doc/adr-display.md); `asm.proof` adds each fact's basis and premises.
-///
-/// The value is stated beside the read rather than substituted into it. A pool
-/// load used to be spelled `ldr r3, sym.foo`, which says the load returns that
-/// address; all this program states is that the word there is that address
-/// now, and the instruction text stays what the machine encodes.
+/// Each note on the line as `; M text`, weakest first; `asm.proof` adds the basis (doc/adr-display.md).
+/// A held value is stated beside the read, never substituted: the word holds it now, a load may not.
 fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> String {
     use r2engine::query::{AnnotationKind, Mark, Standing};
     let indirect = line
