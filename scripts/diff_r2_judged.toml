@@ -1619,7 +1619,7 @@ function = 'entry0$'
 lacking = "r2"
 r2s = '^0x000006c0 0x000006d0 16$'
 verdict = "r2-right"
-reason = "class A: libarm64.so entry0 0x738 `e2ffff17 b 0x6c0` is a tail branch to the PLT entry for the slot at 0x1ffc0, whose R_AARCH64_JUMP_SLOT relocation names __cxa_finalize; r2s states no stub there and takes the stub (adrp, ldr, add, br x17) as entry0's block; radare2 ends entry0 at the branch. Owner ROADMAP D504"
+reason = "class A: libarm64.so entry0 0x738 `e2ffff17 b 0x6c0` is a tail branch to the PLT entry for the slot at 0x1ffc0, whose R_AARCH64_JUMP_SLOT relocation names __cxa_finalize; r2s states no stub there and takes the stub (adrp, ldr, add, br x17) as entry0's block; radare2 ends entry0 at the branch. Owner ROADMAP D530 (built and held at round 12 on the radare2-only ratchet)"
 
 [[judged]]
 command = "afb"
