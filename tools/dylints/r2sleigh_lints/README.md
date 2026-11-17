@@ -24,7 +24,7 @@ Use instead:
 
 ### What it does
 
-Denies a call of `r2abi::SymbolName::text` in r2engine and r2ssa outside an item that allows
+Denies a call of `r2abi::SymbolName::text` in r2engine, r2ssa, r2types and r2dec outside an item that allows
 `name_decides_fact` with one of `NAME_READ_REASONS`: printed, handed to an output contract, or a
 table lookup by C identifier.
 

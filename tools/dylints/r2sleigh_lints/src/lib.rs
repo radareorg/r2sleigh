@@ -6167,7 +6167,12 @@ fn reparses_a_type_spelling(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 fn reads_a_symbol_name(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let filename = cx.sess().source_map().span_to_filename(expr.span);
     let filename = format!("{filename:?}");
-    let covered = ["crates/r2engine/src/", "crates/r2ssa/src/"];
+    let covered = [
+        "crates/r2engine/src/",
+        "crates/r2ssa/src/",
+        "crates/r2types/src/",
+        "crates/r2dec/src/",
+    ];
     if filename.contains("crates/") && !covered.iter().any(|path| filename.contains(path)) {
         return false;
     }
@@ -6197,7 +6202,7 @@ fn reads_a_symbol_name(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 
 /// The items allowed to read a symbol name's text, by reason (D460). The count only falls.
 #[cfg(test)]
-const NAME_READS_ALLOWED: usize = 16;
+const NAME_READS_ALLOWED: usize = 17;
 
 #[test]
 fn name_decides_fact_allows_state_a_reason_and_only_fall() {
