@@ -135,6 +135,16 @@ pub trait Walker {
     fn ends<'a>(&self, _walk: &'a Self::Walk) -> (Vec<&'a Never>, usize) {
         (Vec::new(), 1)
     }
+
+    /// The function whose stated extent holds `address` past its start, where the container sizes one.
+    fn within(&self, _address: u64) -> Option<u64> {
+        None
+    }
+
+    /// Whether the walk decoded an instruction that begins at `address`.
+    fn begins(&self, _walk: &Self::Walk, _address: u64) -> bool {
+        false
+    }
 }
 
 /// Which believed bodies hold each address.
@@ -235,10 +245,16 @@ pub fn functions<W: Walker>(
         fixpoint.run();
     }
     let returns = fixpoint.keyed(fixpoint.answers(fixpoint.believed.keys().copied()));
+    // An entry inside a stated extent is its owner's: walked for its callers, listed as none (D506).
+    let alternates = fixpoint.alternates();
+    fixpoint
+        .walks
+        .retain(|entry, _| !alternates.contains(entry));
     Discovery {
         functions: fixpoint
             .believed
             .into_iter()
+            .filter(|(address, _)| !alternates.contains(address))
             .map(|(address, (confidence, thumb))| Discovered {
                 address,
                 confidence,
@@ -479,6 +495,23 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             }
         }
         composed
+    }
+
+    /// Entries only a call or a jump offers that lie past the start of a stated extent, at an
+    /// instruction its function's walk decoded. Read once the fixpoint is done, so in any order.
+    fn alternates(&self) -> BTreeSet<u64> {
+        let offered = (self.believed.iter())
+            .filter(|(_, (held, _))| matches!(held.basis, Basis::Called | Basis::Reached));
+        let enters = |address: u64| {
+            let owner = self.walker.within(address)?;
+            let Some(Ok(walk)) = self.walks.get(&owner) else {
+                return None;
+            };
+            self.walker.begins(walk, address).then_some(address)
+        };
+        offered
+            .filter_map(|(address, _)| enters(*address))
+            .collect()
     }
 
     fn comes_back(&self, address: u64) -> bool {

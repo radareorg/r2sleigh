@@ -750,3 +750,25 @@ fn a_block_ended_at_an_unstated_call_names_no_exit() {
     assert!(!text.contains("noreturn"), "{text}");
     assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
 }
+
+/// `owner: mov eax, 1; mov eax, 2; ret`, padding, then `caller: call owner+5; ret`.
+const ENTERS_MIDWAY: &[u8] = &[
+    0xb8, 1, 0, 0, 0, 0xb8, 2, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 0x00 owner
+    0xe8, 0xf0, 0xff, 0xff, 0xff, 0xc3, // 0x10 caller: call 0x05
+];
+
+/// A call into a sized `STT_FUNC`'s extent, at one of its instructions, enters that function (ELF
+/// gABI `st_size`; Go's `duffzero`, D506); a size of 0 states no extent.
+#[test]
+fn a_call_into_the_middle_of_a_sized_function_begins_no_function() {
+    let (owner, caller) = (BASE, BASE + 0x10);
+    let sized = Literal::of_code(
+        ENTERS_MIDWAY,
+        &[("owner", owner, 11), ("caller", caller, 6)],
+    );
+    let found = believed(&mut OpenProgram::of(sized));
+    assert_eq!(found, [(owner, Basis::Stated), (caller, Basis::Stated)]);
+    let zero = Literal::of_code(ENTERS_MIDWAY, &[("owner", owner, 0), ("caller", caller, 6)]);
+    let found = believed(&mut OpenProgram::of(zero));
+    assert!(found.contains(&(owner + 5, Basis::Called)), "{found:?}");
+}

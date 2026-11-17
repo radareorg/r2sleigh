@@ -321,6 +321,19 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
     fn ends<'a>(&self, walk: &'a BodyWalk) -> (Vec<&'a crate::discovery::Never>, usize) {
         walk.trace.ends()
     }
+
+    fn within(&self, address: u64) -> Option<u64> {
+        let extents = self
+            .program
+            .db
+            .get::<super::starts::StatedExtents>(&())
+            .ok()?;
+        super::starts::within(&extents, address)
+    }
+
+    fn begins(&self, walk: &BodyWalk, address: u64) -> bool {
+        walk.trace.begins(address)
+    }
 }
 
 /// Whether control comes back from a call to a function, by its entry and whether it is entered

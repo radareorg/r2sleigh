@@ -653,6 +653,11 @@ impl Trace {
         (walk.gated.values().flatten().map(|(_, after)| *after)).chain(through)
     }
 
+    /// Whether the walk decoded an instruction that begins at `address`. `O(log n)`.
+    pub fn begins(&self, address: u64) -> bool {
+        self.0.decoded.contains_key(&address)
+    }
+
     /// The instructions the walk reached that enter the supervisor.
     pub fn supervisor_calls(&self) -> &BTreeSet<u64> {
         &self.0.supervisor
