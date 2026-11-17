@@ -2,6 +2,8 @@
 
 use std::fmt::Write as _;
 
+use r2source::Premise;
+
 use crate::ast::{CFunction, CStmt};
 use crate::codegen::escape_comment_text;
 
@@ -16,7 +18,7 @@ fn proof_columns(
         // Each decided check passes under its premise: a canary the UB-free source, Go's stack
         // check the runtime's contract. A closed world is the result's, spelled below.
         let premises = (ledger.premises().iter())
-            .filter(|premise| **premise != r2source::Premise::ClosedWorld)
+            .filter(|premise| !matches!(premise, Premise::ClosedWorld | Premise::FrameIsolation))
             .map(|premise| premise.spelled());
         let _ = write!(
             &mut line,
@@ -182,6 +184,9 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
+    if ledger.is_some_and(|ledger| ledger.premises().contains(&Premise::FrameIsolation)) {
+        detail.push_str("; an indirect call writes no frame slot this function did not expose (assuming frame-isolation)");
+    }
     if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
         && !premises.is_empty()
     {

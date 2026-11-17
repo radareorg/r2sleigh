@@ -114,6 +114,8 @@ pub struct FramePoints {
     /// Each cited printf whose format register a reload of a clean place gives, by instruction:
     /// the literal every store there writes (D432).
     pub(crate) formats: BTreeMap<u64, u64>,
+    /// [`r2source::Premise::FrameIsolation`] bounded an indirect call's write over a loaded place.
+    pub(crate) isolated: bool,
 }
 
 /// One call's or tail transfer's area base.
@@ -208,6 +210,7 @@ impl FramePoints {
         self.opaque = merged_opaque(std::mem::take(&mut self.opaque), other.opaque);
         self.handed.extend(other.handed);
         self.rewritten.extend(other.rewritten);
+        self.isolated |= other.isolated;
         self.dynamic = self.dynamic.into_iter().chain(other.dynamic).min();
         self.incoming_stores = merged(
             self.incoming_stores
@@ -343,6 +346,11 @@ impl FramePoints {
     /// Places a call may write that a load reads after it (D369).
     pub(crate) const fn rewritten(&self) -> &BTreeSet<i64> {
         &self.rewritten
+    }
+
+    /// Whether a decision rests on [`r2source::Premise::FrameIsolation`] (D471).
+    pub(crate) const fn isolated(&self) -> bool {
+        self.isolated
     }
 
     /// The literal each reloaded printf format holds, by the call's instruction (D432).
@@ -644,9 +652,16 @@ struct WalkSite {
     order: Vec<Node>,
     /// The entry block's node: where no store has yet reached a place.
     root: Option<Node>,
+    /// The request grants [`r2source::Premise::FrameIsolation`] (D471).
+    isolated: bool,
 }
 
 impl WalkSite {
+    /// Whether frame isolation bounds this call's writes: it is indirect and the request grants it.
+    const fn isolates(&self, call: &CallArguments) -> bool {
+        self.isolated && call.indirect
+    }
+
     /// The site of `func`'s walk; each edge placed by binary search, `O(E log B)`, and an edge out
     /// of the lifted blocks dropped.
     fn of(func: &SSAFunction, machine: &SourceMachineContext, arguments: StackArguments) -> Self {
@@ -678,6 +693,7 @@ impl WalkSite {
             order,
             calls: arguments.calls,
             transfers: arguments.transfers,
+            isolated: machine.accepts(r2source::Premise::FrameIsolation),
         }
     }
 
@@ -866,7 +882,26 @@ fn decide_points(
     let reloads = conditional(table, site, &points, evidence);
     let (rewritten, formats) = rewritten(site, (&table.bases, &writes), &table.accesses, &reloads);
     (points.rewritten, points.formats) = (rewritten, formats);
+    points.isolated = isolated(site, (&table.bases, &writes), &table.accesses);
     points
+}
+
+/// Whether the premise bounded an indirect call's write over a place a load reads: the span the
+/// call would write without it, `[base, 0)`, holds one. `O(calls + places in the widest span)`.
+fn isolated(
+    site: &WalkSite,
+    (bases, writes): (&[Option<i64>], &[Area<'_>]),
+    accesses: &Accesses,
+) -> bool {
+    let calls = (site.calls.iter()).zip(bases).zip(writes);
+    let lowest = calls
+        .filter(|((call, _), area)| !call.tail && area.is_none() && site.isolates(call))
+        .filter_map(|((_, base), _)| *base)
+        .min();
+    // The lowest base's span holds every other's, so one range query decides.
+    lowest.is_some_and(|base| {
+        (accesses.range(base..0)).any(|(_, list)| list.iter().any(|access| !access.store))
+    })
 }
 
 /// The reloads whose place nothing but a call's write keeps in memory, each with the area its call
@@ -1241,6 +1276,8 @@ struct CallArguments {
     shift: i64,
     /// A direct call to the body itself: it writes what the body does where nothing else states.
     targets_entry: bool,
+    /// The site's target is no address: no body can state what it writes (D471).
+    indirect: bool,
     /// Whether a statement may bound its areas: any call, and a tail the source correlates.
     reads_stated: bool,
     /// A transfer that leaves the body: its callee's writes above the entry pointer are the
@@ -1447,6 +1484,8 @@ fn call_events(
                     .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
                     .chain([(i64::MIN, *base)]),
             ),
+            // An indirect call writes no frame byte above its pointer but an exposed object's (D471).
+            (Some(base), None) if site.isolates(call) => vec![(i64::MIN, *base)],
             // Unbounded, it is still this frame's: it ends at the entry pointer.
             (Some(base), None) => merged([(i64::MIN, *base), (*base, 0)].into_iter()),
         };
@@ -1805,6 +1844,7 @@ impl Site<'_> {
             pointer,
             shift: self.spent,
             targets_entry: false,
+            indirect: false,
             reads_stated: identified.is_some(),
             tail: true,
             instruction: transfer.instruction,
@@ -1834,8 +1874,11 @@ impl Site<'_> {
         let targets_entry = target.is_some_and(|target| {
             target.space == crate::CanonicalStorageSpace::Ram && target.offset == self.func.entry
         });
+        let indirect =
+            target.is_some_and(|target| target.space != crate::CanonicalStorageSpace::Ram);
         Some(CallArguments {
             targets_entry,
+            indirect,
             reads_stated: true,
             tail: false,
             op,

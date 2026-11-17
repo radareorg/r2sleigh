@@ -238,6 +238,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
             imports: &machines.imports,
             declarations: &inputs.source.container().declarations,
             data_model: machines.data_model,
+            premises: crate::native::accepted_premises(),
         })
     }
 

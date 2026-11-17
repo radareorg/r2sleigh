@@ -166,6 +166,9 @@ pub enum Premise {
     /// grows the stack and resumes the caller after the call, which then re-enters. A name states
     /// the routine; only this premise says it behaves as the runtime does.
     GoRuntime,
+    /// The code is compiler output: a callee writes its caller's frame only through an address
+    /// the caller exposed, and no caller reads a stack parameter home back (D471, a ruling).
+    FrameIsolation,
 }
 
 impl Premise {
@@ -175,6 +178,7 @@ impl Premise {
             Self::ClosedWorld => "closed-world",
             Self::UbFreeSource => "ub-free",
             Self::GoRuntime => "go-runtime",
+            Self::FrameIsolation => "frame-isolation",
         }
     }
 }
