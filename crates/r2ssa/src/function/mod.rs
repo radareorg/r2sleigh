@@ -1571,7 +1571,7 @@ impl SsaArtifact {
             self.liveness.live_out(),
             &crate::dense::IdMap::default(),
             content,
-            self.liveness.ignored_reads(),
+            (self.liveness.ignored_reads(), self.facts.demanded.clone()),
         );
         let spans = crate::span::StorageSpans::compute(graph, &values);
         (values, spans)

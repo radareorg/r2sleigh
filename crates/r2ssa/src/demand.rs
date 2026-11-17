@@ -165,7 +165,8 @@ pub(crate) fn exits_are_named_beside(
 /// operation with an effect.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DemandedBytes {
-    bytes: crate::dense::IdMap<ValueId, ByteMask>,
+    /// Per value, bit `b` for byte `b`; `u64::MAX` for every byte however wide.
+    bytes: Vec<u64>,
 }
 
 impl DemandedBytes {
@@ -218,18 +219,22 @@ impl DemandedBytes {
                     .map(move |(_, input)| (*input, mask))
             });
         let roots = returned.chain(tails.iter().copied()).chain(effects);
-        Self {
-            bytes: crate::bytes::closure_of(graph, roots).bytes,
+        let closure = crate::bytes::closure_of(graph, roots).bytes;
+        let mut bytes = vec![0; graph.values.len()];
+        for (value, mask) in closure.iter() {
+            if let Some(slot) = bytes.get_mut(value.0 as usize) {
+                *slot = match mask {
+                    ByteMask::Bytes(bytes) => *bytes,
+                    ByteMask::All => u64::MAX,
+                };
+            }
         }
+        Self { bytes }
     }
 
     /// The bytes of `value` something reads, bit `b` for byte `b`.
     pub fn bytes(&self, value: ValueId) -> u64 {
-        match self.bytes.get(value) {
-            None => 0,
-            Some(ByteMask::Bytes(bytes)) => *bytes,
-            Some(ByteMask::All) => u64::MAX,
-        }
+        self.bytes.get(value.0 as usize).copied().unwrap_or(0)
     }
 }
 

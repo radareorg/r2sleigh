@@ -65,6 +65,9 @@ pub struct ValueLiveness {
     content: ValueContent,
     /// Merges nothing reads, directly or through other such merges.
     unread_phi: Vec<bool>,
+    /// The bytes of each value some reader needs (`DemandedBytes`); `None` where an exit hands
+    /// registers to code outside the graph, so every byte counts as needed.
+    bytes: Option<crate::demand::DemandedBytes>,
 }
 
 /// Which values hold one content: where the narrower of two values is the
@@ -385,7 +388,7 @@ impl ValueLiveness {
             live_out,
             &crate::dense::IdMap::default(),
             content,
-            &BTreeSet::new(),
+            (&BTreeSet::new(), None),
         )
     }
 
@@ -401,13 +404,14 @@ impl ValueLiveness {
     /// chain of folds resolves to the last reader.
     /// `ignored_reads` are use sites the text never performs -- a call's
     /// conventional read of a register the certified call does not pass --
-    /// and they hold nothing live.
+    /// and they hold nothing live. A value of which `bytes` states no byte is needed holds no
+    /// range (doc/adr-one-ir.md, F2.2b).
     pub fn compute_with_relocations(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         relocations: &crate::dense::IdMap<InstId, InstId>,
         content: ValueContent,
-        ignored_reads: &BTreeSet<UseSite>,
+        (ignored_reads, bytes): (&BTreeSet<UseSite>, Option<crate::demand::DemandedBytes>),
     ) -> Self {
         // Each fold moves a read to a later reader, so a chain has at most one step per fold.
         let relocate = |mut inst: InstId| {
@@ -441,6 +445,9 @@ impl ValueLiveness {
 
         for value in &graph.values {
             offsets.push(segments.len() as u32);
+            if (bytes.as_ref()).is_some_and(|bytes| bytes.bytes(value.id) == 0) {
+                continue;
+            }
             // A literal is written into its reader and occupies no storage, except where a merge
             // reads it: storage spans join a merge with its sources by these ranges (span.rs).
             if value.var.constant_bits().is_some() && !read_by_a_merge(graph, value.id) {
@@ -594,7 +601,19 @@ impl ValueLiveness {
             segments,
             content,
             unread_phi: dead_phi,
+            bytes,
         }
+    }
+
+    /// The bytes of `value` some reader needs, bit `b` for byte `b`; every byte where no demand
+    /// was stated.
+    pub fn bytes(&self, value: ValueId) -> u64 {
+        (self.bytes.as_ref()).map_or(u64::MAX, |bytes| bytes.bytes(value))
+    }
+
+    /// The demanded bytes, for the facts that outlive this liveness.
+    pub(crate) fn into_bytes(self) -> Option<crate::demand::DemandedBytes> {
+        self.bytes
     }
 
     /// Whether this merge is read by nothing, so it merges nothing the text
@@ -648,6 +667,21 @@ impl ValueLiveness {
             }
         }
         false
+    }
+}
+
+impl ValueLiveness {
+    /// The bytes of one location on which two values cannot share an object (D470): all where they
+    /// are two locations live at once (doc/adr-one-ir.md, F2.2b). `O(segments of the two)`.
+    pub fn interfering_lanes(&self, graph: &SsaGraph, left: ValueId, right: ValueId) -> u64 {
+        if !self.interferes(left, right) {
+            return 0;
+        }
+        let location = |value| Some(graph.value(value)?.canonical_storage?.location());
+        match (location(left), location(right)) {
+            (Some(a), Some(b)) if a == b => self.bytes(left) & self.bytes(right),
+            _ => u64::MAX,
+        }
     }
 }
 
@@ -1118,6 +1152,102 @@ mod tests {
                 .expect("ssa");
         let graph = SsaGraph::from_function(&func);
         (func, graph)
+    }
+
+    /// `rax = rcx + 3; rdx = rax; al = 1; [rsp] = dh; return rax`, its copy forwarded: the first `rax`
+    /// is read for its byte 1 after the lane write that keeps its bytes 1 to 7 (F2.2b).
+    fn lane_overwritten_then_read() -> (SsaGraph, FunctionLiveOut) {
+        let mut arch = ArchSpec::new("lane-test");
+        arch.add_register(RegisterDef::new("RAX", 0, 8));
+        arch.add_register(RegisterDef::sub("AL", 0, 1, "RAX"));
+        arch.add_register(RegisterDef::new("RCX", 8, 8));
+        arch.add_register(RegisterDef::new("RDX", 16, 8));
+        arch.add_register(RegisterDef::sub("DH", 17, 1, "RDX"));
+        arch.add_register(RegisterDef::new("RSP", 32, 8));
+        arch.add_register(RegisterDef::new("RIP", 0x288, 8));
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: reg(0, 8),
+            a: reg(8, 8),
+            b: Varnode::constant(3, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: reg(16, 8),
+            src: reg(0, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: reg(0, 1),
+            src: Varnode::constant(1, 1),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: reg(32, 8),
+            val: reg(17, 1),
+        });
+        block.push(R2ILOp::Return {
+            target: reg(0x288, 8),
+        });
+        let mut func =
+            SSAFunction::from_blocks_raw(&[block], Some(&crate::Arch::from(arch))).expect("ssa");
+        func.forward_copies();
+        let graph = SsaGraph::from_function(&func);
+        let rax = crate::CanonicalStorageId {
+            space: crate::CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        };
+        let live_out = FunctionLiveOut::compute(&func, &graph, &[rax]);
+        (graph, live_out)
+    }
+
+    fn demanded_liveness(graph: &SsaGraph, live_out: &FunctionLiveOut) -> ValueLiveness {
+        let demand = crate::demand::DemandedBytes::of(graph, live_out, None);
+        ValueLiveness::compute_with_relocations(
+            graph,
+            live_out,
+            &crate::dense::IdMap::default(),
+            ValueContent::unmapped(graph),
+            (&BTreeSet::new(), Some(demand)),
+        )
+    }
+
+    #[test]
+    fn a_value_no_reader_demands_holds_no_range() {
+        let (_func, graph) = loop_with_exit_read();
+        let liveness = demanded_liveness(&graph, &FunctionLiveOut::default());
+        // `RDX = RAX + 5` at the exit: nothing with an effect reads it, and it is not returned.
+        let unread = defined_at(&graph, 0x1010, 0);
+        assert_eq!(liveness.bytes(unread), 0);
+        assert!(liveness.segments(unread).is_empty());
+    }
+
+    #[test]
+    fn a_value_overwritten_in_its_low_byte_interferes_with_the_writer_on_its_high_lanes_only() {
+        let (graph, live_out) = lane_overwritten_then_read();
+        let liveness = demanded_liveness(&graph, &live_out);
+        let first = defined_at(&graph, 0x1000, 0);
+        let writer = live_out.iter().next().expect("the returned root");
+        assert_eq!(liveness.bytes(first), 0xfe, "bytes 1 to 7 are read");
+        assert_eq!(liveness.interfering_lanes(&graph, first, writer), 0xfe);
+        assert_eq!(liveness.interfering_lanes(&graph, writer, first), 0xfe);
+        // Two locations live at once share no lane; ranges that do not overlap share none.
+        let (_func, looped) = loop_with_exit_read();
+        let looped_liveness = ValueLiveness::compute(
+            &looped,
+            &FunctionLiveOut::default(),
+            ValueContent::unmapped(&looped),
+        );
+        let merged = value_named(&looped, "RAX", 2);
+        let carried = defined_at(&looped, 0x100c, 0);
+        let entry_rcx = value_named(&looped, "RCX", 0);
+        assert_eq!(
+            looped_liveness.interfering_lanes(&looped, merged, carried),
+            0
+        );
+        assert_eq!(
+            looped_liveness.interfering_lanes(&looped, merged, entry_rcx),
+            u64::MAX
+        );
     }
 
     #[test]
