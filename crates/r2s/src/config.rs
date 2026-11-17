@@ -29,6 +29,15 @@ pub(crate) const KEYS: &[Key] = &[
         },
     },
     Key {
+        name: "asm.proof",
+        summary: "name each note's basis and each setter's call (r2s only)",
+        get: |session| session.proof.to_string(),
+        set: |session, value| {
+            session.proof = boolean("asm.proof", value)?;
+            Ok(())
+        },
+    },
+    Key {
         name: "scr.color",
         summary: "enable colors (0: none, 1: ansi)",
         get: |session| u8::from(session.color).to_string(),

@@ -52,3 +52,70 @@ fn a_piped_listing_is_the_painted_one_with_no_escape() {
     assert!(painted.contains('\x1b'), "{painted}");
     assert_eq!(unpainted(&painted), plain);
 }
+
+/// An x86-64 relocatable object whose `f` calls an undeclared import and a function of its own.
+fn relocated() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../r2image/tests/data/relocated.elf")
+}
+
+/// An AArch64 Mach-O whose dispatch calls through a register.
+fn dispatching() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/code_pointer_table_O0")
+}
+
+/// Every note of every line, as `(mark cell, text)`.
+fn notes(listing: &str) -> Vec<(char, String)> {
+    let note = |note: &str| {
+        let mut chars = note.chars();
+        let cell = chars.next()?;
+        Some((cell, chars.as_str().trim_start().to_owned()))
+    };
+    let line_notes = |line: &str| -> Vec<(char, String)> {
+        let notes = line.split(" ; ").skip(1);
+        notes.filter_map(note).collect()
+    };
+    listing.lines().flat_map(line_notes).collect()
+}
+
+/// Reader text by default (D567): one mark cell and no basis word; a refused call says why.
+#[test]
+fn a_default_listing_marks_each_note_and_names_no_basis() {
+    let listing = piped(relocated(), "pdf @ sym.f");
+    for basis in ["(certified", "(decoded", "(declared", "(solved", "(folded"] {
+        assert!(!listing.contains(basis), "{basis}: {listing}");
+    }
+    let call = (listing.lines().find(|line| line.contains("0x08000040"))).expect("the call");
+    // The operand spells no name for the stub, so the note names the import it refuses.
+    let undeclared =
+        " ; ! args of sym.imp.ext: the import has no declaration to state its arguments";
+    assert!(call.ends_with(undeclared), "{call}");
+    // `asm.proof` brings the basis back and moves no line.
+    let proof = piped(relocated(), "e asm.proof=true; pdf @ sym.f");
+    assert!(proof.contains("(certified"), "{proof}");
+    assert_eq!(proof.lines().count(), listing.lines().count());
+}
+
+/// A refusal is `!` and an unknown `?`, never the space a fact that holds takes.
+#[test]
+fn a_refusal_or_an_unknown_never_takes_the_space_cell() {
+    let listings = [
+        piped(relocated(), "pdf @ sym.f"),
+        piped(hashes(), "pdf @ 0x401330; pdf @ sym.siphash24"),
+        piped(dispatching(), "pdf @ sym._table_dispatch"),
+    ];
+    let notes = listings.iter().flat_map(|listing| notes(listing));
+    let mut refused = 0;
+    for (cell, text) in notes {
+        if text.starts_with("args: ") || text.starts_with("args of ") {
+            assert_eq!(cell, '!', "{text}");
+            refused += 1;
+        }
+        if text.starts_with("indirect branch unresolved") {
+            assert_eq!(cell, '?', "{text}");
+        }
+    }
+    assert!(
+        refused >= 2,
+        "the object's import call and the indirect `blr`"
+    );
+}
