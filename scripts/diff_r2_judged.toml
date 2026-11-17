@@ -1711,7 +1711,7 @@ r2s = '^noreturn: true$'
 r2 = '^noreturn: false$'
 verdict = "r2s-right"
 upstream = "noreturn: a call through a GOT slot (`call qword [reloc.exit]`, -fno-plt) to a noreturn import does not make the caller noreturn"
-reason = "class B: 0pack 0x4767d0 _start ends `ff15b6573c00 call qword [reloc.__libc_start_main]; f4 hlt` and true 0x2210 ends every path in `call qword [reloc.exit]`; r2s proves noreturn, radare2 says false even after aaa. All 84 instances end in such a GOT-slot call (checked with pd on each)"
+reason = "class B: 0pack 0x4767d0 _start ends `ff15b6573c00 call qword [reloc.__libc_start_main]; f4 hlt` and true 0x2210 ends every path in `call qword [reloc.exit]`; since D505, static-glibc-2.27 0x400a30 entry0 and 0x400de0 __libc_start_main compose _exit's exit_group syscall (_exit 0x448c50), and ld-2.27.so 0x1b790 prints ld.so's assertion message and calls _exit 0x1d030 (exit_group); r2s proves noreturn, radare2 says false even after aaa. All 84 instances end in such a GOT-slot call (checked with pd on each)"
 
 [[judged]]
 command = "afi"
@@ -1730,7 +1730,7 @@ corpus = "elf"
 r2s = '^noreturn: unproven \(no return reached\)$'
 r2 = '^noreturn: true$'
 verdict = "unfilled"
-reason = "class B: libc-2.31.so 0x27160 __libc_main ends `call sym._exit` (0x27180), ifunc_rel64 0x400c30 _start ends `call sym.__libc_start_main; hlt`; r2s reaches no return but proves no Never for the local callee, radare2 says true. Owner ROADMAP D505"
+reason = "class B: ifunc_rel64 0x400c30 _start ends `call sym.__libc_start_main; hlt`; r2s reaches no return but proves no Never for the local callee, radare2 says true. Since D505 eight libc instances (glibc 2.21 to 2.34 __libc_main, composing _exit's exit_group syscall) are equal. Owner ROADMAP D505"
 
 [[judged]]
 command = "afl"
@@ -2388,6 +2388,15 @@ lacking = "r2s"
 verdict = "unfilled"
 row = "D551"
 reason = "class B: libarm64.so 0x6d0 is the stub D530 names for __stack_chk_fail (slot 0x1ffd0); radare2 says it never returns, r2s holds no cited bionic row for it. Sampled since D530 names the stubs. Owner ROADMAP D551"
+
+[[judged]]
+command = "afb"
+binaries = "static-glibc-2.27"
+corpus = "elf"
+function = '^0x00400de0 '
+r2s = '^(0x004011cf 0x004011de 15|<missing>)$'
+verdict = "r2s-right"
+reason = "class B: static-glibc-2.27 __libc_start_main's exit loop `mov edx, 0x3c; L: xor edi, edi; mov eax, edx; syscall; jmp L` (0x4011cf..0x4011de): the body's seal folds the number to 60, exit, which never returns (Linux v6.8 kernel/exit.c), so r2s ends the block at the syscall (D505); radare2 keeps the loop's back edge (blocks 0x4011cf..0x4011d8 and 0x4011d8..0x4011e0)"
 
 # ── Judged radare2-only values (D541) ──
 

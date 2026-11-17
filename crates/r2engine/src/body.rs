@@ -104,6 +104,12 @@ pub trait Program {
         None
     }
 
+    /// The kernel source stating the supervisor call at `instruction` never comes back in the body
+    /// at `entry`: its seal folds the number to a cited row's (D505). `None`: it comes back.
+    fn supervisor_halts(&self, _entry: u64, _instruction: u64) -> Option<r2source::Citation> {
+        None
+    }
+
     /// The argument register that, holding the `Halt`, makes a transfer through `slot` not return,
     /// where the cited row of the import the loader binds there states one.
     fn halts_on_through(&self, _slot: u64) -> Option<Halting> {
@@ -340,8 +346,11 @@ struct Instruction {
     terminator: BlockTerminator,
     /// The decode window and context, where the walk keeps its decodes.
     decode: Option<Box<(Vec<u8>, Continuation)>>,
-    /// The document stating this `int n`'s vector never comes back (D229).
+    /// The document stating this `int n`'s vector (D229) or this supervisor call's number (D505)
+    /// never comes back.
     halts: Option<r2source::Citation>,
+    /// Whether it enters the supervisor, read once from its operations.
+    supervisor: bool,
 }
 
 impl Instruction {
@@ -358,6 +367,7 @@ impl Instruction {
             terminator: self.terminator.clone(),
             decode: None,
             halts: self.halts,
+            supervisor: self.supervisor,
         }
     }
 }
@@ -560,6 +570,11 @@ impl Lifting {
         self.0.cut(shape, entry, keep)
     }
 
+    /// The instructions the walk reached that enter the supervisor.
+    pub fn supervisor_calls(&self) -> &BTreeSet<u64> {
+        &self.0.supervisor
+    }
+
     /// The body walked, the walk ended.
     pub fn into_body(self) -> Body {
         self.0.into_body().0
@@ -696,30 +711,21 @@ impl Trace {
     }
 }
 
-/// The vector of an x86 `int n`, the constant Sleigh's `swi` operation reads.
-fn interrupt_vector(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> Option<u64> {
-    ops.iter().find_map(|op| match op {
-        r2il::R2ILOp::CallOther { userop, inputs, .. }
-            if arch
-                .user_ops
-                .get(*userop as usize)
-                .is_some_and(|name| name == "swi") =>
-        {
-            let [vector] = inputs.as_slice() else {
-                return None;
-            };
-            (vector.space == r2il::SpaceId::Const).then_some(vector.offset)
+/// Whether an instruction enters the supervisor (`ArchSpec::supervisor_calls`), and the vector an
+/// x86 `int n`'s `swi` reads; one pass over its operations.
+fn supervisor_entry(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> (bool, Option<u64>) {
+    let mut entry = (false, None);
+    for op in ops {
+        let r2il::R2ILOp::CallOther { userop, inputs, .. } = op else {
+            continue;
+        };
+        entry.0 |= arch.supervisor_calls.contains(userop);
+        let swi = (arch.user_ops.get(*userop as usize)).is_some_and(|name| name == "swi");
+        if let ([vector], true, None) = (inputs.as_slice(), swi, entry.1) {
+            entry.1 = (vector.space == r2il::SpaceId::Const).then_some(vector.offset);
         }
-        _ => None,
-    })
-}
-
-/// Whether an instruction's p-code enters the supervisor: a user operation the
-/// language declares as one (`ArchSpec::supervisor_calls`).
-fn enters_supervisor(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> bool {
-    ops.iter().any(|op| {
-        matches!(op, r2il::R2ILOp::CallOther { userop, .. } if arch.supervisor_calls.contains(userop))
-    })
+    }
+    entry
 }
 
 /// The shape of one traced body: its basic blocks and the bytes of its
@@ -923,8 +929,8 @@ impl Walk {
                 self.overlap(addr, with);
                 continue;
             }
-            let enters = enters_supervisor(&instruction.lifted.ops, disasm.arch_spec());
-            self.supervisor.extend(enters.then_some(addr));
+            self.supervisor
+                .extend(instruction.supervisor.then_some(addr));
             let (successors, kept) = self.record(instruction, previous.as_ref(), program);
             pending.extend(successors);
             previous = kept;
@@ -1016,14 +1022,20 @@ impl Walk {
         }
         let decode = self.decodes.then(|| Box::new((fetch, one.continuation)));
         let arch = disasm.arch_spec();
-        let halts = interrupt_vector(&lifted.ops, arch)
-            .and_then(|vector| program.interrupt_halts(&arch.name, vector));
+        let (supervisor, vector) = supervisor_entry(&lifted.ops, arch);
+        let halts = (vector.and_then(|vector| program.interrupt_halts(&arch.name, vector)))
+            .or_else(|| {
+                supervisor
+                    .then(|| program.supervisor_halts(self.entry, addr))
+                    .flatten()
+            });
         Some(Instruction {
             lifted,
             bytes,
             terminator,
             decode,
             halts,
+            supervisor,
         })
     }
 
@@ -1154,6 +1166,14 @@ impl Walk {
         }
 
         match instruction.terminator {
+            // A supervisor call or an interrupt a kernel document says never comes back (D229, D505).
+            BlockTerminator::IndirectCall { .. } | BlockTerminator::Fallthrough { .. }
+                if let Some(citation) = instruction.halts =>
+            {
+                self.halting.insert(addr);
+                self.nevers
+                    .insert(addr, (Never::cited(citation), Closer::Site));
+            }
             BlockTerminator::Fallthrough { next: after } => {
                 self.continues(Some(after), &mut successors, program)
             }
@@ -1205,11 +1225,6 @@ impl Walk {
             // A call through a register is opaque, so it is assumed to come
             // back -- unless it calls through a slot whose pointer the
             // program states, and what it states there never returns.
-            BlockTerminator::IndirectCall { .. } if let Some(citation) = instruction.halts => {
-                self.halting.insert(addr);
-                self.nevers
-                    .insert(addr, (Never::cited(citation), Closer::Site));
-            }
             BlockTerminator::IndirectCall { fallthrough } => {
                 let ops = &instruction.lifted.ops;
                 let at = ops
@@ -1803,6 +1818,7 @@ mod transfer_tests {
             bytes: Vec::new(),
             decode: None,
             halts: None,
+            supervisor: false,
             terminator: BlockTerminator::ConditionalBranch {
                 true_target: 0x2000,
                 false_target: 0x1006,

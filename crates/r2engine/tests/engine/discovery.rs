@@ -772,3 +772,88 @@ fn a_call_into_the_middle_of_a_sized_function_begins_no_function() {
     let found = believed(&mut OpenProgram::of(zero));
     assert!(found.contains(&(owner + 5, Basis::Called)), "{found:?}");
 }
+
+/// `quit: mov r8d, 231; jmp L; L: mov eax, r8d; syscall; hlt`, then `caller: call quit; mov eax, 1;
+/// ret` (libc-2.31.so `_exit` 0xcce30: the number crosses a branch).
+const EXITS_GROUP: &[u8] = &[
+    0x41, 0xb8, 0xe7, 0, 0, 0, 0xeb, 0x00, 0x44, 0x89, 0xc0, 0x0f, 0x05, 0xf4, 0xe8, 0xed, 0xff,
+    0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// `pid: mov eax, 39; syscall; ret`, then `caller: call pid; mov eax, 1; ret`.
+const GETS_PID: &[u8] = &[
+    0xb8, 39, 0, 0, 0, 0x0f, 0x05, 0xc3, 0xe8, 0xf3, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// `any: mov eax, edi; syscall; hlt`, then `caller: call any; mov eax, 1; ret`.
+const ANY_NUMBER: &[u8] = &[
+    0x89, 0xf8, 0x0f, 0x05, 0xf4, 0xe8, 0xf6, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// A supervisor call whose sealed number a cited kernel row says never returns ends the body and
+/// its callers (`exit_group` 231, D505); a returning or unfolded number comes back.
+#[test]
+fn a_supervisor_call_whose_proven_number_never_returns_ends_the_body_and_its_callers() {
+    let (quit, caller) = (BASE, BASE + 0xe);
+    let functions = [("quit", quit, 14), ("caller", caller, 11)];
+    let literal = || Literal::of_code(EXITS_GROUP, &functions);
+    for mut program in [OpenProgram::of(literal()), {
+        let mut warm = OpenProgram::of(literal());
+        believed(&mut warm);
+        warm
+    }] {
+        assert_eq!(extent(&mut program, quit), (quit + 0xd, true));
+        assert_eq!(extent(&mut program, caller), (caller + 5, true));
+        let never = program.function_info(quit).expect("described").noreturn;
+        let never = never.expect("never returns");
+        let proven = (
+            never.proof(),
+            never.proves().is_some_and(|premises| premises.is_empty()),
+        );
+        assert_eq!(proven, (r2engine::discovery::NeverProof::Composed, true));
+    }
+    let (pid, caller) = (BASE, BASE + 8);
+    let functions = [("pid", pid, 8), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(GETS_PID, &functions));
+    believed(&mut program);
+    assert_eq!(extent(&mut program, caller), (caller + 11, false));
+    let (any, caller) = (BASE, BASE + 5);
+    let functions = [("any", any, 5), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(ANY_NUMBER, &functions));
+    believed(&mut program);
+    assert_eq!(extent(&mut program, any), (any + 5, true));
+    let never = program.function_info(any).expect("described").noreturn;
+    assert_eq!(
+        never.map(|never| never.proof()),
+        Some(r2engine::discovery::NeverProof::NoReturnReached)
+    );
+}
+
+/// `quit` as in [`EXITS_GROUP`], then `other: mov r8d, 39; jmp L`: a second body reaching quit's
+/// `syscall` with `getpid`'s number.
+const SHARES_THE_SYSCALL: &[u8] = &[
+    0x41, 0xb8, 0xe7, 0, 0, 0, 0xeb, 0x00, 0x44, 0x89, 0xc0, 0x0f, 0x05, 0xf4, 0x41, 0xb8, 39, 0,
+    0, 0, 0xe9, 0xef, 0xff, 0xff, 0xff,
+];
+
+/// One seal sees its own body's paths: a site another body reaches with a number that returns
+/// halts no walk of that body, and the listing walks end only where every body proved it (D505).
+#[test]
+fn a_supervisor_call_another_body_reaches_with_another_number_ends_no_walk_of_it() {
+    let (quit, other) = (BASE, BASE + 0xe);
+    let functions = [("quit", quit, 14), ("other", other, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(SHARES_THE_SYSCALL, &functions));
+    believed(&mut program);
+    let never = program.function_info(other).expect("described").noreturn;
+    let proof = never.map(|never| never.proof());
+    assert_eq!(
+        proof,
+        Some(r2engine::discovery::NeverProof::NoReturnReached)
+    );
+    let blocks = program.function_info(other).expect("described").blocks;
+    let ends = blocks
+        .iter()
+        .map(|block| block.addr + block.size)
+        .collect::<Vec<_>>();
+    assert!(ends.contains(&(quit + 0xe)), "{ends:x?}");
+}

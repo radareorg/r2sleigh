@@ -3386,6 +3386,58 @@ impl Native<'_> {
     }
 }
 
+/// The supervisor calls of a walked body whose number its convention seal folds to a constant a
+/// kernel row says never returns, by instruction (D505). One seal, then `O(ops)`.
+pub(crate) fn supervisor_halts(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    kernel: r2abi::Kernel,
+    (arch, bits): (&str, u32),
+    body: crate::body::Body,
+) -> BTreeMap<u64, r2source::Citation> {
+    let entry = body.entry;
+    let spec = target.disasm.arch_spec();
+    let table = r2abi::Syscalls::for_kernel(kernel, arch, bits);
+    let number = table
+        .and_then(|table| r2sleigh_lift::lifted_register_storage(spec, table.number_register()));
+    let (Some(number), Ok(native)) = (number, Native::over(target, program)) else {
+        return BTreeMap::new();
+    };
+    let walked = native.walked(body);
+    let restatement = native.restatement(entry);
+    let seal = match native.convention_seal(&walked, &Callees::default(), restatement, &[]) {
+        Ok(seal) => seal,
+        Err(error) => {
+            r2il::refusal_evidence!("supervisor-halt", "{entry:#x}: sealing failed: {error:?}");
+            return BTreeMap::new();
+        }
+    };
+    r2il::refusal_evidence!(
+        "supervisor-halt",
+        "{entry:#x}: sealed for its supervisor calls"
+    );
+    let graph = seal.graph();
+    let enters = |op: &r2ssa::SSAOp<_>| matches!(op, r2ssa::SSAOp::CallOther { userop, .. } if spec.supervisor_calls.contains(userop));
+    let mut halts = BTreeMap::new();
+    for block in &graph.blocks {
+        for &inst in graph.op_insts(block.id) {
+            let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
+                continue;
+            };
+            let Some(instruction) = graph.instruction_for_inst(inst).filter(|_| enters(op)) else {
+                continue;
+            };
+            let value = seal
+                .value_reaching(id, number)
+                .and_then(|value| seal.folded_value(value));
+            let cited =
+                value.and_then(|value| r2source::Citation::syscall(kernel, arch, bits, value));
+            halts.extend(cited.map(|citation| (instruction, citation)));
+        }
+    }
+    halts
+}
+
 /// The text a section of static data holds at an address, where the loader leaves every byte of it and its terminator alone; the one reader a rendering and a listing share.
 pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
     if !program.holds_static_data(address) {

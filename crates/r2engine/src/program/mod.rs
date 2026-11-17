@@ -716,6 +716,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().interrupt_halts(arch, vector)
     }
 
+    fn supervisor_halts(&self, entry: u64, instruction: u64) -> Option<r2source::Citation> {
+        self.view().supervisor_halts(entry, instruction)
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
     }

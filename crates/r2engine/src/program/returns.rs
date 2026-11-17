@@ -17,7 +17,12 @@ pub(super) struct BodyWalk {
     pub(super) thumb: bool,
     /// How far the survey has read the body's tables.
     tables: Tabled,
+    /// The supervisor calls its seal proves never come back, read once where it reaches no return.
+    halts: Halts,
 }
+
+/// The supervisor calls of one body a kernel row proves halting, by instruction (D505).
+type Halts = BTreeMap<u64, r2source::Citation>;
 
 /// The tables a survey's walk followed: none asked yet, none to ask, or the read it followed.
 enum Tabled {
@@ -72,6 +77,8 @@ struct Knowing<'a> {
     program: &'a dyn crate::body::Program,
     thumb: bool,
     returns: &'a dyn Fn(u64, bool) -> bool,
+    /// The body's supervisor calls its own seal proves halting (D505).
+    halts: &'a BTreeMap<u64, r2source::Citation>,
 }
 
 impl crate::body::Program for Knowing<'_> {
@@ -109,6 +116,10 @@ impl crate::body::Program for Knowing<'_> {
 
     fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
         self.program.interrupt_halts(arch, vector)
+    }
+
+    fn supervisor_halts(&self, _entry: u64, instruction: u64) -> Option<r2source::Citation> {
+        self.halts.get(&instruction).copied()
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -165,10 +176,12 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
         thumb: bool,
         returns: &dyn Fn(u64, bool) -> bool,
     ) -> Result<Body, BodyError> {
+        let none = BTreeMap::new();
         let knowing = Knowing {
             program: &self.program,
             thumb,
             returns,
+            halts: &none,
         };
         let disasm = self.target(thumb).disasm;
         crate::body::lift_body(entry, disasm, &knowing, &BTreeMap::new())
@@ -208,10 +221,12 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             true => thumb && self.thumb.is_some(),
             false => self.program.thumb_at(address),
         };
+        let halts = Halts::default();
         let knowing = Knowing {
             program: &self.program,
             thumb,
             returns,
+            halts: &halts,
         };
         let disasm = self.target(thumb).disasm;
         let mut trace = Trace::start(address, disasm, &knowing).map_err(NativeRefusal::Body)?;
@@ -221,6 +236,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             trace,
             thumb,
             tables: Tabled::Unread,
+            halts,
         };
         Ok((walk, transfers))
     }
@@ -235,6 +251,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             program: &self.program,
             thumb: walk.thumb,
             returns,
+            halts: &walk.halts,
         };
         let disasm = self.target(walk.thumb).disasm;
         walk.trace.open(callee, disasm, &knowing);
@@ -270,6 +287,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             program: &self.program,
             thumb: walk.thumb,
             returns,
+            halts: &walk.halts,
         };
         let disasm = self.target(walk.thumb).disasm;
         let mut followed = false;
@@ -287,6 +305,40 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             tables = super::analysis::later_tables(self.program.db, key);
         }
         followed.then(|| Self::step(&mut walk.trace, walk.thumb))
+    }
+
+    fn may_halt(&self, walk: &BodyWalk) -> bool {
+        // A body still reading tables can grow past the seal, so only one with none is read.
+        !walk.trace.supervisor_calls().is_empty()
+            && walk.halts.is_empty()
+            && walk.trace.dispatches().next().is_none()
+    }
+
+    fn halt(&self, walk: &mut BodyWalk, returns: &dyn Fn(u64, bool) -> bool) -> Option<Transfers> {
+        if !self.may_halt(walk) {
+            return None;
+        }
+        let container = self.program.source().container();
+        let kernel = super::kernel(container);
+        let target = self.target(walk.thumb);
+        let arch = (container.arch.name.as_str(), container.arch.bits);
+        // Sealed as the walk reads it: the same returns, so the seal's graph is the walk's.
+        let body = self.lifted(walk.entry, walk.thumb, returns).ok()?;
+        let halts = crate::native::supervisor_halts(target, &self.program, kernel, arch, body);
+        if halts.is_empty() {
+            return None;
+        }
+        // The seal read the body walked to here; the walk again is its subgraph, so each constant holds.
+        let knowing = Knowing {
+            program: &self.program,
+            thumb: walk.thumb,
+            returns,
+            halts: &halts,
+        };
+        let mut trace = Trace::start(walk.entry, target.disasm, &knowing).ok()?;
+        let transfers = Self::step(&mut trace, walk.thumb);
+        (walk.trace, walk.halts, walk.tables) = (trace, halts, Tabled::Unread);
+        Some(transfers)
     }
 
     fn handed(&self, walk: &BodyWalk, returns: &dyn Fn(u64, bool) -> bool) -> Vec<(u64, bool)> {
