@@ -10,6 +10,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 
@@ -469,6 +470,18 @@ class Analysis(unittest.TestCase):
         )
         covered = [diff_r2.judgment_for(table, "a", "afl", item) is not None for item in found]
         self.assertEqual(covered, [True, False])
+
+
+
+class Sessions(unittest.TestCase):
+    def test_a_session_that_ended_before_its_deadline_fired_is_reaped_once(self):
+        # The deadline fires on a child that already exited; end() is still its one reaper.
+        session = diff_r2.Session([sys.executable, "-c", "pass"], 0.05)
+        session.send([])
+        time.sleep(0.3)
+        took, _, ended = session.end()
+        self.assertEqual(ended, "done")
+        self.assertGreaterEqual(took, 0.05)
 
 
 if __name__ == "__main__":

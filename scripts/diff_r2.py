@@ -75,6 +75,7 @@ import fnmatch
 import json
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -1019,8 +1020,15 @@ class Session:
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, errors="surrogateescape",
         )
-        self.timer = threading.Timer(timeout, self.process.kill)
+        self.lock, self.reaped = threading.Lock(), False
+        self.timer = threading.Timer(timeout, self.kill)
         self.timer.start()
+
+    def kill(self):
+        """The deadline: SIGKILL while end() has not reaped the child, so its pid is still this child's."""
+        with self.lock:
+            if not self.reaped:
+                os.kill(self.process.pid, signal.SIGKILL)
 
     def send(self, lines):
         """Write on a thread of its own: a tool answering while its pipe is full blocks the writer."""
@@ -1055,8 +1063,12 @@ class Session:
         except OSError:
             pass
         self.process.stdout.read()
-        _, status, usage = os.wait4(self.process.pid, 0)
+        # Exited and still a zombie (WNOWAIT): the deadline may signal it until the flag is set.
+        os.waitid(os.P_PID, self.process.pid, os.WEXITED | os.WNOWAIT)
+        with self.lock:
+            self.reaped = True
         self.timer.cancel()
+        _, status, usage = os.wait4(self.process.pid, 0)
         self.process.returncode = status
         took = time.monotonic() - self.started
         ended = "done" if status == 0 else "timeout" if took >= self.timeout else "died"
