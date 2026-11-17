@@ -5,14 +5,14 @@ use r2abi::{CLibrary, Dll, Halt, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
 const CITED: [(&str, usize); 8] = [
-    ("types-posix.sdb.txt", 515),
-    ("types-glibc.sdb.txt", 85),
-    ("types-bionic.sdb.txt", 100),
-    ("types-musl.sdb.txt", 3),
-    ("types-kernel32.sdb.txt", 50),
+    ("types-posix.sdb.txt", 525),
+    ("types-glibc.sdb.txt", 149),
+    ("types-bionic.sdb.txt", 143),
+    ("types-musl.sdb.txt", 8),
+    ("types-kernel32.sdb.txt", 53),
     ("types-ucrt.sdb.txt", 1),
-    ("types-cxx-cited.sdb.txt", 30),
-    ("types-darwin-cited.sdb.txt", 4),
+    ("types-cxx-cited.sdb.txt", 32),
+    ("types-darwin-cited.sdb.txt", 40),
 ];
 const UNCITED: [&str; 6] = [
     "types.sdb.txt",
@@ -109,10 +109,10 @@ fn every_row_cites_its_header() {
 /// Each uncited table's rows, with the most `uncited-rows.txt` may list for it: each only falls
 /// (ROADMAP D242, D395).
 const UNCITED_CAPS: [(&str, usize); 6] = [
-    ("types.sdb.txt", 98),
-    ("types-linux.sdb.txt", 13),
-    ("types-cxx.sdb.txt", 44),
-    ("types-darwin.sdb.txt", 39),
+    ("types.sdb.txt", 55),
+    ("types-linux.sdb.txt", 3),
+    ("types-cxx.sdb.txt", 42),
+    ("types-darwin.sdb.txt", 37),
     ("types-android.sdb.txt", 2),
     ("types-objc.sdb.txt", 7),
 ];
@@ -586,7 +586,7 @@ fn the_rows_a_header_states_are_cited_where_they_bind() {
         let lines = section.unwrap_or_default().lines().skip(1);
         lines.filter(|line| line.contains(" | ")).count()
     };
-    assert!(count("types.sdb.txt,") <= 57, "{}", count("types.sdb.txt,"));
-    assert!(count("types-linux.sdb.txt,") <= 5);
-    assert!(count("types-cxx.sdb.txt,") <= 43);
+    assert!(count("types.sdb.txt,") <= 55, "{}", count("types.sdb.txt,"));
+    assert!(count("types-linux.sdb.txt,") <= 3);
+    assert!(count("types-cxx.sdb.txt,") <= 42);
 }
