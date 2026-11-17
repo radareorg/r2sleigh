@@ -167,6 +167,21 @@ entries` before.
   `ret` ends its block and an x86 `call` is followed by its `CallRestore`, so
   the solve crosses no transfer. gzdoom's AArch64 case fell from 34.9 to 3.3 s.
 
+- D471, frame isolation (user ruling 2026-11-16): `Premise::FrameIsolation` is
+  granted by default (`r2engine::native::accepted_premises`, withdrawn per
+  request from `NativeTarget::premises`). The code is compiler output, so a
+  callee writes its caller's frame only through an address the caller exposed
+  or in a stack parameter home its contract states, and no caller reads a
+  parameter home back; C17 6.5.6p8 and psABI 3.2.2 motivate it. The frame walk
+  bounds a call site whose target is no address to `(i64::MIN, base)`, the
+  call's own push and its callee's frame, where nothing states its writes;
+  exposure stays the escape walk's, so a handed, escaped or globally stored
+  slot keeps its load. A walked callee's stated write still kills. The walk
+  sets `FramePoints::isolated` where the premise bounded an indirect call's
+  write over a loaded place (`O(places + calls log places)`), and the function
+  names the premise exactly there. D378's kinds E and O wait on a premise
+  witness in the callee's statement.
+
 ## Left
 
 - Extent, amended (2026-10-07, user decision "assume and label"): where

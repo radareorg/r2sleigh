@@ -1090,12 +1090,15 @@ fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
     assert!(meter.reloaded <= meter.reload_bound, "{meter:?}");
 }
 
-/// An unstated call between the spill and the reloads may write the slot: it stays in memory.
+/// An indirect call between the spill and the reloads writes no slot the function did not
+/// expose under frame isolation (user ruling 2026-11-16): each reload is the stored literal and
+/// the proof line names the premise. Withdrawn, the slot stays memory (`native.rs` D471 gates).
 #[test]
-fn a_format_reloaded_past_an_unstated_call_stays_in_memory() {
+fn a_format_reloaded_past_an_indirect_call_is_its_literal_under_frame_isolation() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
-    assert!(text.contains("format_argument_not_literal"), "{text}");
-    assert!(text.contains("frame + 16U"), "{text}");
+    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("frame + 16U"), "{text}");
+    assert!(text.contains("(assuming frame-isolation)"), "{text}");
 }
 
 /// `cbz x0` skips the spill: no store reaches the reload on that path, so the format is no

@@ -4548,7 +4548,17 @@ impl SSAFunction {
 
     /// The frame walk's points decided again where a restatement keeps the build (D365).
     pub(crate) fn restate_frame_points(&mut self, points: crate::semantic::FramePoints) {
+        self.note_isolation(&points);
         self.frame_points = Some(Arc::new(points));
+    }
+
+    /// The frame walk's decision rests on frame isolation exactly where its points say so (D471).
+    fn note_isolation(&mut self, points: &crate::semantic::FramePoints) {
+        let premise = r2source::Premise::FrameIsolation;
+        match points.isolated() {
+            true => self.premises.insert(premise),
+            false => self.premises.remove(&premise),
+        };
     }
 
     /// What the frame's addresses do, by entry offset; none where no walk ran (the whole frame).
@@ -4563,6 +4573,7 @@ impl SSAFunction {
             crate::semantic::FramePoints,
         ),
     ) {
+        self.note_isolation(&points);
         self.frame_points = Some(Arc::new(points));
         let arena = self.arena();
         self.promoted_slots = (ops.iter())

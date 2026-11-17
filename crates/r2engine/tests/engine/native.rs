@@ -181,6 +181,7 @@ impl Machine {
             imports: &self.imports,
             declarations: &self.declarations,
             data_model: None,
+            premises: r2engine::native::accepted_premises(),
         }
     }
 
@@ -4959,7 +4960,7 @@ fn an_unmodelled_user_operation_is_a_gap_by_name() {
         "{text}"
     );
     assert!(
-        text.contains("return (uint64_t)((__uint128_t)r2sleigh_residual_u128("),
+        text.contains("return (uint64_t)r2sleigh_residual_u128("),
         "{text}"
     );
 }
@@ -6702,8 +6703,15 @@ const READ_BACK_PAST_AN_INDIRECT_CALL: &[u8] = &[
     0xc3, // 1016 ret
 ];
 
-/// A call nothing states may take its arguments on the stack up to the entry pointer and write
-/// them, so the local read after it is memory (D369, default-deny).
+/// The engine's premises without frame isolation: what a request that withdraws it decides.
+fn without_isolation(machine: &Machine) -> NativeTarget<'_> {
+    let mut target = machine.target();
+    target.premises.remove(&r2source::Premise::FrameIsolation);
+    target
+}
+
+/// An indirect call writes no frame slot the function did not expose under frame isolation, so
+/// the 5 is read back; withdrawn, the call may rewrite its argument area (D369, D471).
 #[test]
 fn a_place_an_unstated_call_may_rewrite_stays_a_load() {
     let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
@@ -6713,8 +6721,24 @@ fn a_place_an_unstated_call_may_rewrite_stays_a_load() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
+    assert!(!text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+    assert!(text.contains("(assuming frame-isolation)"), "{text}");
+    let isolation = r2source::Premise::FrameIsolation;
+    assert!(
+        response.premises.contains(&isolation),
+        "{:?}",
+        response.premises
+    );
+    let withdrawn = decompile(&without_isolation(&machine), &program, BASE).expect("decompile");
+    let text = withdrawn.output.text();
     assert!(text.contains("r2sleigh_load_u32("), "{text}");
     assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+    assert!(
+        !withdrawn.premises.contains(&isolation),
+        "{:?}",
+        withdrawn.premises
+    );
 }
 
 /// `mov dword [rsp + 8], 5; call rdi; mov dword [rsp + 8], 7; mov eax, [rsp + 8]`.
@@ -6757,7 +6781,8 @@ const STORED_ON_ONE_PATH_PAST_AN_INDIRECT_CALL: &[u8] = &[
     0xc3, // 1022 ret
 ];
 
-/// A kill on one path only leaves the call's write reaching the load on the other (D427).
+/// Under frame isolation the load reads 5 or 7 by path; withdrawn, a kill on one path only leaves
+/// the call's write reaching the load on the other (D427, D471).
 #[test]
 fn a_place_stored_on_one_path_after_an_unstated_call_stays_a_load() {
     let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
@@ -6767,7 +6792,87 @@ fn a_place_stored_on_one_path_after_an_unstated_call_stays_a_load() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let text = response.output.text();
+    assert!(!text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(text.contains("5") && text.contains("7"), "{text}");
+    let isolation = r2source::Premise::FrameIsolation;
+    assert!(
+        response.premises.contains(&isolation),
+        "{:?}",
+        response.premises
+    );
+    let withdrawn = decompile(&without_isolation(&machine), &program, BASE).expect("decompile");
+    let text = withdrawn.output.text();
     assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// `mov dword [rsp + 8], 5; lea rsi, [rsp + 8]; call rdi; mov eax, [rsp + 8]`: the call is handed
+/// the slot's address.
+const READ_BACK_PAST_AN_INDIRECT_CALL_HANDED_THE_SLOT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0x48, 0x8d, 0x74, 0x24, 0x08, // 100c lea rsi, [rsp + 8]
+    0xff, 0xd7, // 1011 call rdi
+    0x8b, 0x44, 0x24, 0x08, // 1013 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1017 add rsp, 0x18
+    0xc3, // 101b ret
+];
+
+/// `mov dword [rsp + 8], 5; mov rbx, rdi; lea rdi, [rsp + 8]; call rsi; call rbx; mov eax,
+/// [rsp + 8]`: an earlier call is handed the slot's address and may keep it.
+const READ_BACK_PAST_AN_INDIRECT_CALL_AFTER_THE_SLOT_ESCAPED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0x48, 0x89, 0xfb, // 100c mov rbx, rdi
+    0x48, 0x8d, 0x7c, 0x24, 0x08, // 100f lea rdi, [rsp + 8]
+    0xff, 0xd6, // 1014 call rsi
+    0xff, 0xd3, // 1016 call rbx
+    0x8b, 0x44, 0x24, 0x08, // 1018 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101c add rsp, 0x18
+    0xc3, // 1020 ret
+];
+
+/// `mov dword [rsp + 8], 5; lea rax, [rsp + 8]; mov [0x2000], rax; call rdi; mov eax, [rsp + 8]`:
+/// the slot's address is stored to a global before the call.
+const READ_BACK_PAST_AN_INDIRECT_CALL_AFTER_A_GLOBAL_HOLDS_THE_SLOT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0x48, 0x8d, 0x44, 0x24, 0x08, // 100c lea rax, [rsp + 8]
+    0x48, 0x89, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // 1011 mov [0x2000], rax
+    0xff, 0xd7, // 1019 call rdi
+    0x8b, 0x44, 0x24, 0x08, // 101b mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101f add rsp, 0x18
+    0xc3, // 1023 ret
+];
+
+/// Frame isolation lets a call write a slot whose address the function exposed: handed to it, to
+/// an earlier call or stored to a global, the slot is read back as memory (D471, default-deny).
+#[test]
+fn a_slot_an_indirect_call_may_reach_through_an_exposed_address_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let fixtures = [
+        (READ_BACK_PAST_AN_INDIRECT_CALL_HANDED_THE_SLOT, "handed"),
+        (
+            READ_BACK_PAST_AN_INDIRECT_CALL_AFTER_THE_SLOT_ESCAPED,
+            "escaped",
+        ),
+        (
+            READ_BACK_PAST_AN_INDIRECT_CALL_AFTER_A_GLOBAL_HOLDS_THE_SLOT,
+            "global",
+        ),
+    ];
+    for (bytes, name) in fixtures {
+        let program = Fixture {
+            bytes: bytes.to_vec(),
+            name,
+        };
+        let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+        let text = response.output.text();
+        assert!(text.contains("r2sleigh_load_u32("), "{name}: {text}");
+        assert!(
+            !text.contains("return r2sleigh_carrier_u32(5)"),
+            "{name}: {text}"
+        );
+    }
 }
 
 /// `mov dword [rsp - 16], 5; call rdi; mov eax, [rsp - 16]`: the place lies below the call's

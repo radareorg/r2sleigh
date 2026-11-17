@@ -307,11 +307,12 @@ pub(super) fn extract((wide, bits): (u32, u32), input: CExpr, lsb: u32) -> Optio
     if self::wide(wide) {
         return wide_extract(wide, bits, input, lsb);
     }
-    let shifted = binary(
-        BinaryOp::Shr,
-        cast(integer(wide)?, input),
-        CExpr::UIntLit(u64::from(lsb)),
-    );
+    let input = cast(integer(wide)?, input);
+    // A read at bit 0 is the truncation alone (D540).
+    let shifted = match lsb {
+        0 => input,
+        _ => binary(BinaryOp::Shr, input, CExpr::UIntLit(u64::from(lsb))),
+    };
     Some(cast(integer(bits)?, shifted))
 }
 
@@ -391,28 +392,152 @@ fn compare(
     Some(cast(integer(result_bits)?, test))
 }
 
+/// What a shift count is known to be: at most `at_most`, and `exactly` where a literal states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Count {
+    at_most: u128,
+    exactly: Option<u128>,
+}
+
+impl Count {
+    /// A count of `bits` no literal states: any value its width holds.
+    fn any(bits: u32) -> Self {
+        let at_most = u128::MAX
+            .checked_shr(128u32.saturating_sub(bits))
+            .unwrap_or(u128::MAX);
+        Self {
+            at_most,
+            exactly: None,
+        }
+    }
+
+    fn literal(value: u128) -> Self {
+        Self {
+            at_most: value,
+            exactly: Some(value),
+        }
+    }
+
+    /// `x & mask`, which never exceeds `mask`.
+    fn masked(mask: u128) -> Self {
+        Self {
+            at_most: mask,
+            exactly: None,
+        }
+    }
+}
+
+/// Which arm of a `bits`-wide shift the machine takes for every count `count` admits (D540).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The count is 0: the value itself.
+    Operand,
+    /// The count is below the width.
+    Shifted,
+    /// The count is at or past the width.
+    Past,
+    /// Either: the count is tested before the shift runs.
+    Guarded,
+}
+
+fn reach(overshift: MachineOvershiftBehavior, bits: u32, count: Count) -> Reach {
+    let width = u128::from(bits);
+    let effective = match overshift {
+        MachineOvershiftBehavior::MaskCount => count.exactly.map(|c| c & (width - 1)),
+        _ => count.exactly,
+    };
+    match overshift {
+        _ if count.at_most == 0 || effective == Some(0) => Reach::Operand,
+        MachineOvershiftBehavior::MaskCount => Reach::Shifted,
+        _ if count.at_most < width => Reach::Shifted,
+        _ if count.exactly.is_some_and(|c| c >= width) => Reach::Past,
+        _ => Reach::Guarded,
+    }
+}
+
+#[cfg(kani)]
+mod kani_proofs {
+    //! D540: the arm `reach` picks is the one the machine takes for every count the fact admits.
+    use super::{Count, Reach, reach};
+    use r2ssa::MachineOvershiftBehavior::{MaskCount, SignFill, Zero};
+
+    #[kani::proof]
+    fn a_folded_shift_arm_holds_for_every_admitted_count() {
+        let bits: u32 = kani::any();
+        kani::assume(matches!(bits, 8 | 16 | 32 | 64 | 128));
+        let (bound, count, literal): (u128, u128, bool) = (kani::any(), kani::any(), kani::any());
+        let fact = match literal {
+            true => Count::literal(bound),
+            false => Count::masked(bound),
+        };
+        kani::assume(count <= bound && (!literal || count == bound));
+        let overshift = if kani::any() { Zero } else { SignFill };
+        match reach(overshift, bits, fact) {
+            Reach::Operand => assert!(count == 0),
+            Reach::Shifted => assert!(count < u128::from(bits)),
+            Reach::Past => assert!(count >= u128::from(bits)),
+            Reach::Guarded => {}
+        }
+        // A masking machine shifts by the count's low bits, which the C mask spells.
+        let masked = count & (u128::from(bits) - 1);
+        match reach(MaskCount, bits, fact) {
+            Reach::Operand => assert!(masked == 0),
+            Reach::Shifted => {}
+            Reach::Past | Reach::Guarded => panic!("a masked count never reaches the width"),
+        }
+    }
+}
+
 /// A shift of a `bits`-wide value, with the machine's answer where the count reaches the width.
 fn shift(
     kind: MachineShiftKind,
     overshift: MachineOvershiftBehavior,
-    (bits, count_bits): (u32, u32),
+    (bits, count_bits, known): (u32, u32, Count),
     value: CExpr,
     count: CExpr,
 ) -> Option<CExpr> {
     let ty = integer(bits)?;
+    let reach = match overshift {
+        MachineOvershiftBehavior::MaskCount if bits.is_power_of_two() => {
+            reach(overshift, bits, known)
+        }
+        MachineOvershiftBehavior::MaskCount | MachineOvershiftBehavior::Checked => return None,
+        MachineOvershiftBehavior::Zero | MachineOvershiftBehavior::SignFill => {
+            reach(overshift, bits, known)
+        }
+    };
+    let past = || match (overshift, kind) {
+        (MachineOvershiftBehavior::SignFill, MachineShiftKind::ArithmeticRight) => {
+            let negative = binary(
+                BinaryOp::Lt,
+                cast(signed(bits)?, value.clone()),
+                cast(signed(bits)?, CExpr::UIntLit(0)),
+            );
+            Some(CExpr::Ternary {
+                cond: Box::new(negative),
+                then_expr: Box::new(cast(ty.clone(), CExpr::UIntLit(u64::MAX))),
+                else_expr: Box::new(cast(ty.clone(), CExpr::UIntLit(0))),
+            })
+        }
+        _ => Some(cast(ty.clone(), CExpr::UIntLit(0))),
+    };
+    match reach {
+        Reach::Operand => return Some(cast(ty, value)),
+        Reach::Past => return past(),
+        Reach::Shifted | Reach::Guarded => {}
+    }
     let wide = integer(computed(bits))?;
     // The count keeps its own width, so a count past the value's width is never truncated into it.
     let counted = integer(computed(bits.max(count_bits)))?;
     let count = cast(counted.clone(), count);
     let width = cast(counted.clone(), CExpr::UIntLit(u64::from(bits)));
     let count = match overshift {
-        MachineOvershiftBehavior::MaskCount if bits.is_power_of_two() => binary(
+        MachineOvershiftBehavior::MaskCount => binary(
             BinaryOp::BitAnd,
             count,
             cast(counted, CExpr::UIntLit(u64::from(bits - 1))),
         ),
-        MachineOvershiftBehavior::MaskCount | MachineOvershiftBehavior::Checked => return None,
-        MachineOvershiftBehavior::Zero | MachineOvershiftBehavior::SignFill => count,
+        _ => count,
     };
     let shifted = match kind {
         MachineShiftKind::Left => cast(
@@ -430,26 +555,13 @@ fn shift(
             cast(ty.clone(), binary(BinaryOp::Shr, value, count.clone()))
         }
     };
-    let past = match (overshift, kind) {
-        (MachineOvershiftBehavior::MaskCount, _) => return Some(shifted),
-        (MachineOvershiftBehavior::SignFill, MachineShiftKind::ArithmeticRight) => {
-            let negative = binary(
-                BinaryOp::Lt,
-                cast(signed(bits)?, value),
-                cast(signed(bits)?, CExpr::UIntLit(0)),
-            );
-            CExpr::Ternary {
-                cond: Box::new(negative),
-                then_expr: Box::new(cast(ty.clone(), CExpr::UIntLit(u64::MAX))),
-                else_expr: Box::new(cast(ty, CExpr::UIntLit(0))),
-            }
-        }
-        _ => cast(ty, CExpr::UIntLit(0)),
-    };
+    if reach == Reach::Shifted {
+        return Some(shifted);
+    }
     // The count is tested before the shift runs, so C never shifts by its width or more.
     Some(CExpr::Ternary {
         cond: Box::new(binary(BinaryOp::Ge, count, width)),
-        then_expr: Box::new(past),
+        then_expr: Box::new(past()?),
         else_expr: Box::new(shifted),
     })
 }
@@ -883,7 +995,7 @@ impl Spell<'_> {
             } => shift(
                 kind,
                 overshift,
-                (bits, child_bits(count)),
+                (bits, child_bits(count), self.count(count)),
                 child(value)?,
                 child(count)?,
             ),
@@ -925,6 +1037,46 @@ impl Spell<'_> {
                 float_compare(op, bits, child(left)?, child(right)?)
             }
         }
+    }
+
+    /// What a shift count term states of its value: a literal, or a literal mask one level down.
+    fn count(&self, id: TermId) -> Count {
+        let term = self.arena.term(id);
+        let literal = |id: TermId| match self.arena.term(id).kind {
+            TermKind::Literal(value) => Some(u128::from(value.bits())),
+            _ => None,
+        };
+        match term.kind {
+            TermKind::Literal(value) => Count::literal(u128::from(value.bits())),
+            TermKind::Bitwise {
+                op: MachineBitwiseOp::And,
+                left,
+                right,
+            } => literal(right)
+                .or_else(|| literal(left))
+                .map_or_else(|| Count::any(term.ty.width_bits()), Count::masked),
+            TermKind::Leaf(LeafRead { expr, .. }) | TermKind::Opaque(expr) => self
+                .machine_count(expr)
+                .unwrap_or_else(|| Count::any(term.ty.width_bits())),
+            _ => Count::any(term.ty.width_bits()),
+        }
+    }
+
+    /// What a machine shift count states of its value, as [`Self::count`] reads a term.
+    fn machine_count(&self, id: MachineExprId) -> Option<Count> {
+        let node = self.projection.expr(id)?;
+        Some(match node.kind() {
+            MachineExprKind::Constant { value, .. } => Count::literal(u128::from(value.bits())),
+            MachineExprKind::Bitwise {
+                op: MachineBitwiseOp::And,
+                left,
+                right,
+            } => self
+                .constant(*right)
+                .or_else(|| self.constant(*left))
+                .map_or_else(|| Count::any(node.ty().width_bits()), Count::masked),
+            _ => Count::any(node.ty().width_bits()),
+        })
     }
 
     /// A machine expression as C: what an opaque term or a leaf stands for.
@@ -1090,7 +1242,7 @@ impl Spell<'_> {
             } => shift(
                 *kind,
                 *overshift,
-                (bits, child_bits(*count)?),
+                (bits, child_bits(*count)?, self.machine_count(*count)?),
                 child(*value)?,
                 child(*count)?,
             ),
@@ -1234,5 +1386,203 @@ mod tests {
                 .subscript((base, below), 8, Some(ObjectId(3)))
                 .is_none()
         );
+    }
+
+    /// A spelled shift of a 32-bit object address by `count`, through the term path.
+    fn spelled_shift(count: impl FnOnce(&mut TermArena) -> r2rewrite::TermId) -> String {
+        let word = MachineType::Integer {
+            width_bits: 32,
+            signedness: r2ssa::MachineSignedness::Unsigned,
+        };
+        let mut block = r2il::R2ILBlock::new(0x1000, 4);
+        block.push(r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::unique(0x100, 8),
+            src: r2il::Varnode::constant(0, 8),
+        });
+        let artifact = r2ssa::SsaArtifact::from_blocks(&[block], None).expect("an artifact");
+        let projection = r2ssa::MachineProjection::from_artifact(&artifact).expect("a projection");
+        let mut arena = TermArena::new();
+        let value = arena.intern(word, TermKind::ObjectAddress(ObjectId(3)));
+        let count = count(&mut arena);
+        let shifted = arena.intern(
+            word,
+            TermKind::Shift {
+                kind: r2ssa::MachineShiftKind::Left,
+                overshift: r2ssa::MachineOvershiftBehavior::Zero,
+                value,
+                count,
+            },
+        );
+        let spell = super::Spell {
+            projection: &projection,
+            arena: &arena,
+            bound: &|_, _| None,
+            object: &|_| {
+                Some(super::Placed {
+                    base: crate::ast::CExpr::UIntLit(0x40),
+                    extent: 16,
+                })
+            },
+            global: &|_, _, _| None,
+            little_endian: true,
+            return_address: None,
+            caller: &|_, _| None,
+            member: &|_| None,
+        };
+        format!("{:?}", spell.term(shifted).expect("spelled"))
+    }
+
+    fn word_literal(arena: &mut TermArena, value: u64) -> r2rewrite::TermId {
+        let value = MachineBitVector::new(32, value).expect("a 32-bit literal");
+        arena.intern(
+            MachineType::Integer {
+                width_bits: 32,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            },
+            TermKind::Literal(value),
+        )
+    }
+
+    /// D540: `x << 8` at 32 bits never reaches the width, so it prints no count test.
+    #[test]
+    fn a_shift_by_a_literal_below_the_width_prints_no_guard() {
+        let spelled = spelled_shift(|arena| word_literal(arena, 8));
+        assert!(!spelled.contains("Ternary"), "{spelled}");
+        assert!(spelled.contains("Shl"), "{spelled}");
+    }
+
+    /// D540: `x << (y & 31)` at 32 bits never reaches the width either.
+    #[test]
+    fn a_shift_by_a_count_masked_below_the_width_prints_no_guard() {
+        let spelled = spelled_shift(|arena| {
+            let word = MachineType::Integer {
+                width_bits: 32,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            };
+            let y = arena.intern(word, TermKind::ObjectAddress(ObjectId(3)));
+            let mask = word_literal(arena, 31);
+            arena.intern(
+                word,
+                TermKind::Bitwise {
+                    op: r2ssa::MachineBitwiseOp::And,
+                    left: y,
+                    right: mask,
+                },
+            )
+        });
+        assert!(!spelled.contains("Ternary"), "{spelled}");
+    }
+
+    /// D540: a shift by 32 at 32 bits is the machine's past-the-width answer, 0, and no shift.
+    #[test]
+    fn a_shift_by_a_literal_at_the_width_prints_the_past_answer_alone() {
+        let spelled = spelled_shift(|arena| word_literal(arena, 32));
+        assert!(
+            !spelled.contains("Ternary") && !spelled.contains("Shl"),
+            "{spelled}"
+        );
+    }
+
+    /// D540: a shift by 0 is its operand.
+    #[test]
+    fn a_shift_by_zero_prints_its_operand() {
+        let spelled = spelled_shift(|arena| word_literal(arena, 0));
+        assert!(
+            !spelled.contains("Ternary") && !spelled.contains("Shl"),
+            "{spelled}"
+        );
+    }
+
+    /// D540: a read at bit 0 is a truncation and no shift.
+    #[test]
+    fn a_read_at_bit_zero_prints_no_shift() {
+        let read = super::extract((64, 32), crate::ast::CExpr::UIntLit(9), 0).expect("spelled");
+        assert!(!format!("{read:?}").contains("Shr"), "{read:?}");
+    }
+
+    /// D540: each fold's arm equals `r2il::eval` for every 8-bit value and every count it admits.
+    #[test]
+    fn each_shift_fold_matches_the_machine_at_eight_bits() {
+        use super::{Count, Reach, reach};
+        use r2il::eval::{Operation, Word, apply};
+        use r2ssa::MachineOvershiftBehavior::{SignFill, Zero};
+        let cases = [
+            (Operation::Left, Zero),
+            (Operation::Right, Zero),
+            (Operation::SRight, SignFill),
+        ];
+        // The C arm at the computed width, 32 bits, where `count` is below it.
+        let c_arm = |op: Operation, arm: Reach, x: u8, count: u128| -> u8 {
+            let shifted = |count: u32| match op {
+                Operation::Left => (u32::from(x) << count) as u8,
+                Operation::Right => (u32::from(x) >> count) as u8,
+                _ => (i32::from(x as i8) >> count) as u8,
+            };
+            let past = match op {
+                Operation::SRight if (x as i8) < 0 => 0xff,
+                _ => 0,
+            };
+            match arm {
+                Reach::Operand => x,
+                Reach::Past => past,
+                Reach::Shifted => shifted(u32::try_from(count).expect("below 32")),
+                Reach::Guarded if count >= 8 => past,
+                Reach::Guarded => shifted(u32::try_from(count).expect("below 8")),
+            }
+        };
+        let machine = |op: Operation, x: u8, count: u128| {
+            let x = Word::new(u128::from(x), 1).expect("a byte");
+            let count = Word::new(count, 1).expect("a byte");
+            apply(op, &[x, count], 1).expect("a value") as u8
+        };
+        // At 32 bits the computed width is the value's own, so a fold one past the width overflows.
+        for (op, overshift) in cases {
+            for x in [0u32, 1, 0x8000_0000, 0xdead_beef, u32::MAX] {
+                for c in 0..=255u128 {
+                    let want = apply(
+                        op,
+                        &[Word::new(x.into(), 4).unwrap(), Word::new(c, 4).unwrap()],
+                        4,
+                    );
+                    let past = match op {
+                        Operation::SRight if (x as i32) < 0 => u32::MAX,
+                        _ => 0,
+                    };
+                    let shifted = |c: u32| match op {
+                        Operation::Left => x.checked_shl(c),
+                        Operation::Right => x.checked_shr(c),
+                        _ => (x as i32).checked_shr(c).map(|v| v as u32),
+                    };
+                    let got = match reach(overshift, 32, Count::literal(c)) {
+                        Reach::Operand => Some(x),
+                        Reach::Past => Some(past),
+                        Reach::Shifted => shifted(c as u32),
+                        Reach::Guarded => None,
+                    };
+                    assert_eq!(got.map(u128::from), want.ok(), "{op:?} {x:#x} by {c}");
+                }
+            }
+        }
+        for (op, overshift) in cases {
+            let table: Vec<[u8; 256]> = (0..=u8::MAX)
+                .map(|x| std::array::from_fn(|c| machine(op, x, c as u128)))
+                .collect();
+            let any = reach(overshift, 8, Count::any(8));
+            for (x, row) in (0..=u8::MAX).zip(&table) {
+                for (c, &want) in (0..=255u128).zip(row) {
+                    let literal = reach(overshift, 8, Count::literal(c));
+                    assert_eq!(c_arm(op, literal, x, c), want, "{op:?} {x} by {c}");
+                    assert_eq!(c_arm(op, any, x, c), want, "{op:?} {x} by any {c}");
+                }
+                for mask in 0..=255u128 {
+                    let masked = reach(overshift, 8, Count::masked(mask));
+                    for y in 0..=255u128 {
+                        let c = y & mask;
+                        let want = row[c as usize];
+                        assert_eq!(c_arm(op, masked, x, c), want, "{op:?} {x} by {y}&{mask}");
+                    }
+                }
+            }
+        }
     }
 }

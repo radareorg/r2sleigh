@@ -1,0 +1,163 @@
+# The `residual_uN(n) << 32` sites on DecBench, each judged (ROADMAP D211). `residual_shift_gate.py`
+# fails on a site no entry lists, an entry whose function holds none, more sites than listed, and a
+# `row` ROADMAP does not hold open.
+#
+# set, binary, address   the DecBench function (`O2` or `O2-noinline`, `<project>_<binary>`)
+# sites                  how many it holds
+# class                  what keeps the upper half residual
+# proof | row            a proof of irreducibility with its citation and witnesses, or the open row
+#
+# Entered at rd13-output-1 (master 718a898b2 with D540, D471): 19 functions, 24 sites. Each site
+# is an `int` result a caller reads at 64 bits, `(uint32_t)f() | residual << 32`.
+
+[[function]]
+set = "O2"
+binary = "findutils_find"
+address = "0xeaf0"
+sites = 1
+class = "upper half after fstat, proof unverified"
+row = "D555"
+
+[[function]]
+set = "O2-noinline"
+binary = "findutils_find"
+address = "0xf490"
+sites = 1
+class = "upper half after fstat, proof unverified"
+row = "D555"
+
+[[function]]
+set = "O2"
+binary = "diffutils_diff"
+address = "0x8f10"
+sites = 1
+class = "C2/C3/C5 caller read"
+row = "D413"
+
+[[function]]
+set = "O2-noinline"
+binary = "diffutils_diff"
+address = "0x8df0"
+sites = 5
+class = "C2/C3/C5 caller read"
+row = "D413"
+
+[[function]]
+set = "O2"
+binary = "findutils_find"
+address = "0xbb90"
+sites = 1
+class = "C2/C3/C5 caller read"
+row = "D413"
+
+[[function]]
+set = "O2-noinline"
+binary = "findutils_find"
+address = "0xca40"
+sites = 1
+class = "C2/C3/C5 caller read"
+row = "D413"
+
+[[function]]
+set = "O2-noinline"
+binary = "findutils_find"
+address = "0xaed0"
+sites = 1
+class = "C2/C3/C5 caller read"
+row = "D413"
+
+[[function]]
+set = "O2-noinline"
+binary = "grep_grep"
+address = "0xc970"
+sites = 1
+class = "C2/C3/C5 caller read"
+row = "D413"
+
+[[function]]
+set = "O2-noinline"
+binary = "gzip_gzip"
+address = "0xe4d0"
+sites = 1
+class = "callee read is its decided seal (C5)"
+row = "D455"
+
+[[function]]
+set = "O2"
+binary = "grep_grep"
+address = "0x8030"
+sites = 1
+class = "entry-valued immediate"
+row = "D453"
+
+[[function]]
+set = "O2"
+binary = "findutils_find"
+address = "0x11730"
+sites = 1
+class = "written global code slot"
+row = "D543"
+
+[[function]]
+set = "O2-noinline"
+binary = "findutils_find"
+address = "0xead0"
+sites = 1
+class = "written global code slot"
+row = "D543"
+
+[[function]]
+set = "O2-noinline"
+binary = "findutils_find"
+address = "0x13050"
+sites = 1
+class = "written global code slot"
+row = "D543"
+
+[[function]]
+set = "O2-noinline"
+binary = "diffutils_sdiff"
+address = "0x4330"
+sites = 2
+class = "written global code slot"
+row = "D543"
+
+[[function]]
+set = "O2"
+binary = "libexpat_xmlwf"
+address = "0x3800"
+sites = 1
+class = "libexpat handler binding (C4)"
+row = "D544"
+
+[[function]]
+set = "O2"
+binary = "libexpat_xmlwf"
+address = "0x3a70"
+sites = 1
+class = "libexpat handler binding (C4)"
+row = "D544"
+
+[[function]]
+set = "O2-noinline"
+binary = "libexpat_xmlwf"
+address = "0x3710"
+sites = 1
+class = "libexpat handler binding (C4)"
+row = "D544"
+
+[[function]]
+set = "O2-noinline"
+binary = "libexpat_xmlwf"
+address = "0x3980"
+sites = 1
+class = "libexpat handler binding (C4)"
+row = "D544"
+
+[[function]]
+set = "O2"
+binary = "grep_grep"
+address = "0x8150"
+sites = 1
+class = "pushed slot no call reads"
+row = "D545"
