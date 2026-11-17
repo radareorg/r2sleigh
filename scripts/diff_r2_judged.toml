@@ -2396,6 +2396,46 @@ r2 = '^(var int64_t var_1010h @ rbp\-0x1010|var int64_t var_9fh @ rsp\+0x9f)$'
 verdict = "r2-right"
 reason = "class E: an address-taken frame region with no object in afv. bashbot.x86_64.O0.elf 0x2e59 `lea rax, [rbp-0x1010]` (four times) hands a 4,096-byte buffer to callees; libstdc++.so.6 0x11004e `lea rsi, [rsp+0x9f]` hands a byte. radare2 lists var_1010h and var_9fh; afv states nothing at or around them. Owner ROADMAP D513"
 
+[[judged]]
+command = "aoj"
+binaries = ["libmemalloc-dump-mem"]
+arch = '^ARM'
+lacking = "r2"
+theirs = '^$'
+verdict = "r2s-right"
+reason = "radare2 6.2.4 `aeaj 1` prints nothing anywhere in this image after `aei; aeim` (asm.bits 16 or 32), while its `aoj` decodes the same instruction with its ESIL (0x1212 `mov r4, r1`: `r1,r4,=`); r2s states each sampled instruction's reads and writes from the IL. Sampled since D542 states the image's dynamic symbols (23 section headers, none SHT_DYNSYM; DT_HASH count)"
+
+[[judged]]
+command = "afb"
+binaries = "libarm64.so"
+corpus = "elf"
+function = 'sym\.Java_o__003dc_e$'
+lacking = "r2s"
+verdict = "r2-right"
+row = "D550"
+reason = "class C: libarm64.so 0xaab0 `br x8` after `ldrsw x8, [x24, x8, lsl 2]; add x8, x8, x24`, the index masked by `and w8, w8, 7` and bounded by `cmp w8, 7; b.eq 0xab60`: r2s leaves UnresolvedIndirectBranch at 0xaaa8 and walks 132 of the 1,176 bytes the symbol states; radare2 follows the 7 arms (48 blocks). Sampled since D542 lists Java_o__003dc_e. Owner ROADMAP D550"
+
+[[judged]]
+command = "afv"
+binaries = "libarm64.so"
+corpus = "elf"
+function = 'sym\.Java_o__003dc_e$'
+lacking = "r2s"
+verdict = "r2-right"
+row = "D550"
+reason = "class C: the frame accesses and the x0 and x2 reads radare2 lists lie past the unresolved table at 0xaab0 r2s does not walk (var_88h..var_5ch @ x29-0x88..-0x5c, arg x0 and x2). Owner ROADMAP D550"
+
+[[judged]]
+command = "afv"
+binaries = "libarm64.so"
+corpus = "elf"
+function = 'sym\.Java_o__003dc_e$'
+lacking = "r2"
+r2s = '^var uint64_t stack_m(96|88|72|56|40|24|8) @ entry\.sp-0x(60|58|48|38|28|18|8)$'
+verdict = "r2-right"
+row = "D508"
+reason = "class E: libarm64.so 0xaa20..0xaa34 `stp x28, x27, [sp, -0x60]!` .. `stp x29, x30, [sp, 0x50]` save callee-saved registers; r2s lists save slots as locals (entry.sp-0x60 x28 .. entry.sp-0x8 x30). Owner ROADMAP D508"
+
 # ── Judged radare2-only values (D541) ──
 
 [[missed]]
