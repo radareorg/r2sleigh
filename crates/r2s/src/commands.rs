@@ -289,7 +289,7 @@ pub(crate) const VERBS: &[Verb] = &[
         ["aa"],
         None,
         Public,
-        "analyse every function: each rendering then reads its callers too",
+        "survey the program once: later answers are faster, never different",
         Some(|session, _| session.program.analyse_program().map(|()| String::new()))
     ),
     verb!(

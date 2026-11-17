@@ -131,7 +131,7 @@ pub trait Program: crate::body::Program {
     }
 
     /// What the closed world's `CallBoundary` decided of the result of the function at `entry`, from
-    /// its open read's supply; none outside `aa` (doc/adr-result-side.md, section 3; D317).
+    /// its open read's supply (doc/adr-result-side.md, section 3; D317).
     fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedDecision> {
         None
     }
@@ -141,14 +141,8 @@ pub trait Program: crate::body::Program {
     /// A callee is prepared against the program and its imports alone, never
     /// against a body of whichever root calls it, so what it proves is a fact
     /// about the callee and the state of the program, and a program that holds
-    /// one per state need derive it only once. Under `aa` (`callers`) a program
-    /// may resolve it against its owners first.
-    fn read_callee(
-        &self,
-        _address: u64,
-        _callers: crate::program::World,
-        read: &mut dyn FnMut() -> CalleeRead,
-    ) -> Arc<CalleeRead> {
+    /// one per state need derive it only once. A program may resolve it against its owners first.
+    fn read_callee(&self, _address: u64, read: &mut dyn FnMut() -> CalleeRead) -> Arc<CalleeRead> {
         Arc::new(read())
     }
 
@@ -516,18 +510,16 @@ pub fn analysed(
     entry: u64,
 ) -> Result<Prepared, NativeRefusal> {
     let walk = walk(target, program, entry)?;
-    analyse(target, program, entry, &walk, crate::program::World::Closed)
+    analyse(target, program, entry, &walk)
 }
 
-/// Prepare one function from its walk, reading its callers where `callers` says; the query
-/// `Analysed` reads the walk from `Walked`.
+/// Prepare one function from its walk; the query `Analysed` reads the walk from `Walked`.
 pub(crate) fn analysed_from(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     (entry, walk): (u64, &Walk),
-    callers: crate::program::World,
 ) -> Result<Prepared, NativeRefusal> {
-    analyse(target, program, entry, walk, callers)
+    analyse(target, program, entry, walk)
 }
 
 /// What a prepared function keeps of its walk once the lift is read: block extents and successors,
@@ -1446,7 +1438,8 @@ pub(crate) type AssumedMember = (
 pub(crate) struct Stated<'a> {
     pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
     pub(crate) assumed: &'a [AssumedMember],
-    /// Under `aa` a callee's result is its closed-world `CallBoundary`'s, as the root's is.
+    /// A resolved callee's result is its closed-world `CallBoundary`'s, as the root's is; an alone
+    /// read is the open supply and reads none (D317).
     pub(crate) world: crate::program::World,
     /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
     /// (D376); an alone read (`CalleeReads`) asks none, so a statement reads no statement.
@@ -1573,15 +1566,6 @@ pub(crate) fn callee_read(
     )
 }
 
-/// A callee built against its imports alone, before its seal, with those imports: its interface
-/// names the owners of its result (doc/adr-callee-builds.md).
-pub(crate) struct Built {
-    address: u64,
-    construction: r2ssa::TrustedConstruction,
-    imports: Callees,
-    declared_root: Restatement,
-}
-
 /// A body's first seal, by its entry, and the declaration and closed decision it was captured
 /// under; `asked` is `None` where the decision was not asked before the seal.
 struct First {
@@ -1589,88 +1573,6 @@ struct First {
     declared_root: Restatement,
     seal: r2ssa::TrustedSeal,
     asked: Option<Option<r2source::SourceClosedDecision>>,
-}
-
-impl Built {
-    /// The interface the build recovered or was stated.
-    pub(crate) fn interface(&self) -> Option<&r2ssa::SourceFunctionInterface> {
-        self.construction.machine_context().function_interface()
-    }
-
-    /// Whether its owners' statements can update this build instead of building it again.
-    pub(crate) const fn restatable(&self) -> bool {
-        self.construction.restatable()
-    }
-}
-
-/// One callee built against its imports alone, or why it has no build: the first step of
-/// `callee_read`.
-pub(crate) fn callee_built(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    address: u64,
-    walked: &Walk,
-) -> Result<Built, Unreadable> {
-    let native = Native::over(target, program).map_err(|_| Unreadable::NotPrepared)?;
-    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
-    let built = crate::isolation::isolated(|| {
-        let mut imports = Callees::default();
-        let targets = reached(&walked.root.body, native.program);
-        declare_imports(&native, target, &targets, ptr_bits, &mut imports);
-        let declared_root = native.declaration(address);
-        let construction = native.construct_first(walked, &imports, &declared_root, None)?;
-        Ok(Built {
-            address,
-            construction,
-            imports,
-            declared_root,
-        })
-    });
-    match built {
-        Ok(built) => built.map_err(|refusal: NativeRefusal| unreadable(&refusal)),
-        Err(panicked) => Err(Unreadable::Panicked(panicked)),
-    }
-}
-
-/// Why a refused resolution is unread.
-fn unreadable(refusal: &NativeRefusal) -> Unreadable {
-    match refusal.stopped() {
-        true => Unreadable::Stopped,
-        false => Unreadable::NotPrepared,
-    }
-}
-
-/// `callee_read` against `owners` from a build their statements update (doc/adr-callee-builds.md).
-pub(crate) struct BuiltRead {
-    pub(crate) read: CalleeRead,
-    /// Its answer is another seal than that build's.
-    pub(crate) again: bool,
-}
-
-pub(crate) fn built_read(
-    target: &NativeTarget<'_>,
-    program: &dyn Program,
-    walked: &Walk,
-    built: Built,
-    owners: &[(u64, Arc<CalleeRead>)],
-) -> BuiltRead {
-    let Ok(native) = Native::over(target, program) else {
-        return BuiltRead {
-            read: CalleeRead {
-                interface: None,
-                facts: Err(Unreadable::NotPrepared),
-            },
-            again: false,
-        };
-    };
-    let resolved = crate::isolation::isolated(|| native.resolve_built(walked, built, owners));
-    let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
-    let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
-    let again = (resolved.as_ref()).is_ok_and(|(_, again)| *again);
-    BuiltRead {
-        read: read_of(&native, resolved.map(|(artifact, _)| artifact)),
-        again,
-    }
 }
 
 /// The declarations of the imports a resolved body calls directly. O(call sites x log rows).
@@ -1734,9 +1636,8 @@ fn read_of(native: &Native<'_>, resolved: Result<Resolution, Unreadable>) -> Cal
 fn read_callees(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
-    (root, entry): (&Walked, u64),
+    root: &Walked,
     ptr_bits: u32,
-    callers: crate::program::World,
 ) -> Read {
     // What a call takes and returns is a fact about the callee's body, so the
     // bodies it calls are walked first and the root is prepared against them.
@@ -1746,20 +1647,18 @@ fn read_callees(
     let targets = reached(&root.body, native.program);
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
-    // Under `aa` a recursive root reads itself resolved, as its callers do ("Arity").
-    let own = callers == crate::program::World::Closed;
     // An import has no body here, declared or not: its stub's arity is the loader's (P7). A
     // sealed import slot is a word of data.
     let bodies: Vec<u64> = targets
         .iter()
         .copied()
-        .filter(|address| (own || *address != entry) && !callees.interfaces.contains_key(address))
+        .filter(|address| !callees.interfaces.contains_key(address))
         .filter(|address| native.program.import_at(*address).is_none())
         .filter(|address| crate::stated::sealed_import(native.program, *address).is_none())
         .collect();
     let mut unread = Vec::new();
     for address in &bodies {
-        let read = native.program.read_callee(*address, callers, &mut || {
+        let read = native.program.read_callee(*address, &mut || {
             read_callee(native, target, *address, ptr_bits)
         });
         // Taking the interface keeps the call rendered as a call.
@@ -1769,9 +1668,8 @@ fn read_callees(
         match &read.facts {
             Ok(derived) => {
                 callees.record(*address, derived, native.program);
-                // Under `aa` a callee whose read bounds no write states them composed (D441).
-                if own
-                    && !callees.writes.contains_key(address)
+                // A callee whose read bounds no write states them composed (D441).
+                if !callees.writes.contains_key(address)
                     && let Some(writes) = native.program.callee_writes(*address)
                 {
                     callees.writes.insert(*address, writes);
@@ -1802,7 +1700,6 @@ fn analyse(
     program: &dyn Program,
     entry: u64,
     walk: &Walk,
-    callers: crate::program::World,
 ) -> Result<Prepared, NativeRefusal> {
     // A convention whose boundaries carry what none states refuses before anything is read.
     if let Some(reason) = target.convention.refused {
@@ -1822,10 +1719,10 @@ fn analyse(
         facts,
         declared,
         unread,
-    } = read_callees(&native, target, (&walk.root, entry), ptr_bits, callers);
+    } = read_callees(&native, target, &walk.root, ptr_bits);
 
-    let artifact = native.resolve(entry, walk, &callees, callers)?;
-    let artifact = native.with_call_tables(walk, &callees, callers, artifact)?;
+    let artifact = native.resolve(entry, walk, &callees)?;
+    let artifact = native.with_call_tables(walk, &callees, artifact)?;
     let tables = walk.tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -2238,19 +2135,17 @@ struct Native<'a> {
 
 impl<'a> Native<'a> {
     /// One body sealed against `callees`, and prepared again where it restates its declared frame
-    /// or text it points at; in the closed world, sealed once more where its `CallBoundary` decides
-    /// the result. Its first seal's facts are collected only where something reads them.
+    /// or text it points at, or where its `CallBoundary` decides the result. Its first seal's facts
+    /// are collected only where something reads them.
     fn resolve(
         &self,
         entry: u64,
         walk: &Walk,
         callees: &Callees,
-        world: crate::program::World,
     ) -> Result<Resolution, NativeRefusal> {
         let declared_root = self.declaration(entry);
         // The decision is asked before the first seal, so a decided body seals once (D442).
-        let asked =
-            (world == crate::program::World::Closed).then(|| self.program.closed_result(entry));
+        let asked = Some(self.program.closed_result(entry));
         let seal = self.seal_first(walk, callees, &declared_root, asked.flatten())?;
         let first = First {
             entry,
@@ -2258,36 +2153,9 @@ impl<'a> Native<'a> {
             seal,
             asked,
         };
-        Ok(self.finish(walk, callees, world, first)?.0)
-    }
-
-    /// A built body resolved against `owners` in the open world: its build sealed as it stands
-    /// with none, else updated by their statements.
-    fn resolve_built(
-        &self,
-        walk: &Walk,
-        built: Built,
-        owners: &[(u64, Arc<CalleeRead>)],
-    ) -> Result<(Resolution, bool), NativeRefusal> {
-        let Built {
-            address,
-            mut construction,
-            mut imports,
-            declared_root,
-        } = built;
-        if !owners.is_empty() {
-            imports.state(owners, self.program);
-            let premises = premises_reading(self.target, false);
-            construction = self.restate_against(&walk.root, construction, (&imports, &premises))?;
-        }
-        let seal = construction.seal(&self.control);
-        let first = First {
-            entry: address,
-            declared_root,
-            seal: seal.map_err(NativeRefusal::of_preparation)?,
-            asked: None,
-        };
-        self.finish(walk, &imports, crate::program::World::Open, first)
+        Ok(self
+            .finish(walk, callees, crate::program::World::Closed, first)?
+            .0)
     }
 
     /// A construction against `callees`' statements: its build kept where they state what it read
@@ -2660,7 +2528,6 @@ impl<'a> Native<'a> {
         &self,
         walk: &Walk,
         callees: &Callees,
-        world: crate::program::World,
         artifact: Resolution,
     ) -> Result<Resolution, NativeRefusal> {
         let reads = r2ssa::indirect::dispatch_table_reads(artifact.shared_artifact().as_ref());
@@ -2673,7 +2540,7 @@ impl<'a> Native<'a> {
             calls,
             ..walk.clone()
         };
-        self.resolve(walk.root.body.entry, &walk, callees, world)
+        self.resolve(walk.root.body.entry, &walk, callees)
     }
 
     /// Where each of a table's `count` entries sends the dispatch: the value
@@ -4176,8 +4043,8 @@ pub fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
     ])
 }
 
-/// The target's premises, and a closed world where the request read the program's callers (`aa`):
-/// what every call the image shows does is what the program does (doc/adr-resolved-bodies.md).
+/// The target's premises, and a closed world where a decision read the program's callers: what
+/// every call the image shows does is what the program does (doc/adr-resolved-bodies.md).
 fn premises_reading(
     target: &NativeTarget<'_>,
     callers_read: bool,

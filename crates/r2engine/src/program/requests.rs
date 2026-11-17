@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::fates::World;
 use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
@@ -643,13 +642,10 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok((listing, shape))
     }
 
-    /// Survey the program, and from then on read each function's callers where its own body
-    /// leaves its result open (doc/adr-resolved-bodies.md, "Caller reads"): radare2's `aa`.
+    /// Survey the program once, radare2's `aa`: later answers are faster, never different (D573).
     pub fn analyse_program(&mut self) -> Result<(), String> {
         self.start_request();
-        self.surveyed()?;
-        self.callers = World::Closed;
-        Ok(())
+        self.surveyed().map(|_| ())
     }
 
     /// Every function the program has, from what the container states and

@@ -55,10 +55,9 @@ fn a_caller_reading_the_integer_register_decides_the_result() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
-/// Before `aa`, the calls are not read: a fresh open renders the body alone, whose result stays
-/// open, and `aa` decides it in the same session.
+/// Before `aa`, the calls are read all the same: `aa` moves no answer in the session (D573).
 #[test]
-fn before_aa_a_function_reads_no_callers() {
+fn before_aa_a_function_reads_its_callers() {
     let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x08)];
     let mut open = OpenProgram::of(Literal::of_code(READ_AS_INTEGER, &functions));
     let before = open
@@ -67,12 +66,12 @@ fn before_aa_a_function_reads_no_callers() {
         .response
         .output
         .into_text();
-    assert!(before.contains("return r2sleigh_residual_"), "{before}");
-    open.analyse_program().expect("it surveys");
-    assert_eq!(
-        rendered(Literal::of_code(READ_AS_INTEGER, &functions)),
-        fresh(open)
+    assert!(
+        before.contains("a call reads the result (assuming closed-world)"),
+        "{before}"
     );
+    open.analyse_program().expect("it surveys");
+    assert_eq!(before, fresh(open));
 }
 
 /// The same body with no call to it: nothing says which register is its result.
@@ -440,10 +439,8 @@ fn a_value_in_two_registers_is_one_result_where_callers_read_the_second() {
         alone.contains(open),
         "no call read decides the high half: {alone}"
     );
-    // Before `aa`, the calls are not read: the low half alone, and the high half is open.
-    let unread = fresh(OpenProgram::of(program(&both)));
-    assert!(unread.starts_with("r2sleigh_result_u64 f("), "{unread}");
-    assert!(unread.contains(open), "{unread}");
+    // Before `aa`, the calls are read all the same (D573).
+    assert_eq!(fresh(OpenProgram::of(program(&both))), f);
 }
 
 /// `mov rax, rdi; xor edx, edx; ret` writes RDX on every return, and `call f; ret` reads only RAX:
@@ -846,10 +843,9 @@ fn a_conditional_tail_jump_returns_nothing_from_before_the_branch() {
     assert!(f.contains("r2sleigh refused f"), "{f}");
 }
 
-/// Cold, `f` of `ONLY_XMM0_WRITTEN` is unproven, and its calls take its integer carrier alone (D62):
-/// no site decides the callee's result, so the caller's read of XMM0 is a residual.
+/// Cold, the caller's read of XMM0 decides `f`'s result as under `aa` (D573): the call assigns it.
 #[test]
-fn a_cold_caller_reads_no_float_result_the_callee_does_not_state() {
+fn a_cold_caller_reads_the_float_result_its_read_decides() {
     let program = Literal::of_code(
         ONLY_XMM0_WRITTEN,
         &[("f", BASE, 5), ("caller", BASE + 0x10, 0x0a)],
@@ -860,8 +856,8 @@ fn a_cold_caller_reads_no_float_result_the_callee_does_not_state() {
         .response
         .output
         .into_text();
-    assert!(!text.contains("double f("), "{text}");
-    assert!(text.contains("r2sleigh_residual"), "{text}");
+    assert!(text.contains("double f("), "{text}");
+    assert!(text.contains("r2sleigh_float_to_bits_64(f("), "{text}");
 }
 
 /// AArch64 `f`: `ldr d0, [x0]; ret`, which hands back x0 (its argument) untouched and writes d0;

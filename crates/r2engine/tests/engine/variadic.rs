@@ -351,8 +351,8 @@ const COUNTED: &[u8] = &[
     0xc3, // 107a ret
 ];
 
-/// A nonzero count over the guard is the call's vector count, not the protector's scrub: resolved
-/// before `g` is read, `f`'s call counts no argument from registers, so `f` is only a floor.
+/// A nonzero count over the guard is the call's vector count, not the protector's scrub; resolved
+/// against `g`, which states one parameter, `f` takes one all the same (D573).
 #[test]
 fn a_nonzero_count_over_the_stack_guard_is_still_a_vector_count() {
     let mut open = OpenProgram::of(
@@ -368,11 +368,7 @@ fn a_nonzero_count_over_the_stack_guard_is_still_a_vector_count() {
         .running_on(GLIBC),
     );
     let outer = rendered(&mut open, BASE + 0x70);
-    assert!(
-        outer.contains("call to f: its arity is only at least 0 (a floor)"),
-        "{outer}"
-    );
-    assert!(!outer.contains("f(5)"), "{outer}");
+    assert!(outer.contains("f(5)"), "{outer}");
 }
 
 /// gcc -O0's `vfold(unsigned count, ...)` and `vfold_pair` (two fetches a trip); `local` calls the

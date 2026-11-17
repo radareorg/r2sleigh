@@ -456,9 +456,9 @@ fn unassigned_reads_at_o2(definition: &str, answer: &Value) -> Option<String> {
     } else {
         (
             // The stack-protector check is compiler-inserted, so the canary's reads are gone; the
-            // result of `dispatch`, a call past its floor (audit W7), is never assigned too.
-            vec!["never-assigned", "never-assigned"],
-            named.contains("2 never assigned, read as residuals (rax_19, xmm0_4)")
+            // result of `dispatch` is never assigned, while `avg`'s call decides its double (D573).
+            vec!["never-assigned"],
+            named.contains("1 never assigned, read as residuals (rax_19)")
                 && !code.contains("FS_OFFSET"),
         )
     };

@@ -130,9 +130,8 @@ fn a_callee_with_an_unproven_result_still_states_its_arity() {
     .output
     .into_text();
     assert_eq!(text.matches("stash(").count(), 3, "{text}");
-    // No call reads its result, so no return type is claimed for it.
-    // The extern is the callee's own header: an unproven result, never `void` (W46).
-    assert!(text.contains("r2sleigh_result_u64 stash("), "{text}");
+    // `stash` hands back x0 untouched and no call reads it: void under the closed world (D213).
+    assert!(text.contains("void stash("), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains(", 0)"), "{text}");
 }

@@ -325,7 +325,7 @@ jobs:
     name: radare2 Differential Gate
     runs-on: ubuntu-24.04
     needs: build
-    timeout-minutes: 25
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -361,6 +361,14 @@ jobs:
           python3 scripts/diff_r2.py --no-build --r2 /usr/bin/radare2 --r2s target/ci/r2s \
             --bins "$RUNNER_TEMP/testbins/elf" "$RUNNER_TEMP/testbins/mach0" "$RUNNER_TEMP/testbins/pe" \
             --jobs 4 --timeout 90 --verbose
+      # `pdd`, `pdf` and `afi` alone, after `aa`, after `afl` and in one session forward and reversed
+      # print the same bytes: no earlier command moves an answer (ROADMAP D573).
+      - name: An answer is the same whatever ran before it
+        if: always()
+        timeout-minutes: 30
+        run: |
+          python3 scripts/test_history_gate.py
+          python3 scripts/history_gate.py --r2s target/ci/r2s --bins "$RUNNER_TEMP/testbins/elf" --jobs 4
 
   # ── Hostile input (ROADMAP H, D18) ───────────────────────────────
   #
