@@ -166,7 +166,7 @@ pumasim aa; pdd @ 0x3b6b20 | sealed.reused | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_in_direct_sites | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_never_joined | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_relifted | 55
-pumasim aa; pdd @ 0x3b6b20 | table_seals | 1385
+pumasim aa; pdd @ 0x3b6b20 | table_seals | 1384
 pumasim aa; pdd @ 0x3b6b20 | walked.computed | 375
 pumasim aa; pdd @ 0x3b6b20 | walked.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | walked.reused | 0
@@ -200,7 +200,7 @@ pumasim afl | sealed.reused | 0
 pumasim afl | site_fates_in_direct_sites | 0
 pumasim afl | site_fates_never_joined | 0
 pumasim afl | site_fates_relifted | 0
-pumasim afl | table_seals | 1385
+pumasim afl | table_seals | 1384
 pumasim afl | walked.computed | 0
 pumasim afl | walked.recomputed | 0
 pumasim afl | walked.reused | 0
