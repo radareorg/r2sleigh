@@ -801,7 +801,7 @@ CMDS=aa; pdd @ 0x00001521
 EXPECT=<<EOF
 int32_t dispatch(int32_t (*fn)(int32_t, int32_t), int32_t a)
 {
-    /* r2dec proof: 3 constructs are marked below; 26 source obligations: 0 rendered, 10 elided, 0 refused, 16 residual; 1 statements rendered; 1 never assigned, read as residuals (RAX_3) */
+    /* r2dec proof: 3 constructs are marked below; 26 source obligations: 0 rendered, 10 elided, 0 refused, 16 residual; 1 statements rendered; 1 never assigned, read as residuals (RAX_3); an indirect call writes no frame slot this function did not expose (assuming frame-isolation) */
     {
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1521:51 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
         r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1521:58 covering 1 op (render::values) */

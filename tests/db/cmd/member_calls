@@ -110,7 +110,7 @@ int64_t ops_make(struct ops* o, int32_t n)
     uint64_t rax_4;
     _Alignas(16) uint8_t frame[56];
 
-    /* r2dec proof: 1 construct is marked below; 26 source obligations: 9 rendered, 9 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 5 residual; 4 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 26 source obligations: 9 rendered, 9 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 5 residual; 4 statements rendered; an indirect call writes no frame slot this function did not expose (assuming frame-isolation) */
     {
         tmp_40144e_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)7U * 8U));
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401430:40 covering 1 op (render::values): call to an indirect target: argument slot 1 may hand on what this function was passed */
@@ -309,7 +309,7 @@ r2sleigh_result_u64 fcn_401340(struct fcn_401340_arg0* arg0, r2sleigh_word_u64 a
     uint64_t tmp_401356_0_1;
     uint64_t tmp_40135c_8_1;
 
-    /* r2dec proof: 4 constructs are marked below; 43 source obligations: 12 rendered, 18 elided, 0 refused, 13 residual; 6 statements rendered; the parameters are a floor: at least 3 (a register past them reaches an indirect call); the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: 4 constructs are marked below; 43 source obligations: 12 rendered, 18 elided, 0 refused, 13 residual; 6 statements rendered; the parameters are a floor: at least 3 (a register past them reaches an indirect call); an indirect call writes no frame slot this function did not expose (assuming frame-isolation); the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual; 1 structure laid out from a parameter's accesses */
     {
         tmp_401350_0_1 = r2sleigh_load_u64((void*)&arg0->f_0);
         tmp_401353_8_1 = r2sleigh_load_u64((void*)&arg0->f_8);

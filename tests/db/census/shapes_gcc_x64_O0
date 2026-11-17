@@ -1408,7 +1408,7 @@ r2sleigh_word_u64 shape_function_pointer(r2sleigh_word_u64 arg0, r2sleigh_word_u
     uint32_t tmp_40217a_8_1;
     _Alignas(16) uint8_t frame[104];
 
-    /* r2dec proof: 3 constructs are marked below; 102 source obligations: 45 rendered, 32 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 22 residual; 25 statements rendered; 1 never assigned, read as residuals (RAX_13); a call reads the result (assuming closed-world) */
+    /* r2dec proof: 3 constructs are marked below; 102 source obligations: 45 rendered, 32 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 22 residual; 25 statements rendered; 1 never assigned, read as residuals (RAX_13); an indirect call writes no frame slot this function did not expose (assuming frame-isolation); a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
