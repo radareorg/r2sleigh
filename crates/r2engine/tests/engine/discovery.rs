@@ -857,3 +857,18 @@ fn a_supervisor_call_another_body_reaches_with_another_number_ends_no_walk_of_it
         .collect::<Vec<_>>();
     assert!(ends.contains(&(quit + 0xe)), "{ends:x?}");
 }
+
+/// `caller: call f; ret`, then `f: dec edi; jne f; ret`, which no symbol names.
+const LOOPS_TO_ITS_ENTRY: &[u8] = &[0xe8, 1, 0, 0, 0, 0xc3, 0xff, 0xcf, 0x75, 0xfc, 0xc3];
+
+/// An unnamed function whose entry a branch reaches is rooted at the synthetic entry edge; it is
+/// named for the address control enters it at (D533: find O2 0xa910 printed `fcn_ffffffffffffffff`).
+#[test]
+fn an_unnamed_function_whose_entry_a_branch_reaches_is_named_for_its_entry() {
+    let functions = [("caller", BASE, 6)];
+    let mut open = OpenProgram::of(Literal::of_code(LOOPS_TO_ITS_ENTRY, &functions));
+    let rendered = open.rendered(BASE + 6).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(text.contains(&format!("fcn_{:x}(", BASE + 6)), "{text}");
+    assert!(!text.contains("fcn_ffffffffffffffff"), "{text}");
+}
