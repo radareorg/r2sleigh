@@ -1690,7 +1690,7 @@ binaries = "test.ko"
 corpus = "elf"
 function = 'sym\.init_module$'
 verdict = "r2-right"
-reason = "class B: test.ko 0x800008c `e8771f0000 call 0x8002008`, whose R_X86_64_PLT32 relocation at 0x800008d names printk (is: imp.printk, unmapped); printk returns, and init_module goes on to a second printk and `ret` at 0x80000a7. r2s ends the block at the call (21 bytes), radare2 keeps all 44. Owner ROADMAP D504"
+reason = "class A: test.ko init_module's block ends at 0x8000091 `48c7c600000000 mov rsi, imm32`, whose field at 0x8000094 an R_X86_64_32S record states as kmalloc_caches + 0x460 (ir); r2image reads it as SymbolPlusAddend, and Linkage::written states an import only for addend 0, so the field's value is unstated and the walk stops there (Relocated), 21 bytes in; radare2 keeps all 44 to the `ret` at 0x80000a7. The call to printk before it comes back (cleanup_module keeps its own and is whole). Owner ROADMAP D504, after D453"
 
 [[judged]]
 command = "afb"

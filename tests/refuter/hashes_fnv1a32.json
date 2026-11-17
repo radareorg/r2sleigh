@@ -1,0 +1,12 @@
+{
+  "binary": "tests/coverage/pinned/hashes_gcc_x64_O2",
+  "sha256": "7015af774475dbfe737db35ea08ff79660ecd7cdefcb4468f8d0ac15897a26e6",
+  "function": "0x401330",
+  "recorded": "by hand: fnv1a32(\"abc\", 3), the reference algorithm's value",
+  "entry": "0x401330",
+  "bias": "0x0",
+  "registers": {"RDI": "0x7fff0000", "RSI": "0x3", "RSP": "0x7ffe1000"},
+  "cells": {"0x7fff0000": "616263", "0x7ffe1000": "efbeadde00000000"},
+  "results": ["RAX"],
+  "machine": {"results": {"RAX": "0x1a47e90b"}, "writes": [], "store_trace": false, "returned_to": "0xdeadbeef"}
+}

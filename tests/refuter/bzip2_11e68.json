@@ -1,0 +1,72 @@
+{
+ "bias": "0x555555556000",
+ "binary": "bzip2/bzip2",
+ "cells": {
+  "0x2aaaab2abb80": "b0bb2aabaa2a0000f2d02aabaa2a0000000000000000000000402eabaa2a00000000000000000000084a2eabaa2a000030bc2aabaa2a000078152babaa2a0000"
+ },
+ "command": [
+  "bzip2",
+  "-c",
+  "-k",
+  "text.txt"
+ ],
+ "entry": "0x11e68",
+ "function": "0x11e68",
+ "machine": {
+  "results": {
+   "RAX": "0x555555567e68",
+   "XMM0": "0x41335017a15387113f5041334c1849d"
+  },
+  "returned_to": "0x2aaaab2b1578",
+  "store_trace": false,
+  "writes": []
+ },
+ "registers": {
+  "AF": "0x0",
+  "CF": "0x0",
+  "DF": "0x0",
+  "FS_OFFSET": "0x80010001",
+  "GS_OFFSET": "0x0",
+  "IF": "0x1",
+  "OF": "0x0",
+  "PF": "0x0",
+  "R10": "0x2aaaab2abb6f",
+  "R11": "0x2aaaab2abb70",
+  "R12": "0x0",
+  "R13": "0x2aaaab2e4a08",
+  "R14": "0x0",
+  "R15": "0x2aaaab2e52e0",
+  "R8": "0x2aaaab2abbc0",
+  "R9": "0x0",
+  "RAX": "0x555555567e68",
+  "RBP": "0x2aaaab2abc30",
+  "RBX": "0x2aaaab2e4000",
+  "RCX": "0x0",
+  "RDI": "0x55555556dc60",
+  "RDX": "0x55555556ccc0",
+  "RSI": "0x0",
+  "RSP": "0x2aaaab2abbb8",
+  "SF": "0x0",
+  "TF": "0x0",
+  "XMM0": "0x41335017a15387113f5041334c1849d",
+  "XMM1": "0xc4bb8877024eb0137482266ce22698c8",
+  "XMM10": "0x0",
+  "XMM11": "0x0",
+  "XMM12": "0x0",
+  "XMM13": "0x1f80",
+  "XMM2": "0xb40826984027c8899aa013b60a790239",
+  "XMM3": "0x5127e80413f1844dc027e609f9c43c61",
+  "XMM4": "0xe2266a823c411398c0899aa813397113",
+  "XMM5": "0x4dd409349113ee2a6a2227f4abc00977",
+  "XMM6": "0x0",
+  "XMM7": "0x0",
+  "XMM8": "0x0",
+  "XMM9": "0x0",
+  "ZF": "0x0"
+ },
+ "results": [
+  "RAX",
+  "XMM0"
+ ],
+ "sha256": "f50dae6aa95aa0176e72193f0461ea37637ab217b1d013f80eba64add42753b4"
+}
