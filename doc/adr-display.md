@@ -312,10 +312,12 @@ tests whether a setter's call is the next call line.
   ISO C 6.4.4.4) or ESC, the alphabet radare2's scanner admits
   (`libr/bin/bfile.c:288-298`); any other control byte ends it, and the
   first start whose suffix is text is what a scan finds (`first_text_in`).
-  `names::escaped` is the one speller, radare2's `r_str_byte_escape` (`\xNN`
-  for ESC and the rest, `\\` for a backslash, no quote escaping, as radare2's
-  `iz` and string comments print); a string flag is its `flag_filter`. Rendered
-  C reads `native::literal_at`, the pre-D571 alphabet, so rendering moves no
+  `names::escaped` is the one speller, radare2's string scanner's table
+  (`bfile.c:303-310`: `\a \b \t \n \v \f \r`, `\e` for ESC, `\\` for a
+  backslash, no quote escaping, as radare2's `iz` and string comments print);
+  a string flag is its `flag_filter` (macOS `ansi`: `str.e8qo__d_n`, as
+  radare2 names it; `\x1b` first gave `str.x1b8qo__d_n`, a D490 `pd` line).
+  Rendered C reads `native::literal_at`, the pre-D571 alphabet, so rendering moves no
   byte: census, goldens 0 moves.
 - D571, immediates. A constant the line moves whole, by a copy, an extension
   or as the word a store writes, and that no claim on the line uses as an

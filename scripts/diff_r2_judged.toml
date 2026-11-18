@@ -1974,6 +1974,16 @@ reason = "class F: dwarf_go_tree 0x401000 runtime.text is Go ABI0, which returns
 
 [[judged]]
 command = "afv"
+binaries = "fedora_32_bin_ls"
+corpus = "elf"
+function = '^0x000122e0 '
+lacking = "r2"
+r2s = '^var uint64_t stack_m72 @ entry\.sp-0x48$'
+verdict = "r2s-right"
+reason = "class E, sampled once D572 named fedora_32_bin_ls's functions from .gnu_debugdata: sym.ambsalign 0x122e0 stores realloc's size at [rsp] (`48890424 mov qword [rsp], rax` at 0x12305) and reads it back (`488b0424 mov rax, qword [rsp]` at 0x1232a), entry.sp-0x48 after six pushes and `sub rsp, 0x18`; radare2 makes no variable of a zero displacement unless the return address lives in a register (libr/anal/var.c:1232-1233 at 5a1d380d5f, `zero_ok`)"
+
+[[judged]]
+command = "afv"
 binaries = "r2pay-arm64.so"
 corpus = "elf"
 function = '^0x00009080 '

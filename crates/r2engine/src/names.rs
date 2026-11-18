@@ -72,8 +72,8 @@ pub fn first_text_in(segment: &[u8]) -> Option<(usize, &str)> {
     None
 }
 
-/// Text as radare2's `r_str_byte_escape` spells it (`\n`, `\\`, `\x1b`): the one speller of text for
-/// notes, `iz`, `izz` and string flags. O(length).
+/// Text as radare2's string scanner escapes it (`libr/bin/bfile.c:303-310`: `\n`, `\e` for ESC,
+/// `\\`): the one speller of text for notes, `iz`, `izz` and string flags. O(length).
 pub fn escaped(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
@@ -85,6 +85,7 @@ pub fn escaped(text: &str) -> String {
             '\x08' => escaped.push_str("\\b"),
             '\x0b' => escaped.push_str("\\v"),
             '\x07' => escaped.push_str("\\a"),
+            '\x1b' => escaped.push_str("\\e"),
             '\\' => escaped.push_str("\\\\"),
             c if c.is_control() => escaped.push_str(&format!("\\x{:02x}", u32::from(c))),
             c => escaped.push(c),
@@ -422,7 +423,7 @@ mod tests {
         let run = b"wget -q\r\x1b[0m\x07\x08\x0b\x0c x\0";
         let text = text_in(run).expect("one text");
         assert_eq!(text.len(), run.len() - 1);
-        assert_eq!(escaped(text), "wget -q\\r\\x1b[0m\\a\\b\\v\\f x");
+        assert_eq!(escaped(text), "wget -q\\r\\e[0m\\a\\b\\v\\f x");
         assert_eq!(literal_in(run), None);
         assert_eq!(text_in(b"ab\x01cd\0"), None);
         assert_eq!(first_text_in(b"ab\x01cd"), Some((3, "cd")));
