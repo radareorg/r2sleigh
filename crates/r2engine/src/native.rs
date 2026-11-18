@@ -2735,7 +2735,7 @@ impl<'a> Native<'a> {
             if address == 0 || already.contains(&address) {
                 continue;
             }
-            if let Some(text) = text_at(self.program, address) {
+            if let Some(text) = literal_at(self.program, address) {
                 found.insert(address, text);
             }
         }
@@ -3119,7 +3119,7 @@ impl Native<'_> {
     fn literals(&self, body: &crate::body::Body) -> Vec<(u64, String)> {
         referenced(body)
             .into_iter()
-            .filter_map(|address| Some((address, text_at(self.program, address)?)))
+            .filter_map(|address| Some((address, literal_at(self.program, address)?)))
             .collect()
     }
 
@@ -3331,21 +3331,36 @@ pub(crate) fn supervisor_halts(
     halts
 }
 
-/// The text a section of static data holds at an address, where the loader leaves every byte of it and its terminator alone; the one reader a rendering and a listing share.
+/// The text a section of static data holds at an address, where the loader leaves every byte of
+/// it and its terminator alone (`names::text_in`): what a listing's notes read.
 pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
+    stated_text(program, address, crate::names::text_in)
+}
+
+/// [`text_at`] where rendered C holds it as a literal (`names::literal_in`): the one reader a
+/// rendering reads, which D571's wider text does not reach.
+pub(crate) fn literal_at(program: &dyn Program, address: u64) -> Option<String> {
+    stated_text(program, address, crate::names::literal_in)
+}
+
+fn stated_text(
+    program: &dyn Program,
+    address: u64,
+    reader: fn(&[u8]) -> Option<&str>,
+) -> Option<String> {
     if !program.holds_static_data(address) {
         return None;
     }
     let bytes = program.read(address, crate::names::LITERAL_LIMIT)?;
-    let text = crate::names::text_in(&bytes)?;
+    let text = reader(&bytes)?;
     let end = address.saturating_add(text.len() as u64 + 1);
     (!crate::stated::written(program, &(address..end))).then(|| text.to_owned())
 }
 
-/// [`text_at`] where no write reaches its bytes for the whole run: mapped read-only and untouched
+/// [`literal_at`] where no write reaches its bytes for the whole run: mapped read-only and untouched
 /// by the loader (`TableBytes::ReadOnly`), so a call reads the text the file holds.
 pub(crate) fn immutable_text_at(program: &dyn Program, address: u64) -> Option<String> {
-    let text = text_at(program, address)?;
+    let text = literal_at(program, address)?;
     let end = address.checked_add(text.len() as u64 + 1)?;
     (TableBytes::of(program, address..end) == TableBytes::ReadOnly).then_some(text)
 }

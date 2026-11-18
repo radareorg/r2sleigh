@@ -995,7 +995,7 @@ fn every_string(session: &Session) -> Result<String, String> {
             text.len() + 1,
             section_of(session, *paddr, true),
             text_type(text),
-            escaped(text)
+            r2engine::names::escaped(text)
         ));
     }
     Ok(out)
@@ -1020,7 +1020,7 @@ fn string_table(session: &Session, found: &[(u64, String)]) -> Table {
                 text.len() + 1,
                 section_of(session, *vaddr, false),
                 text_type(text),
-                escaped(text)
+                r2engine::names::escaped(text)
             ),
         );
     }
@@ -1047,22 +1047,6 @@ fn text_type(text: &str) -> &'static str {
         true => "ascii",
         false => "utf8",
     }
-}
-
-/// A string as radare2 prints one: each control character escaped, so one string is one line.
-fn escaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.

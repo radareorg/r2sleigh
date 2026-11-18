@@ -23,21 +23,30 @@ use std::sync::Arc;
 /// whole section in behind it.
 pub const LITERAL_LIMIT: usize = 4096;
 
+/// Whether a character is text: printable, a byte a C string literal names by a simple escape
+/// (`\a \b \t \n \v \f \r`, ISO C 6.4.4.4), or ESC. Any other control character ends text.
+fn is_text(c: char) -> bool {
+    !c.is_control() || matches!(c, '\x07'..='\x0d' | '\x1b')
+}
+
 /// The text these bytes begin with, where they begin with text.
 ///
-/// A run of printable bytes that never terminates is not text, and neither is
-/// an empty one. One character is: a program that points at `"x"` points at a
-/// string. This is the only answer to that question, so the constants a body
-/// names and a scan of the data sections agree by construction.
+/// A run of text that never terminates is not text, and neither is an empty one. One character
+/// is: a program that points at `"x"` points at a string. The only answer to that question, so
+/// a listing's notes, `iz` and `izz` agree by construction.
 pub fn text_in(bytes: &[u8]) -> Option<&str> {
     let end = bytes
         .iter()
         .position(|byte| *byte == 0)
         .filter(|end| *end > 0)?;
     let text = std::str::from_utf8(&bytes[..end]).ok()?;
-    text.chars()
-        .all(|c| !c.is_control() || c == '\n' || c == '\t')
-        .then_some(text)
+    text.chars().all(is_text).then_some(text)
+}
+
+/// [`text_in`] where rendered C holds it as a literal: no control character but `\n` and `\t`.
+pub fn literal_in(bytes: &[u8]) -> Option<&str> {
+    let literal = |c: char| !c.is_control() || c == '\n' || c == '\t';
+    text_in(bytes).filter(|text| text.chars().all(literal))
 }
 
 /// The first start in `segment`, a run of bytes with no zero, whose suffix
@@ -45,28 +54,44 @@ pub fn text_in(bytes: &[u8]) -> Option<&str> {
 ///
 /// One forward pass. A suffix from any start at or before an invalid UTF-8
 /// sequence decodes into it -- UTF-8 resynchronises, so no other start skips
-/// it -- and so does one from any start at or before a control character
-/// that is not a newline or a tab: the next start worth asking is just past
-/// either. Validation stops at the first error, so the jumps cost what they
-/// skip, and a suffix that validates is scanned at most twice.
+/// it -- and so does one from any start at or before a character that is no
+/// text: the next start worth asking is just past either. Validation stops at
+/// the first error, so the jumps cost what they skip, and a suffix that
+/// validates is scanned at most twice.
 pub fn first_text_in(segment: &[u8]) -> Option<(usize, &str)> {
     let mut start = 0usize;
     while start < segment.len() {
         match std::str::from_utf8(&segment[start..]) {
             Err(error) => start += error.valid_up_to() + 1,
-            Ok(text) => {
-                match text
-                    .char_indices()
-                    .rev()
-                    .find(|(_, c)| c.is_control() && *c != '\n' && *c != '\t')
-                {
-                    None => return Some((start, text)),
-                    Some((at, c)) => start += at + c.len_utf8(),
-                }
-            }
+            Ok(text) => match text.char_indices().rev().find(|(_, c)| !is_text(*c)) {
+                None => return Some((start, text)),
+                Some((at, c)) => start += at + c.len_utf8(),
+            },
         }
     }
     None
+}
+
+/// Text as radare2 escapes it (`r_str_byte_escape`): a simple escape where C names one, `\\`
+/// for a backslash, `\xNN` for any other control character (ESC is `\x1b`). The one speller of
+/// text for notes, `iz`, `izz` and string flags. O(length).
+pub fn escaped(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0b' => escaped.push_str("\\v"),
+            '\x07' => escaped.push_str("\\a"),
+            '\\' => escaped.push_str("\\\\"),
+            c if c.is_control() => escaped.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// Which vocabulary a name belongs to, spelled the way radare2 spells it.
@@ -218,21 +243,7 @@ fn flag_filter(text: &str) -> Cow<'_, str> {
 
 /// The text as radare2 names a string's flag: the scanner's escaped form through the flag filter.
 fn identifier(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\x0c' => escaped.push_str("\\f"),
-            '\x08' => escaped.push_str("\\b"),
-            '\x0b' => escaped.push_str("\\v"),
-            '\x07' => escaped.push_str("\\a"),
-            c if c.is_ascii_control() => escaped.push_str(&format!("\\x{:02x}", c as u32)),
-            c => escaped.push(c),
-        }
-    }
-    flag_filter(&escaped).into_owned()
+    flag_filter(&escaped(text)).into_owned()
 }
 
 /// Every address this program has a name for.
@@ -403,6 +414,21 @@ mod tests {
             namespace,
             size,
         }
+    }
+
+    /// A C simple escape and ESC are text and are escaped back as radare2 spells them; any
+    /// other control byte ends text, and a suffix past it is the text a scan finds.
+    #[test]
+    fn a_simple_escape_and_esc_are_text_and_another_control_byte_is_not() {
+        let run = b"wget -q\r\x1b[0m\x07\x08\x0b\x0c x\0";
+        let text = text_in(run).expect("one text");
+        assert_eq!(text.len(), run.len() - 1);
+        assert_eq!(escaped(text), "wget -q\\r\\x1b[0m\\a\\b\\v\\f x");
+        assert_eq!(literal_in(run), None);
+        assert_eq!(text_in(b"ab\x01cd\0"), None);
+        assert_eq!(first_text_in(b"ab\x01cd"), Some((3, "cd")));
+        assert_eq!(escaped("a\\b"), "a\\\\b");
+        assert_eq!(literal_in(b"a\tb\n\0"), Some("a\tb\n"));
     }
 
     #[test]

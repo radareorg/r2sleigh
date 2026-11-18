@@ -24,6 +24,11 @@ use r2source::confidence::{Basis, Confidence};
 /// widest there is, and Thumb's aligned `pc` rounds to four bytes.
 const PAGE: u64 = 0x1000;
 
+/// How far on a line forming a number from its own position is lifted again to see whether it
+/// rounds that position: a multiple of every instruction alignment, so an unrounded number moves
+/// by exactly this much, and a page base moves by 0 or [`PAGE`].
+const STEP: u64 = 4;
+
 /// The lifts of a run of lines, and the bytes each lift read.
 pub(super) struct Run<'a> {
     pub lifts: &'a [Option<r2il::R2ILBlock>],
@@ -75,11 +80,16 @@ pub(super) fn over_run(
             .iter()
             .map(|(kind, own)| (kind.clone(), folded_support(*own).into()))
             .collect::<Vec<(_, Confidence)>>();
+        let mut page = None;
         if work >= Work::BlockLocal
             && let Some(computed) = &named.computed
             // A number that stays put is an address candidate only where a section the program loads holds it: NULL and the header are not objects.
             && (relative.get(index).copied() == Some(true) || memory.declares(computed.value))
         {
+            if relative.get(index).copied() == Some(true) && computed.own {
+                page =
+                    rounded(answered, run, lines, index, computed.value).then_some(computed.value);
+            }
             // A number that moves with the program is an address where it is formed; one that stays put is one only where it is handed to a pointer parameter.
             let support = match relative.get(index).copied() == Some(true) {
                 true => Some(folded_support(computed.own)),
@@ -104,8 +114,16 @@ pub(super) fn over_run(
         claims.extend(arms.map(|(kind, rung)| (kind, rung.into())));
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
         if answered.holdings {
-            let revision = revision_at(memory, &claims);
+            let revision = revision_at(memory, &claims, page);
             claims.extend(revision);
+            if work >= Work::BlockLocal {
+                let unclaimed = unclaimed_text(memory, lift, &claims);
+                claims.extend(
+                    unclaimed
+                        .into_iter()
+                        .map(|kind| (kind, Basis::Decoded.into())),
+                );
+            }
         }
         if work >= Work::Function {
             let folded = |storage| named.left(storage);
@@ -358,19 +376,103 @@ fn relative_over(
         .collect()
 }
 
+/// Whether the number a line forms from its own position alone rounds it: lifted [`STEP`] bytes
+/// on, an unrounded number moves [`STEP`] bytes, and a page base (AArch64's `adrp`) does not.
+/// A page is no address until an `add` or a load completes it (D571). O(ops of one instruction).
+fn rounded(
+    answered: &Answered<'_>,
+    run: &Run<'_>,
+    lines: &[Line],
+    index: usize,
+    here: u64,
+) -> bool {
+    let window = run.windows.get(index..=index).unwrap_or_default();
+    let line = lines.get(index..=index).unwrap_or_default();
+    let there = super::decode::lift_run(answered, line, window, STEP);
+    let there = (there.first().and_then(Option::as_ref))
+        .map(|lift| named_by(lift, &mut BlockOrigins::default(), None))
+        .and_then(|named| named.computed.map(|computed| computed.value));
+    there.is_some_and(|there| there.wrapping_sub(here) != STEP)
+}
+
+/// Each constant the lift moves whole into a register or a stored word, which no owner states a
+/// use of, where the static data it would address reads as terminated text: an unknown note,
+/// no claim that the value is an address (D571). A constant an arithmetic, compare or mask op
+/// reads is not moved whole. O(ops of one instruction).
+fn unclaimed_text(
+    memory: &Memory<'_>,
+    lift: &r2il::R2ILBlock,
+    claims: &[(AnnotationKind, Confidence)],
+) -> Vec<AnnotationKind> {
+    let mut constants = (lift.ops.iter())
+        .flat_map(R2ILOp::inputs)
+        .filter(|input| input.space == SpaceId::Const)
+        .map(|input| input.offset)
+        .collect::<Vec<_>>();
+    constants.sort_unstable();
+    constants.dedup();
+    let stated = |value: u64| claims.iter().any(|(kind, _)| kind.address() == Some(value));
+    constants
+        .into_iter()
+        .filter(|value| !stated(*value) && memory.declares(*value) && moved_whole(lift, *value))
+        .filter_map(|address| {
+            let text = memory.text(address)?;
+            Some(AnnotationKind::TextIfAddress { address, text })
+        })
+        .collect()
+}
+
+/// Whether the lift reads `value` only to move it: a copy or an extension into another holder,
+/// and at least once into a register or as the word a store writes.
+fn moved_whole(lift: &r2il::R2ILBlock, value: u64) -> bool {
+    let mut holders: Vec<&Varnode> = Vec::new();
+    let mut moved = false;
+    for op in &lift.ops {
+        let holds = |varnode: &Varnode| {
+            (varnode.space == SpaceId::Const && varnode.offset == value)
+                || holders.contains(&varnode)
+        };
+        let carried = match op {
+            R2ILOp::Copy { dst, src }
+            | R2ILOp::IntZExt { dst, src }
+            | R2ILOp::IntSExt { dst, src }
+                if holds(src) =>
+            {
+                moved |= dst.space == SpaceId::Register;
+                Some(dst)
+            }
+            R2ILOp::Store { addr, val, .. } if holds(val) && !holds(addr) => {
+                moved = true;
+                None
+            }
+            op if op.inputs().into_iter().any(holds) => return false,
+            _ => None,
+        };
+        // A holder another operation overwrites holds the constant no longer.
+        if let Some(output) = op.output() {
+            holders.retain(|held| !overlaps(held, output));
+        }
+        holders.extend(carried);
+    }
+    moved
+}
+
 /// What this revision holds at the addresses the line's claims use as data, each on the rung of the claim; a word read is data, not a use.
 ///
-/// Text is said only where a claim reads, writes or computes the address.
-/// Where the line transfers control there, its own lift says the bytes are
-/// executed, so a string there would contradict the claim it hangs on.
+/// Text is said only where a claim reads, writes or computes a completed address: never at a
+/// `page` the line forms, nor where the line transfers control, which executes the bytes.
 fn revision_at(
     memory: &Memory<'_>,
     claims: &[(AnnotationKind, Confidence)],
+    page: Option<u64>,
 ) -> Vec<(AnnotationKind, Confidence)> {
     let mut said = Vec::new();
     // Each address a claim uses as data, with how many bytes the claim itself accesses there.
     let mut used = BTreeMap::<u64, Vec<(u32, &Confidence)>>::new();
     for (kind, support) in claims {
+        if matches!(*kind, AnnotationKind::Computes { value } if Some(value) == page) {
+            continue;
+        }
         if let AnnotationKind::Reads { address, width } = *kind
             && let Some(word) = memory.word(address, width)
         {

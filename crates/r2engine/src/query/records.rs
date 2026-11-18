@@ -384,6 +384,9 @@ pub enum AnnotationKind {
     ///
     /// Never at a transfer's target: a call or a jump there executes the bytes.
     Text { address: u64, text: String },
+    /// The text the revision holds where this line moves a constant whole and no owner states a
+    /// use of it: what the bytes would read if it were an address, which nothing claims (D571).
+    TextIfAddress { address: u64, text: String },
     /// The call this line makes: what its boundary proved it hands the callee, or why it proved no mapping.
     Call {
         callee: Option<u64>,
@@ -467,7 +470,7 @@ impl AnnotationKind {
             Self::Call {
                 arguments: Err(_), ..
             } => Standing::Refused,
-            Self::Unresolved => Standing::Unknown,
+            Self::Unresolved | Self::TextIfAddress { .. } => Standing::Unknown,
             // An unproven or refused result is a refusal with `afi`'s cause (D584, adr-display rule 7).
             Self::Returns {
                 standing: super::ResultStanding::Decided(_),
@@ -517,7 +520,8 @@ impl AnnotationKind {
             | Self::Writes { address, .. }
             | Self::Holds { address, .. }
             | Self::Loaded { address, .. }
-            | Self::Text { address, .. } => Some(address),
+            | Self::Text { address, .. }
+            | Self::TextIfAddress { address, .. } => Some(address),
             Self::Computes { value } | Self::Points { value } => Some(value),
             _ => None,
         }

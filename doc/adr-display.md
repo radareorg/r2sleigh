@@ -301,3 +301,42 @@ tests whether a setter's call is the next call line.
   all 14,814 of pumasim's takes 20 ms (Mac), which an eager key would add to
   every session's `Names`, about 0.1% of the pumasim `aa; pdd` row. Showing a
   name demangles it at print, O(length).
+- D571, text. A terminated run is text where each character is printable or
+  a byte a C string literal names by a simple escape (`\a \b \t \n \v \f \r`,
+  ISO C 6.4.4.4) or ESC, the alphabet radare2's scanner admits
+  (`libr/bin/bfile.c:288-298`); any other control byte ends it, and the
+  first start whose suffix is text is what a scan finds (`first_text_in`).
+  `names::escaped` is the one speller, radare2's `r_str_byte_escape` (`\xNN`
+  for ESC and the rest, `\\` for a backslash, no quote escaping, as radare2's
+  `iz` and string comments print); a string flag is its `flag_filter`. Rendered
+  C reads `native::literal_at`, the pre-D571 alphabet, so rendering moves no
+  byte: census, goldens 0 moves.
+- D571, immediates. A constant the line moves whole, by a copy, an extension
+  or as the word a store writes, and that no claim on the line uses as an
+  address, gets `AnnotationKind::TextIfAddress` where static data the file
+  backs reads as text there: standing `Unknown`, mark `?`, role none, so it is
+  no reference and names no operand. A constant an arithmetic, compare or mask
+  operation reads gets nothing (`moved_whole`, O(ops of one instruction)).
+  bomb 0x400f51 `mov esi, 0x4025cf ; ? "%d %d"`; bash 0x1f8b2 keeps
+  `and eax, 0xf000 ;   defines rax in [0x0, 0xf000]`; crackme 0x4006ac keeps
+  `^ "Password: "`.
+- D571, pages. AArch64 `adrp` lifts as a copy of its page, as `adr` lifts as a
+  copy of its address, so the lift alone does not tell them apart. A value a
+  line forms from its own position alone is lifted again `STEP` (4) bytes on:
+  an address moves 4 bytes, a rounded page base moves 0 or a page. A page
+  holds no text or held word until an `add` or a load completes it; its
+  `Computes` claim and reference stay. One extra lift per such line, no pass.
+  ls-toybox `seq_main` (0x392dc): text notes 15 to 8, the 7 on `adrp` lines
+  gone; the AArch64 goldens hold no page-base note, so none moves.
+- D571, `iz` and `izz` against radare2 6.2.5 (Mac) over 241 ELF testbins:
+  r2s-only `iz` rows 5,827 to 5,420 and `izz` 5,414 to 3,730; radare2-only
+  rows fall too. Rows r2s newly lists alone: `iz` 44 (23 radare2's `izz`
+  lists within 2 bytes, 12 shorter than radare2's 4, 9 packed `.\v` tables
+  in libflutter.so and textile), `izz` 709 (663 within 2 bytes, radare2's
+  start backs up after a short run, `bfile.c:331-334`; 46 code bytes and
+  tables radare2's UTF-8 block filter, `bfile.c:356-390`, refuses). bashbot
+  0x9908 `wget ... \r\n` is listed by `izz` and `iz`.
+- D571, the floor (D623, open). radare2's rule, at least 4 characters
+  (`bfile.c:335`, `bin_elf64.c:147`), lists 0pack 17,560 strings (radare2
+  17,874, r2s 6,641) but raises r2s-only `iz` rows 5,420 to 7,543 over the
+  same 241 files, so the chance bound stays.

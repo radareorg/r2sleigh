@@ -47,6 +47,7 @@ mod signature_types;
 mod staged;
 mod start;
 mod stated_convention;
+mod strings;
 mod structure;
 mod supervisor_calls;
 mod unwind;

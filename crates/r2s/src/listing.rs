@@ -404,7 +404,10 @@ fn note(
                 true => format!("defines {name} = {low:#x}"),
                 false => format!("defines {name} in [{low:#x}, {high:#x}]"),
             }),
-        r2engine::query::AnnotationKind::Text { ref text, .. } => Some(format!("{text:?}")),
+        r2engine::query::AnnotationKind::Text { ref text, .. }
+        | r2engine::query::AnnotationKind::TextIfAddress { ref text, .. } => {
+            Some(format!("\"{}\"", r2engine::names::escaped(text)))
+        }
         // The call a setter feeds is named where it is not the next call line, or `asm.proof` asks.
         r2engine::query::AnnotationKind::ArgumentOf { call, index } => {
             Some(match session.proof || next_call != Some(call) {
