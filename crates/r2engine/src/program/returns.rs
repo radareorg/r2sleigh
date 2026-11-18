@@ -387,6 +387,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         let Ok(body) = self.lifted(walk.entry, walk.thumb, returns) else {
             return Vec::new();
         };
+        self.program.db.note_handed_sealed();
         crate::native::handed(target, &self.program, body)
             .into_iter()
             .map(|pointer| match self.thumb.is_some() {

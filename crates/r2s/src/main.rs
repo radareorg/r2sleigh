@@ -78,6 +78,7 @@ fn report_stats(stats: r2engine::query::AnalysisStats) {
         "r2s: stats: site_fates_relifted {}",
         stats.site_fates_relifted
     );
+    eprintln!("r2s: stats: handed_sealed {}", stats.handed_sealed);
     if let Some(meter) = r2engine::query::call_reads_built() {
         eprintln!(
             "r2s: stats: call_reads_built {} of {} rows, {} reloaded of {}",
