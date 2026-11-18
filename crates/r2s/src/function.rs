@@ -42,7 +42,7 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         let carrier = (unproven.carrier)
             .and_then(|storage| session.program.spell_storage(entry, storage))
             .unwrap_or_else(|| "?".to_owned());
-        format!("result: unproven ({carrier}, {})", unproven.cause_name())
+        format!("result: unproven ; ! {carrier}, {}", unproven.cause_name())
     }));
     out.extend([
         format!("minaddr: {:#010x}", info.min_addr()),

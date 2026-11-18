@@ -935,7 +935,7 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
         .map(|&(count, one, many)| format!("{count} {}", if count == 1 { one } else { many }))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("\n; covers {read} functions; {gaps} — absence is not proof")
+    format!("\n; covers {read} functions; {gaps}; absence is not proof")
 }
 
 /// Every string the data sections hold.

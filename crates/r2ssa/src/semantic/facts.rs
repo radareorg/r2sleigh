@@ -718,6 +718,26 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::FlagNotConstant => "flag_not_constant",
         }
     }
+
+    /// The reason in a reader's words; JSON keeps [`Self::kind`].
+    pub const fn spelled(self) -> &'static str {
+        match self {
+            Self::MissingFormatParameter => "no format parameter or tail count is declared",
+            Self::FormatArgumentUnavailable => "no value reaches the format argument",
+            Self::FormatArgumentNotLiteral => "the format is no literal",
+            Self::InvalidFormatString => "the format string does not parse",
+            Self::ArgumentCountOverflow => "the format's argument count overflows",
+            Self::CallingConventionMismatch => "the convention does not place the tail",
+            Self::InsufficientRegisterArgumentCarriers => {
+                "the convention has too few argument registers for the tail"
+            }
+            Self::UnresolvedArgumentCarrier => "a tail argument's carrier is unresolved",
+            Self::FloatingVariadicArgument => "the format reads a floating argument",
+            Self::CountArgumentUnavailable => "the call passes no count argument",
+            Self::CountArgumentNotConstant => "the count argument is no constant",
+            Self::FlagNotConstant => "the flag argument is no constant",
+        }
+    }
 }
 
 /// The first fact a call boundary could not prove: why the call is incomplete or its arguments are
@@ -754,6 +774,66 @@ pub enum CallBoundaryRefusal {
     /// The callee is an import, which has no body here, and no placed declaration states its
     /// arguments; its stub's arity is the loader's, never the import's (ROADMAP P7).
     ImportUnstated(UnstatedImport),
+}
+
+/// The one speller of a refusal's words: listings, `pdd` gaps and `afi` read it.
+impl std::fmt::Display for CallBoundaryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fixed = match *self {
+            Self::NoConvention => "no calling convention describes it",
+            Self::InterfaceIncomplete => "its declared interface is incomplete",
+            Self::ArgumentAreaUnseen => "its stack argument area is not placed",
+            Self::DeclaredArgumentUnreached { index } => {
+                return write!(f, "no value reaches its declared argument {index}");
+            }
+            Self::StatedArgumentUnreached { count } => {
+                return write!(f, "it takes {count} arguments, and one reaches no value");
+            }
+            Self::VariadicCount(why) => {
+                return write!(
+                    f,
+                    "variadic, its argument count unproven ({})",
+                    why.spelled()
+                );
+            }
+            Self::ResultUnreached => "no value reaches its declared result",
+            Self::Floor { floor, written } => {
+                return write!(
+                    f,
+                    "its arity is only at least {floor} (a floor), and this call writes {written}"
+                );
+            }
+            Self::MayHandOn { slot } => {
+                return write!(
+                    f,
+                    "argument slot {slot} may hand on what this function was passed"
+                );
+            }
+            Self::SlotSkipped { slot } => {
+                return write!(
+                    f,
+                    "argument slot {slot} is unwritten, and a later one is written"
+                );
+            }
+            Self::ResultPassedOn { slot } => {
+                return write!(
+                    f,
+                    "argument slot {slot} holds an earlier call's result, and a later one is written"
+                );
+            }
+            Self::CountFromRegisters => "no arity is stated, only the registers written before it",
+            Self::CountRegisterSet => {
+                "it is handed a vector count: variadic or unprototyped, its argument count unproven"
+            }
+            Self::ImportUnstated(UnstatedImport::Undeclared) => {
+                "the import has no declaration to state its arguments"
+            }
+            Self::ImportUnstated(UnstatedImport::Unplaced) => {
+                "the import's declaration has an argument this convention does not place"
+            }
+        };
+        f.write_str(fixed)
+    }
 }
 
 /// Why an import states no interface: the engine reads one only off its declaration (ROADMAP P7).

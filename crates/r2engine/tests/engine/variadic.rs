@@ -689,7 +689,7 @@ fn a_count_no_constant_fixes_leaves_the_tail_unproven() {
     let dynamic = rendered(&mut open, BASE + 0x410);
     assert!(
         dynamic.contains(
-            "call to vfold: variadic, its argument count unproven (count_argument_not_constant)"
+            "call to vfold: variadic, its argument count unproven (the count argument is no constant)"
         ),
         "{dynamic}"
     );
@@ -709,7 +709,7 @@ fn a_loop_fetching_two_slots_per_trip_is_not_bounded_by_its_count() {
     let caller = rendered(&mut open, BASE + 0x420);
     assert!(
         caller.contains(
-            "call to vfold_pair: variadic, its argument count unproven (missing_format_parameter)"
+            "call to vfold_pair: variadic, its argument count unproven (no format parameter or tail count is declared)"
         ),
         "{caller}"
     );
@@ -759,7 +759,10 @@ fn a_count_register_rewritten_before_the_call_is_no_constant() {
     let code = patched(0x32a, &[0x89, 0xf7, 0x31, 0xc0, 0x90]);
     let mut open = counted_from(code);
     let local = rendered(&mut open, BASE + 0x2f0);
-    assert!(local.contains("count_argument_not_constant"), "{local}");
+    assert!(
+        local.contains("the count argument is no constant"),
+        "{local}"
+    );
     assert!(!local.contains("vfold(1, arg0)"), "{local}");
     assert_eq!(tails(&local).first(), Some(&2), "{local}");
 }

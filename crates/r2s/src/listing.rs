@@ -22,8 +22,8 @@ pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<Strin
         return Err(format!("nothing mapped at {at:#x}"));
     }
     let mut out = String::new();
-    for line in &answer.value {
-        out.push_str(&listed(session, line));
+    for (line, next) in answer.value.iter().zip(next_calls(&answer.value)) {
+        out.push_str(&listed(session, line, next));
     }
     Ok(out.trim_end().to_owned())
 }
@@ -44,12 +44,13 @@ pub(crate) fn instruction_painted(
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
         true => painted(line, &session.program.names()),
     };
-    text.push_str(&held(session, line));
+    // A pane shows one line, so a setter names its call's address.
+    text.push_str(&held(session, line, None));
     (text, roles)
 }
 
 /// One listing line, in the columns radare2 writes them in.
-fn listed(session: &Session, line: &r2engine::query::Line) -> String {
+fn listed(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> String {
     let mut hex: String = line.bytes.iter().map(|b| format!("{:02x}", b)).collect();
     // radare2 caps the byte column at twelve characters and marks the cut.
     if hex.len() > 12 {
@@ -76,7 +77,7 @@ fn listed(session: &Session, line: &r2engine::query::Line) -> String {
     format!(
         "{}            {offset}      {hex}{text}{}\n",
         labels(line),
-        held(session, line)
+        held(session, line, next_call)
     )
 }
 
@@ -239,10 +240,9 @@ pub(crate) fn disassemble_function(
         (None, true) => return Err(format!("no blocks at {addr:#x}")),
         _ => {}
     }
-    let mut out: String = answer
-        .value
-        .iter()
-        .map(|line| listed(session, line))
+    let next = next_calls(&answer.value);
+    let mut out: String = (answer.value.iter().zip(next))
+        .map(|(line, next)| listed(session, line, next))
         .collect();
     out.push_str(&stopped(answer.completion));
     if let Some(refused) = &listing.refused {
@@ -278,39 +278,80 @@ fn claimed_address(line: &r2engine::query::Line, number: r2engine::NumberSpan) -
     line.annotations
         .iter()
         .filter(|annotation| annotation.operand == Some(number) && annotation.reference)
-        .min_by_key(|annotation| annotation.support)
+        .min_by_key(|annotation| &annotation.confidence)
         .and_then(|annotation| annotation.kind.address())
 }
 
-/// What this revision holds and what was proved at the line, as trailing notes each ending in its rung.
-///
-/// The value is stated beside the read rather than substituted into it. A pool
-/// load used to be spelled `ldr r3, sym.foo`, which says the load returns that
-/// address; all this program states is that the word there is that address
-/// now, and the instruction text stays what the machine encodes.
-fn held(session: &Session, line: &r2engine::query::Line) -> String {
-    let indirect = line.annotations.iter().any(|annotation| {
-        matches!(
-            annotation.kind,
-            r2engine::query::AnnotationKind::Call { callee: None, .. }
-        )
-    });
-    line.annotations
+/// Each line's next call line in the listing, in one pass from the end: a setter of that call names
+/// no address.
+fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
+    let mut next = None;
+    let mut out = vec![None; lines.len()];
+    for (at, line) in lines.iter().enumerate().rev() {
+        out[at] = next;
+        let calls = line.annotations.iter().any(|annotation| {
+            matches!(
+                annotation.kind,
+                r2engine::query::AnnotationKind::Call { .. }
+            )
+        });
+        if calls {
+            next = Some(line.address);
+        }
+    }
+    out
+}
+
+/// Each note on the line as `; M text`, weakest first; `asm.proof` adds the basis (doc/adr-display.md).
+/// A held value is stated beside the read, never substituted: the word holds it now, a load may not.
+fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> String {
+    use r2engine::query::{AnnotationKind, Mark, Standing};
+    let indirect = line
+        .annotations
         .iter()
-        .filter_map(|annotation| {
-            let said = match annotation.kind {
-                // An indirect call's target a table it reads holds: no operand of the instruction names it.
-                r2engine::query::AnnotationKind::Target {
-                    address,
-                    call: true,
-                } if indirect => {
-                    format!("calls {address:#x}{}", named(session, address))
-                }
-                _ => note(session, line.address, &annotation.kind)?,
-            };
-            Some(format!(" ; {said} ({})", rung(annotation.support)))
-        })
-        .collect()
+        .any(|annotation| matches!(annotation.kind, AnnotationKind::Call { callee: None, .. }));
+    let mut notes = Vec::new();
+    for annotation in &line.annotations {
+        let said = match annotation.kind {
+            // An indirect call's target a table it reads holds: no operand of the instruction names it.
+            AnnotationKind::Target {
+                address,
+                call: true,
+            } if indirect => Some(format!("calls {address:#x}{}", named(session, address))),
+            AnnotationKind::Call {
+                callee,
+                ref arguments,
+                ..
+            } => Some(called(session, line, callee, arguments.as_deref())),
+            _ => note(session, line.address, &annotation.kind, next_call),
+        };
+        let standing = annotation.kind.standing();
+        notes.extend(said.map(|said| (annotation.mark(), &annotation.confidence, standing, said)));
+        // The callee's own `Never`, a fact of its own beside what the call hands on.
+        if let AnnotationKind::Call {
+            noreturn: Some(ref never),
+            ..
+        } = annotation.kind
+        {
+            let confidence = &never.confidence;
+            notes.push((
+                confidence.mark(),
+                confidence,
+                Standing::Fact,
+                "noreturn".into(),
+            ));
+        }
+    }
+    notes.sort_by(|a, b| Mark::weakest_first((a.0, a.1), (b.0, b.1)));
+    let spelled = notes.into_iter().map(|(mark, confidence, standing, said)| {
+        // A refusal or an unknown stands on no basis, so none is printed.
+        let basis = match session.proof && standing == Standing::Fact {
+            true => format!(" ({confidence})"),
+            false => String::new(),
+        };
+        format!(" ; {} {said}{basis}", mark.cell())
+    });
+    spelled.collect()
 }
 
 /// What the program calls the address a word holds, after a space, or nothing where it calls it nothing.
@@ -324,14 +365,19 @@ fn named(session: &Session, value: u64) -> String {
 }
 
 /// One annotation, as a reader reads it.
-fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> Option<String> {
+fn note(
+    session: &Session,
+    at: u64,
+    kind: &r2engine::query::AnnotationKind,
+    next_call: Option<u64>,
+) -> Option<String> {
     match *kind {
         r2engine::query::AnnotationKind::Holds {
             address,
             width,
             value,
         } => Some(format!(
-            "[{address:#x}:{width}]={value:#x}{}",
+            "[{address:#x}:{width}]={value:#x}{} in file",
             named(session, value)
         )),
         // What the loader writes there, which the file does not hold: spelled apart from what the revision holds.
@@ -340,7 +386,7 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
             width,
             value,
         } => Some(format!(
-            "[{address:#x}:{width}] loaded {value:#x}{}",
+            "[{address:#x}:{width}]={value:#x}{} after relocation",
             named(session, value)
         )),
         // The value this line defines, over its whole life: not what the storage holds at this point.
@@ -354,13 +400,12 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
                 false => format!("defines {name} in [{low:#x}, {high:#x}]"),
             }),
         r2engine::query::AnnotationKind::Text { ref text, .. } => Some(format!("{text:?}")),
-        r2engine::query::AnnotationKind::Call {
-            callee,
-            ref arguments,
-            uncounted,
-        } => Some(called(session, at, callee, arguments.as_deref(), uncounted)),
+        // The call a setter feeds is named where it is not the next call line, or `asm.proof` asks.
         r2engine::query::AnnotationKind::ArgumentOf { call, index } => {
-            Some(format!("arg{} of {call:#x}", index + 1))
+            Some(match session.proof || next_call != Some(call) {
+                true => format!("a{} of {call:#x}", index + 1),
+                false => format!("a{}", index + 1),
+            })
         }
         r2engine::query::AnnotationKind::Switch {
             ref arms, table, ..
@@ -440,48 +485,55 @@ fn stepped(step: r2engine::query::InductionStep) -> String {
     }
 }
 
-/// A call as its boundary proved it: the callee and each argument, exact where it is one.
+/// A call's arguments once, as its boundary proved them, each exact where it is one; or why the
+/// boundary refused them, in r2ssa's words. The callee is named only where no operand names it.
 fn called(
     session: &Session,
-    at: u64,
+    line: &r2engine::query::Line,
     callee: Option<u64>,
-    arguments: Option<&[r2engine::query::CallArgument]>,
-    uncounted: Option<&'static str>,
+    arguments: Result<&[r2engine::query::CallArgument], &r2engine::query::CallBoundaryRefusal>,
 ) -> String {
-    let callee = callee.map_or_else(
-        || "indirect call".to_owned(),
-        |address| {
-            let names = session.program.names();
-            let name = names.of(address);
-            name.map_or_else(|| format!("{address:#x}"), |name| name.spelled())
-        },
-    );
-    // A refused variadic count is why the arguments are unproven, so it is said there.
-    let Some(arguments) = arguments else {
-        return match uncounted {
-            Some(reason) => {
-                format!("{callee}: arguments unproven, variadic tail uncounted: {reason}")
-            }
-            None => format!("{callee}: arguments unproven"),
-        };
+    let at = line.address;
+    let numbers = line.syntax.iter().flat_map(|syntax| &syntax.numbers);
+    let apart = callee.filter(|callee| {
+        let mut numbers = numbers.clone();
+        !numbers.any(|number| claimed_address(line, *number) == Some(*callee))
+    });
+    let names = session.program.names();
+    let apart = apart
+        .and_then(|callee| names.of(callee))
+        .map(|name| name.spelled());
+    let arguments = match (arguments, apart.as_deref()) {
+        (Ok(arguments), _) => arguments,
+        (Err(why), Some(name)) => return format!("args of {name}: {why}"),
+        (Err(why), None) => return format!("args: {why}"),
     };
-    let spelled = arguments
-        .iter()
-        .map(|argument| {
-            let name = format!("arg{}", argument.index + 1);
-            match (argument.value, argument.slot) {
-                (Some(value), _) => format!("{name}={value:#x}"),
-                (None, r2engine::query::ArgumentSlot::Register(storage)) => {
-                    let carrier = session.program.spell_storage(at, storage);
-                    format!("{name}@{}", carrier.unwrap_or_else(|| "?".to_owned()))
-                }
-                (None, r2engine::query::ArgumentSlot::Stack(offset)) => {
-                    format!("{name}@stack{offset:+#x}")
-                }
+    // Positions name the arguments only where they run from the first without a gap.
+    let dense = (arguments.iter().enumerate()).all(|(at, argument)| argument.index == at);
+    let spelled = arguments.iter().map(|argument| {
+        let value = match (argument.value, argument.slot) {
+            (Some(value), _) => format!("{value:#x}"),
+            (None, r2engine::query::ArgumentSlot::Register(storage)) => {
+                let carrier = session.program.spell_storage(at, storage);
+                carrier.unwrap_or_else(|| "?".to_owned())
             }
-        })
-        .collect::<Vec<_>>();
-    format!("{callee}({})", spelled.join(", "))
+            (None, r2engine::query::ArgumentSlot::Stack(offset)) => {
+                format!("stack{}", signed(offset))
+            }
+        };
+        match dense {
+            true => value,
+            false => format!("a{}={value}", argument.index + 1),
+        }
+    });
+    let spelled = spelled.collect::<Vec<_>>().join(", ");
+    format!("{}({spelled})", apart.unwrap_or_default())
+}
+
+/// An offset with its sign and magnitude, as `afv` spells one: `-0x2c`, never its two's complement.
+fn signed(offset: i64) -> String {
+    let sign = if offset < 0 { '-' } else { '+' };
+    format!("{sign}{:#x}", offset.unsigned_abs())
 }
 
 /// A value a claim names, exactly or as what a register held on entry.
@@ -564,7 +616,7 @@ pub(crate) fn c_roles(roles: &[(std::ops::Range<usize>, r2engine::CRole)]) -> Ro
 
 #[cfg(test)]
 mod tests {
-    use super::{spelled, stopped};
+    use super::{signed, spelled, stopped};
     use r2engine::names::{Name, NameDb, Namespace};
     use r2engine::query::Line;
 
@@ -611,7 +663,7 @@ mod tests {
                             address: u64::try_from(number.value).ok()?,
                             call: true,
                         },
-                        support: r2engine::discovery::Basis::Decoded,
+                        confidence: r2engine::discovery::Basis::Decoded.into(),
                         operand: Some(*number),
                         reference: true,
                     })
@@ -687,7 +739,7 @@ mod tests {
                 address: 0xffff_ffff_ffff_10e8,
                 width: 8,
             },
-            support: r2engine::discovery::Basis::Decoded,
+            confidence: r2engine::discovery::Basis::Decoded.into(),
             operand: Some(number),
             reference: true,
         });
@@ -720,6 +772,14 @@ mod tests {
             spelled(&line("call", "0x1030"), &NameDb::new()),
             "call 0x1030"
         );
+    }
+
+    #[test]
+    fn a_negative_stack_offset_is_spelled_signed() {
+        // crackme0x05 0x80484e2 printed `arg1@stack+0xffffffffffffffd4` for the slot at -0x2c (D583).
+        assert_eq!(signed(-0x2c), "-0x2c");
+        assert_eq!(signed(0x8), "+0x8");
+        assert_eq!(signed(i64::MIN), "-0x8000000000000000");
     }
 
     #[test]

@@ -11,12 +11,12 @@ use r2ssa::{
 use super::records::{AnnotationKind, Answered, ArgumentSlot, CallArgument, Operand, Trips};
 use super::result::ResultStanding;
 use crate::native::Prepared;
-use r2source::confidence::Basis;
+use r2source::confidence::{Basis, Confidence, Fact, NeverProof, Premise};
 
 /// A prepared function, with every claim its certificates anchor at an instruction, by the line it is on.
 pub struct Proved<'a> {
     prepared: &'a Prepared,
-    anchored: BTreeMap<u64, Vec<(AnnotationKind, Basis)>>,
+    anchored: BTreeMap<u64, Vec<(AnnotationKind, Confidence)>>,
 }
 
 impl<'a> Proved<'a> {
@@ -41,18 +41,21 @@ impl<'a> Proved<'a> {
     }
 
     /// What the certificates say of the line at this address.
-    fn at(&self, address: u64) -> &[(AnnotationKind, Basis)] {
+    fn at(&self, address: u64) -> &[(AnnotationKind, Confidence)] {
         self.anchored.get(&address).map_or(&[], Vec::as_slice)
     }
 }
 
 /// The claims being gathered, by line.
 #[derive(Default)]
-struct Anchored(BTreeMap<u64, Vec<(AnnotationKind, Basis)>>);
+struct Anchored(BTreeMap<u64, Vec<(AnnotationKind, Confidence)>>);
 
 impl Anchored {
-    fn push(&mut self, line: u64, kind: AnnotationKind, support: Basis) {
-        self.0.entry(line).or_default().push((kind, support));
+    fn push(&mut self, line: u64, kind: AnnotationKind, confidence: impl Into<Confidence>) {
+        self.0
+            .entry(line)
+            .or_default()
+            .push((kind, confidence.into()));
     }
 
     /// Each call's line says what it hands on, and each line that sets an argument says which call takes it.
@@ -63,19 +66,25 @@ impl Anchored {
                 continue;
             };
             let proven = call.arguments_proven;
-            let handed = proven.then(|| handed(artifact, call));
-            let support = handed.as_ref().map_or(Basis::Certified, |(_, rung)| *rung);
-            let uncounted = call
-                .variadic
-                .then_some(call.variadic_argument_count_refusal)
-                .flatten()
-                .map(|refusal| refusal.kind());
+            let boundary = artifact.facts().boundaries.calls.get(&call.call_site);
+            let handed = match proven {
+                true => Ok(handed(artifact, call)),
+                // No boundary fact is a call no convention describes, as r2dec reads it.
+                false => Err((boundary.and_then(|boundary| boundary.refusal))
+                    .unwrap_or(r2ssa::CallBoundaryRefusal::NoConvention)),
+            };
+            let mapping = mapped(call);
+            // A refusal maps nothing, so it rests on nothing past the certificate.
+            let confidence = match &handed {
+                Ok((_, rung)) => mapping(*rung),
+                Err(_) => Confidence::of(Basis::Certified),
+            };
             let kind = AnnotationKind::Call {
                 callee: call.direct_target,
                 arguments: handed.map(|(arguments, _)| arguments),
-                uncounted,
+                noreturn: boundary.and_then(|boundary| never_returns(boundary.never.as_ref()?)),
             };
-            self.push(line, kind, support);
+            self.push(line, kind, confidence);
             // The functions a stated table lets an indirect call reach: a call to each, solved from the index range.
             for target in call.table_targets.iter().flatten() {
                 let kind = AnnotationKind::Target {
@@ -94,7 +103,7 @@ impl Anchored {
             });
             for (set, index) in set.collect::<Vec<_>>() {
                 let kind = AnnotationKind::ArgumentOf { call: line, index };
-                self.push(set, kind, Basis::Certified);
+                self.push(set, kind, mapping(Basis::Certified));
             }
         }
     }
@@ -244,6 +253,32 @@ fn handed(artifact: &SsaArtifact, call: &CallsiteCertificate) -> (Vec<CallArgume
     (arguments.collect(), support)
 }
 
+/// What a call's argument mapping rests on past `rung`: an import's arity is its name-found
+/// declaration's; any other callee's holds under the closed world, stated per call by none (D592).
+fn mapped(call: &CallsiteCertificate) -> impl Fn(Basis) -> Confidence {
+    let imported = call.callee_linkage == r2source::AdvisoryCalleeLinkage::Imported;
+    move |rung| match imported {
+        true => Confidence::of(rung.max(Basis::Declared)),
+        false => Confidence::of(rung).assuming(Premise::ClosedWorld),
+    }
+}
+
+/// That the callee never comes back, where its own `Never` proves it (a site's halting argument
+/// is no callee fact): a declaration's on its basis, a composition certified, with what each assumes.
+fn never_returns(closed: &r2ssa::ExitSite) -> Option<Fact<bool>> {
+    let premises = closed.callee.then(|| closed.never.proves()).flatten()?;
+    let basis = match closed.never.proof() {
+        NeverProof::Declared => Basis::Declared,
+        NeverProof::Composed => Basis::Certified,
+        NeverProof::NoReturnReached => return None,
+    };
+    let confidence = Confidence {
+        basis,
+        premises: premises.iter().copied().collect(),
+    };
+    Some(Fact::new(true, confidence))
+}
+
 /// Whether a claim already says where an indirect transfer goes: a dispatch or a call.
 fn followed(kind: &AnnotationKind) -> bool {
     matches!(
@@ -253,7 +288,10 @@ fn followed(kind: &AnnotationKind) -> bool {
 }
 
 /// What a header's induction carries, from what it starts at, on the rung its start stands on.
-fn carries(artifact: &SsaArtifact, induction: &InductionFact) -> Option<(AnnotationKind, Basis)> {
+fn carries(
+    artifact: &SsaArtifact,
+    induction: &InductionFact,
+) -> Option<(AnnotationKind, Confidence)> {
     let storage = register(artifact.graph(), induction.phi)?;
     let init = operand(artifact, induction.init);
     let kind = AnnotationKind::Induction {
@@ -263,7 +301,7 @@ fn carries(artifact: &SsaArtifact, induction: &InductionFact) -> Option<(Annotat
         width_bits: induction.width_bits,
     };
     let support = init.map_or(Basis::Certified, |(_, rung)| rung);
-    Some((kind, support.max(Basis::Certified)))
+    Some((kind, support.max(Basis::Certified).into()))
 }
 
 /// A trip count as a claim names it: exact, or affine over what registers held on entry.
@@ -346,12 +384,19 @@ pub(super) fn proved_about(
     answered: &Answered<'_>,
     address: u64,
     folded: &dyn Fn(CanonicalStorageId) -> Option<u64>,
-) -> Vec<(AnnotationKind, Basis)> {
+) -> Vec<(AnnotationKind, Confidence)> {
     let Some(proved) = answered.proved else {
         return Vec::new();
     };
     let mut claims = bounded(answered, proved.prepared, address, folded);
     claims.extend(proved.at(address).iter().cloned());
+    // A claim over the whole function rests on what its rewrites assumed; an instruction's or a run's does not.
+    let assumed = proved.prepared.artifact().artifact().function().premises();
+    for (_, confidence) in &mut claims {
+        if !matches!(confidence.basis, Basis::Decoded | Basis::Folded) {
+            confidence.premises.extend(assumed.iter().copied());
+        }
+    }
     claims
 }
 
@@ -361,7 +406,7 @@ fn bounded(
     prepared: &Prepared,
     address: u64,
     folded: &dyn Fn(CanonicalStorageId) -> Option<u64>,
-) -> Vec<(AnnotationKind, Basis)> {
+) -> Vec<(AnnotationKind, Confidence)> {
     let (Some(body), Some(machine)) = (answered.body, answered.decoders.at(address)) else {
         return Vec::new();
     };
@@ -388,7 +433,7 @@ fn bounded(
                 high,
                 stride: range.stride().unwrap_or(0),
             };
-            Some((kind, support))
+            Some((kind, support.into()))
         })
         .collect()
 }

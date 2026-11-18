@@ -1074,7 +1074,7 @@ fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0x97ff_fffa]); // bl f
     assert!(text.contains(r#"printf("%d\n", (uint64_t)7U);"#), "{text}");
     assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
-    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("the format is no literal"), "{text}");
     assert!(!text.contains("frame + 16U"), "{text}");
 }
 
@@ -1094,7 +1094,7 @@ fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
 #[test]
 fn a_format_reloaded_past_an_indirect_call_is_its_literal_under_frame_isolation() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
-    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("the format is no literal"), "{text}");
     assert!(!text.contains("frame + 16U"), "{text}");
     assert!(text.contains("(assuming frame-isolation)"), "{text}");
 }
@@ -1136,7 +1136,7 @@ fn a_format_spilled_on_one_path_only_bounds_no_write() {
     open.source_mut().write(FORMAT, b"%d\n\0");
     let rendered = open.rendered(BASE + 0x10).expect("it renders");
     let text = rendered.response.output.into_text();
-    assert!(text.contains("format_argument_not_literal"), "{text}");
+    assert!(text.contains("the format is no literal"), "{text}");
     assert!(text.contains("frame + 28U"), "{text}");
 }
 
@@ -1225,21 +1225,21 @@ fn a_counted_printf_reads_only_its_placed_registers() {
 #[test]
 fn a_printf_whose_format_the_program_may_write_bounds_no_stack() {
     let text = printing_twice(b"%d\n\0", true);
-    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+    assert!(text.contains("(the format is no literal)"), "{text}");
 }
 
 /// A `long double` operand takes no 8-byte slot this rule places: the reload stays memory.
 #[test]
 fn a_printf_whose_format_reads_a_long_double_bounds_no_stack() {
     let text = printing_twice(b"%Lf\n\0", false);
-    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+    assert!(text.contains("(the format is no literal)"), "{text}");
 }
 
 /// Ten operands put three on the stack, the third at the slot: the reload stays memory.
 #[test]
 fn a_printf_whose_counted_tail_covers_the_slot_keeps_it_a_load() {
     let text = printing_twice(b"%d%d%d%d%d%d%d%d%d%d\0", false);
-    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+    assert!(text.contains("(the format is no literal)"), "{text}");
 }
 
 /// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.

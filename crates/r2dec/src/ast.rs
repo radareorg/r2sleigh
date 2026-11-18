@@ -1603,57 +1603,8 @@ impl CallRefusal {
 
 impl std::fmt::Display for CallRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use r2ssa::CallBoundaryRefusal as B;
         let fixed = match self {
-            Self::Boundary(boundary) => match boundary {
-                B::NoConvention => "no calling convention describes it",
-                B::InterfaceIncomplete => "its declared interface is incomplete",
-                B::ArgumentAreaUnseen => "its stack argument area is not placed",
-                B::DeclaredArgumentUnreached { index } => {
-                    return write!(f, "no value reaches its declared argument {index}");
-                }
-                B::StatedArgumentUnreached { count } => {
-                    return write!(f, "it takes {count} arguments, and one reaches no value");
-                }
-                B::VariadicCount(why) => {
-                    return write!(f, "variadic, its argument count unproven ({})", why.kind());
-                }
-                B::ResultUnreached => "no value reaches its declared result",
-                B::Floor { floor, written } => {
-                    return write!(
-                        f,
-                        "its arity is only at least {floor} (a floor), and this call writes {written}"
-                    );
-                }
-                B::MayHandOn { slot } => {
-                    return write!(
-                        f,
-                        "argument slot {slot} may hand on what this function was passed"
-                    );
-                }
-                B::SlotSkipped { slot } => {
-                    return write!(
-                        f,
-                        "argument slot {slot} is unwritten, and a later one is written"
-                    );
-                }
-                B::ResultPassedOn { slot } => {
-                    return write!(
-                        f,
-                        "argument slot {slot} holds an earlier call's result, and a later one is written"
-                    );
-                }
-                B::CountFromRegisters => "no arity is stated, only the registers written before it",
-                B::CountRegisterSet => {
-                    "it is handed a vector count: variadic or unprototyped, its argument count unproven"
-                }
-                B::ImportUnstated(r2ssa::UnstatedImport::Undeclared) => {
-                    "the import has no declaration to state its arguments"
-                }
-                B::ImportUnstated(r2ssa::UnstatedImport::Unplaced) => {
-                    "the import's declaration has an argument this convention does not place"
-                }
-            },
+            Self::Boundary(boundary) => return write!(f, "{boundary}"),
             Self::NoCallSite => "r2ssa states no call site here",
             Self::NoCertificate => "no callsite certificate",
             Self::NoCallee => "no callee is named",
