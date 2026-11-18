@@ -686,10 +686,9 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         storage: Some(rax),
         standing: unread,
     };
-    assert_eq!(
-        certified(&ident),
-        [(BASE + 3, returns, Confidence::of(Basis::Convention))]
-    );
+    // The closed answer names its premise on `ident`'s own result (D573).
+    let convention = Confidence::of(Basis::Convention).assuming(Premise::ClosedWorld);
+    assert_eq!(certified(&ident), [(BASE + 3, returns, convention)]);
 }
 
 #[test]

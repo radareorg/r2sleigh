@@ -1065,8 +1065,9 @@ mod listing {
         let header = run.out.lines().find(|line| line.contains("0x00401348"));
         let header = header.unwrap_or_default();
         for said in [
-            "induction rdi = rdi@entry, +0x1 per trip (certified)",
-            "trips rsi@entry (solved)",
+            // Every closed answer names its premise (D573), and a certificate note carries it (D579).
+            "induction rdi = rdi@entry, +0x1 per trip (certified+closed-world)",
+            "trips rsi@entry (solved+closed-world)",
         ] {
             assert!(header.contains(said), "{said}: {}", run.out);
         }
@@ -1096,7 +1097,7 @@ mod listing {
                 listed.out
             );
         }
-        let dispatch = "; ~ switch table (8 cases) at 0x402020 (solved)";
+        let dispatch = "; ~ switch table (8 cases) at 0x402020 (solved+closed-world)";
         assert!(listed.out.contains(dispatch), "{}", listed.out);
     }
 
@@ -1189,7 +1190,7 @@ mod listing {
         let mut lines = listed.out.lines();
         let call = lines.find(|line| line.trim_start().starts_with("0x100000e18"));
         // An import's arity is its name-found declaration's (D579).
-        let certified = "bl sym.imp.memcpy ; ^ (x0, 0x100004008, 0x50) (declared)";
+        let certified = "bl sym.imp.memcpy ; ^ (x0, 0x100004008, 0x50) (declared+closed-world)";
         assert!(
             call.is_some_and(|line| line.ends_with(certified)),
             "{}",

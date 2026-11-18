@@ -60,9 +60,10 @@ fn a_cold_answer_names_the_closed_world_it_reads() {
 fn a_ret_note_states_the_result_afi_states() {
     let listing = shell(HASHES, "pdf @ 0x401000");
     let info = shell(HASHES, "afi @ 0x401000");
-    assert!(info.contains("result: unproven (rax, Written)"), "{info}");
+    assert!(info.contains("result: unproven ; ! rax, Written"), "{info}");
+    // An unproven result is a refusal kind: `!`, no basis word (D579's speller at the merge).
     assert!(
-        listing.contains("ret ; result unproven (rax, Written)"),
+        listing.contains("ret ; ! result unproven (rax, Written)"),
         "{listing}"
     );
     assert!(!listing.contains("returns rax"), "{listing}");
