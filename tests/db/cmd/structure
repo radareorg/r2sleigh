@@ -25,7 +25,7 @@ r2sleigh_word_u32 gate_one(r2sleigh_word_u32 arg0)
     }
 }
 
-r2sleigh_word_u64 inverted_guard(int32_t arg0)
+r2sleigh_result_u64 inverted_guard(int32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -33,17 +33,17 @@ r2sleigh_word_u64 inverted_guard(int32_t arg0)
     uint64_t rax_5;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 8 statements rendered; 2 data object types refused; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 8 statements rendered; 2 data object types refused; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
             rax_7 = (uint64_t)0xffffffffU;
-            return (uint64_t)rax_7;
+            return r2sleigh_carrier_u64((uint64_t)rax_7);
         } else {
             r2sleigh_store_u64((void*)&g_note, (uint64_t)(int32_t)((uint32_t)arg0 + (uint32_t)2U));
             r2sleigh_store_u32((void*)&g_sink, (uint32_t)arg0);
             rax_5 = r2sleigh_load_u64((void*)&g_note);
             rax_7 = rax_5;
-            return (uint64_t)rax_7;
+            return r2sleigh_carrier_u64((uint64_t)rax_7);
         }
     }
 }

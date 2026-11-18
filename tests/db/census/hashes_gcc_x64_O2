@@ -83,18 +83,18 @@ r2sleigh_word_u32 fcn_401050(void)
 {
     int32_t __printf_chk(int32_t, const char*, ...);
     r2sleigh_word_u32 adler32(r2sleigh_word_u64, r2sleigh_word_u64);
-    r2sleigh_word_u64 combined(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u64 combined(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_result_u64 crc32_init(void);
     r2sleigh_word_u32 crc32_table(r2sleigh_word_u64, r2sleigh_word_u64);
-    r2sleigh_word_u32 djb2(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u32 djb2(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 fletcher32(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64, r2sleigh_word_u64);
-    r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u64 fnv1a64(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 murmur3_32(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u32);
-    r2sleigh_word_u32 pearson(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u32 pearson(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 sdbm(r2sleigh_word_u64, r2sleigh_word_u64);
-    r2sleigh_word_u64 siphash24(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u64 siphash24(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 xxhash32(uint64_t, uint64_t, r2sleigh_word_u32);
 
     uint64_t rax_2;
@@ -327,7 +327,7 @@ NAME=0x00401370
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401370
 EXPECT=<<EOF
-r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
+r2sleigh_result_u64 fnv1a64(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -337,7 +337,7 @@ r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_4;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 28 rendered, 4 elided, 0 refused; 15 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 28 rendered, 4 elided, 0 refused; 15 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             rax_5 = (uint64_t)0xcbf29ce484222325U;
@@ -359,7 +359,7 @@ r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             }
         }
         {
-            return (uint64_t)rax_5;
+            return r2sleigh_carrier_u64((uint64_t)rax_5);
         }
     }
 }
@@ -373,7 +373,7 @@ NAME=0x004013b0
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x004013b0
 EXPECT=<<EOF
-r2sleigh_word_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
+r2sleigh_result_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -382,10 +382,10 @@ r2sleigh_word_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint8_t tmp_4013d3_8_1;
     uint32_t tmp_lane_4013d7_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 33 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 41 source obligations: 33 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
-            return 0x1505;
+            return r2sleigh_carrier_u32(0x1505);
         } else {
             rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
             rax_2 = 0x1505;
@@ -398,7 +398,7 @@ r2sleigh_word_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)rsi_1));
             {
-                return (uint32_t)tmp_lane_4013d7_6_0_1;
+                return r2sleigh_carrier_u32((uint32_t)tmp_lane_4013d7_6_0_1);
             }
         }
     }
@@ -1119,7 +1119,7 @@ NAME=0x004018b0
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x004018b0
 EXPECT=<<EOF
-r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word_u64 arg2, r2sleigh_word_u64 arg3)
+r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word_u64 arg2, r2sleigh_word_u64 arg3)
 {
     uint64_t rax_2;
     uint64_t rdx_1;
@@ -1221,7 +1221,7 @@ r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word
     uint64_t rax_36;
     uint64_t rdx_27;
 
-    /* r2dec proof: no individual construct is marked; 323 source obligations: 312 rendered, 11 elided, 0 refused; 135 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 323 source obligations: 312 rendered, 11 elided, 0 refused; 135 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
     {
         rax_2 = (uint64_t)((uint64_t)arg2 ^ (uint64_t)0x736f6d6570736575U);
         rdx_1 = (uint64_t)((uint64_t)arg2 ^ (uint64_t)0x6c7967656e657261U);
@@ -1387,7 +1387,7 @@ L7: ;
                 rdx_26 = (uint64_t)((uint64_t)rcx_33 + (uint64_t)r2sleigh_rotl64((uint64_t)rdx_24, 32U));
                 rax_36 = (uint64_t)((uint64_t)rdx_26 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_33, 16U));
                 rdx_27 = (uint64_t)((uint64_t)rdx_26 + (uint64_t)rsi_30);
-                return (uint64_t)((uint64_t)r2sleigh_rotl64((uint64_t)rdx_27, 32U) ^ (uint64_t)((uint64_t)r2sleigh_rotl64((uint64_t)rsi_30, 17U) ^ (uint64_t)((uint64_t)rdx_27 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rax_36, 21U))));
+                return r2sleigh_carrier_u64((uint64_t)((uint64_t)r2sleigh_rotl64((uint64_t)rdx_27, 32U) ^ (uint64_t)((uint64_t)r2sleigh_rotl64((uint64_t)rsi_30, 17U) ^ (uint64_t)((uint64_t)rdx_27 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rax_36, 21U)))));
             }
         }
     }
@@ -1402,7 +1402,7 @@ NAME=0x00401b10
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401b10
 EXPECT=<<EOF
-r2sleigh_word_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
+r2sleigh_result_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     extern char pearson_tab[];
 
@@ -1414,10 +1414,10 @@ r2sleigh_word_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint8_t tmp_401b29_8_1;
     uint32_t tmp_lane_401b29_2_0_1;
 
-    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
-            return 0;
+            return r2sleigh_carrier_u32(0);
         } else {
             rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
             rax_2 = 0;
@@ -1431,7 +1431,7 @@ r2sleigh_word_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)rsi_1));
             {
-                return (uint32_t)tmp_lane_401b29_2_0_1;
+                return r2sleigh_carrier_u32((uint32_t)tmp_lane_401b29_2_0_1);
             }
         }
     }
@@ -1446,11 +1446,11 @@ NAME=0x00401b50
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401b50
 EXPECT=<<EOF
-r2sleigh_word_u64 combined(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
+r2sleigh_result_u64 combined(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64, r2sleigh_word_u64);
-    r2sleigh_word_u32 djb2(r2sleigh_word_u64, r2sleigh_word_u64);
-    r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u32 djb2(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u64 fnv1a64(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u32 murmur3_32(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u32);
 
     uint64_t rax_1;
@@ -1460,7 +1460,7 @@ r2sleigh_word_u64 combined(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t r9_3;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 57 source obligations: 41 rendered, 16 elided, 0 refused; 7 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 57 source obligations: 41 rendered, 16 elided, 0 refused; 7 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
     {
         rax_1 = fnv1a64(arg0, arg1);
         rax_2 = (uint64_t)djb2(arg0, arg1);
@@ -1468,7 +1468,7 @@ r2sleigh_word_u64 combined(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
         r9_2 = (uint64_t)((uint64_t)(uint32_t)rax_3 + (uint64_t)((uint64_t)rax_1 ^ (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)32U)));
         r9_3 = r2sleigh_rotl64((uint64_t)r9_2, 7U);
         rax_4 = (uint64_t)murmur3_32((uint8_t*)arg0, arg1, (uint32_t)r9_3);
-        return (uint64_t)((uint64_t)(uint32_t)rax_4 ^ (uint64_t)r9_3);
+        return r2sleigh_carrier_u64((uint64_t)((uint64_t)(uint32_t)rax_4 ^ (uint64_t)r9_3));
     }
 }
 

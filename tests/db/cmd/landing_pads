@@ -212,7 +212,7 @@ CMDS=pdd @ sym._Z7guardedi
 EXPECT=<<EOF
 r2sleigh_result_u32 _Z7guardedi(r2sleigh_word_u32 arg0)
 {
-    r2sleigh_word_u32 _Z5riskyi(int32_t);
+    r2sleigh_result_u32 _Z5riskyi(int32_t);
     r2sleigh_result_u64 _ZN5GuardD1Ev(r2sleigh_word_u64*);
     __attribute__((noreturn)) void __stack_chk_fail(void);
 

@@ -1977,9 +1977,16 @@ fn recover_interface_inner(
     result_causes.extend(beside_void_tails);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
     let mut result_carriers = None;
-    let read = |lanes: r2source::SourceReadLanes| {
-        closed == Some(r2source::SourceClosedResult::Read(lanes))
-    };
+    let pair_read = closed
+        == Some(r2source::SourceClosedResult::Read(
+            r2source::SourceReadLanes::Pair,
+        ));
+    let integer_read = matches!(
+        closed,
+        Some(r2source::SourceClosedResult::Read(
+            r2source::SourceReadLanes::Integer { .. }
+        ))
+    );
     let mut applied = None;
     let mut result_holds_input = false;
     let mut unreached = false;
@@ -2021,7 +2028,9 @@ fn recover_interface_inner(
         {
             let float_read = (closed.and_then(float_bytes)).map(|bytes| float_lane(float, bytes));
             match closed {
-                Some(r2source::SourceClosedResult::Read(r2source::SourceReadLanes::Integer)) => {
+                Some(r2source::SourceClosedResult::Read(r2source::SourceReadLanes::Integer {
+                    ..
+                })) => {
                     applied = closed;
                 }
                 // The carrier is the lane the reads take, as a declared float's is (`low_lane`):
@@ -2115,14 +2124,14 @@ fn recover_interface_inner(
             let both =
                 || crate::liveout::FunctionLiveOut::compute(func, graph, &[low.slot(), high]);
             // One closed-world call reading the second register is evidence the value spans both.
-            if read(r2source::SourceReadLanes::Pair) {
+            if pair_read {
                 result = RecoveredFunctionResult::Pair {
                     low: low.slot(),
                     high,
                 };
                 candidate_live_out = both();
                 applied = closed;
-            } else if !read(r2source::SourceReadLanes::Integer) {
+            } else if !integer_read {
                 // The second register is a carrier a reading call may take; what feeds it is observed.
                 result_carriers = Some(r2source::SourceResultCarriers {
                     integer: low.slot(),

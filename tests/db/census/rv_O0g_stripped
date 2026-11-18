@@ -237,11 +237,11 @@ NAME=0x000011a9
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000011a9
 EXPECT=<<EOF
-r2sleigh_word_u32 fcn_11a9(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
+r2sleigh_result_u32 fcn_11a9(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthUnbounded): 1 unproven-return carried */
     {
-        return (uint32_t)((uint32_t)arg1 + (uint32_t)arg0);
+        return r2sleigh_carrier_u32((uint32_t)((uint32_t)arg1 + (uint32_t)arg0));
     }
 }
 
@@ -380,7 +380,7 @@ NAME=0x000012a8
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000012a8
 EXPECT=<<EOF
-r2sleigh_word_u64 fcn_12a8(r2sleigh_word_u64 arg0, int64_t arg1)
+r2sleigh_result_u64 fcn_12a8(r2sleigh_word_u64 arg0, int64_t arg1)
 {
     uint64_t rax_4;
     __uint128_t tmp_12d4_0_1;
@@ -403,7 +403,7 @@ r2sleigh_word_u64 fcn_12a8(r2sleigh_word_u64 arg0, int64_t arg1)
     uint64_t rdx_5;
     uint64_t rax_10;
 
-    /* r2dec proof: 2 constructs are marked below; 41 source obligations: 31 rendered, 7 elided, 0 refused, 3 residual; 26 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: 2 constructs are marked below; 41 source obligations: 31 rendered, 7 elided, 0 refused, 3 residual; 26 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 != (uint64_t)0U)) {
             rax_4 = (uint64_t)((uint64_t)((uint64_t)arg0 * (uint64_t)8U) - (uint64_t)arg0);
@@ -428,10 +428,10 @@ r2sleigh_word_u64 fcn_12a8(r2sleigh_word_u64 arg0, int64_t arg1)
             tmp_12e3_70_1 = (__uint128_t)tmp_12e3_10_1 == (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0xffffffffffffffffULL) ? (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0U) : (__uint128_t)((__int128_t)tmp_12e3_50_1 % (__int128_t)tmp_12e3_10_1);
             rdx_5 = (uint64_t)tmp_12e3_70_1;
             rax_10 = (uint64_t)((uint64_t)rdx_5 + (uint64_t)rax_5);
-            return (uint64_t)rax_10;
+            return r2sleigh_carrier_u64((uint64_t)rax_10);
         } else {
             rax_10 = 0;
-            return (uint64_t)rax_10;
+            return r2sleigh_carrier_u64((uint64_t)rax_10);
         }
     }
 }
@@ -546,7 +546,7 @@ NAME=0x000013e3
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000013e3
 EXPECT=<<EOF
-r2sleigh_word_u64 fcn_13e3(r2sleigh_word_u8* arg0, const char* arg1, uint64_t arg2)
+r2sleigh_result_u64 fcn_13e3(r2sleigh_word_u8* arg0, const char* arg1, uint64_t arg2)
 {
     void* memcpy(void*, const void*, uint64_t);
     uint64_t strlen(const char*);
@@ -555,7 +555,7 @@ r2sleigh_word_u64 fcn_13e3(r2sleigh_word_u8* arg0, const char* arg1, uint64_t ar
     uint64_t stack_m16_2;
     uint64_t stack_m16_1;
 
-    /* r2dec proof: no individual construct is marked; 39 source obligations: 26 rendered, 13 elided, 0 refused; 6 statements rendered; 2 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 39 source obligations: 26 rendered, 13 elided, 0 refused; 6 statements rendered; 2 callee prototypes supplied by the source; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 1 unproven-return carried */
     {
         rax_2 = strlen(arg1);
         stack_m16_2 = rax_2;
@@ -563,7 +563,7 @@ r2sleigh_word_u64 fcn_13e3(r2sleigh_word_u8* arg0, const char* arg1, uint64_t ar
         {
             memcpy((void*)(uint64_t)arg0, (const void*)(uint64_t)arg1, stack_m16_1);
             r2sleigh_store_u8((void*)((uint64_t)arg0 + (uint64_t)stack_m16_1 * 1U), (uint8_t)0U);
-            return (uint64_t)stack_m16_1;
+            return r2sleigh_carrier_u64((uint64_t)stack_m16_1);
         }
     }
 }
@@ -577,18 +577,18 @@ NAME=0x0000144c
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x0000144c
 EXPECT=<<EOF
-r2sleigh_word_u32 fcn_144c(r2sleigh_word_u32 arg0)
+r2sleigh_result_u32 fcn_144c(r2sleigh_word_u32 arg0)
 {
     uint64_t rax_1;
     uint16_t tmp_lane_1459_2_0_1;
     uint64_t rax_2;
 
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 10 rendered, 7 elided, 0 refused; 4 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 17 source obligations: 10 rendered, 7 elided, 0 refused; 4 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 1 unproven-return carried */
     {
         rax_1 = (uint64_t)(uint32_t)arg0;
         tmp_lane_1459_2_0_1 = (uint16_t)(int8_t)arg0;
         rax_2 = (uint64_t)(((uint64_t)rax_1 & (uint64_t)0xffffffffffff0000U) | ((uint64_t)tmp_lane_1459_2_0_1 & (uint64_t)0xffffU) << 0U);
-        return (uint32_t)((uint32_t)rax_2 - (uint32_t)((uint64_t)rax_2 * (uint64_t)4U));
+        return r2sleigh_carrier_u32((uint32_t)((uint32_t)rax_2 - (uint32_t)((uint64_t)rax_2 * (uint64_t)4U)));
     }
 }
 
@@ -621,12 +621,12 @@ NAME=0x00001489
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001489
 EXPECT=<<EOF
-r2sleigh_word_u32 fcn_1489(r2sleigh_word_u32 arg0)
+r2sleigh_result_u32 fcn_1489(r2sleigh_word_u32 arg0)
 {
     uint32_t stack_m28_1;
     uint32_t stack_m12_1;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 1 unproven-return carried */
     {
         stack_m28_1 = arg0;
         stack_m12_1 = 0;
@@ -635,7 +635,7 @@ r2sleigh_word_u32 fcn_1489(r2sleigh_word_u32 arg0)
             stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
         }
         {
-            return (uint32_t)stack_m12_1;
+            return r2sleigh_carrier_u32((uint32_t)stack_m12_1);
         }
     }
 }
@@ -710,18 +710,18 @@ CMDS=aa; pdd @ 0x00001549
 EXPECT=<<EOF
 r2sleigh_word_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
 {
-    r2sleigh_word_u32 fcn_11a9(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_result_u32 fcn_11a9(r2sleigh_word_u32, r2sleigh_word_u32);
     r2sleigh_word_u32 fcn_11c1(r2sleigh_word_u32*, int32_t);
     r2sleigh_word_u32 fcn_120a(uint32_t);
     r2sleigh_word_u32 fcn_1277(r2sleigh_word_u64);
-    r2sleigh_word_u64 fcn_12a8(r2sleigh_word_u64, int64_t);
+    r2sleigh_result_u64 fcn_12a8(r2sleigh_word_u64, int64_t);
     double fcn_12ef(r2sleigh_word_u64*, int32_t);
     r2sleigh_word_u32 fcn_1362(int32_t);
     r2sleigh_result_u32 fcn_1391(r2sleigh_word_u32);
-    r2sleigh_word_u64 fcn_13e3(r2sleigh_word_u8*, const char*, uint64_t);
-    r2sleigh_word_u32 fcn_144c(r2sleigh_word_u32);
+    r2sleigh_result_u64 fcn_13e3(r2sleigh_word_u8*, const char*, uint64_t);
+    r2sleigh_result_u32 fcn_144c(r2sleigh_word_u32);
     r2sleigh_word_u32 fcn_146d(r2sleigh_word_u32, r2sleigh_word_u8);
-    r2sleigh_word_u32 fcn_1489(r2sleigh_word_u32);
+    r2sleigh_result_u32 fcn_1489(r2sleigh_word_u32);
     r2sleigh_word_u32 fcn_14b5(int32_t*, int32_t, int32_t);
     uint64_t fcn_1521(r2sleigh_word_u64, r2sleigh_word_u64);
     int32_t printf(const char*, ...);

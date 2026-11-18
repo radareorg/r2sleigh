@@ -851,6 +851,16 @@ The open part, built 2026-11-16 (rd10-load-base): `resolved_alone` asks first to
 - `forwarded_carriers`: `float_unwritten` is `written_at_returns` over the float live-out with the tail blocks kept as exits. `integer_undefined` holds only where `direct_returns_beside_void_tails` answers `(Void, None)`; elsewhere the integer lane is stated open, no negative fact: the tails leave it undefined, a direct return leaves data, and undefined joined with data is data (doc/adr-scratch-result.md, "As built"). grep O2-noinline `fcn_9670` is that case: `0x96a2` returns `lseek`'s RAX. The ruling's other reading, no carriers there, keeps `0x9d30`'s wrong extern.
 - Gate: DecBench moves the 50 functions round 12 listed, 4 of them in C (grep `0x9670`, `0x9d30`; xmlwf `0x3a30`; bzip2 `0xee90`), each extern equal to its callee header's result type.
 
+## D610 as built (2026-11-18, rd15-d610)
+
+A closed-world read proves a result exists. Its type needs the width pinned and, at a pointer's width, the kind.
+
+- Fact. A caller compiled against the declaration reads at most the declared width before it extends, and the body writes at least it, so the declared width lies between the widest read and the width the body writes. It is pinned where they agree, and only where every read is known.
+- Owners. r2ssa `site_boundary`: `LaneFate::Read { bytes, returned, lost }` states the bytes another path hands back to the caller's callers or loses. r2engine `fates.rs`: `every_read` walks the callers a lane is returned to, read lanes included (`Direct.read_returned`), and fails on an `unknown`, `cycle` or `unbounded` lane or on a function whose reads are not every read (`reads_known`: `only_called`, or every take into a cited slot by `DeclaredSlot`); `bounded` states `SourceReadLanes::Integer { widest }`. r2types `decided_from` (`read_width`): decided at the body's width where the widest read equals it and it is below a pointer's; otherwise `Unproven` with `WidthUnbounded`, `WidthBetween` or `PointerWide`, carried through `r2sleigh_carrier_uN`.
+- Refuted: deciding at the widest read alone. gclib `used_c`, statics `g_1` and `s_8` have callers that truncate (`(int)used_c(v, 2)`, source `long`); source-gold read 3 new silent widths and 3 `bool` results as bytes.
+- Cost: one walk per decided integer read, each `(function, mask)` pushed only when its mask grows, at most 128 times: `O((V + E) x 128)` over the returners reached, typically one function. `Escapes` and `DeclaredSlot` are held program queries.
+- Open: the two parameter lines of D610 (`combined` p0, clones `main` p1) are stop facts. A read is an instruction's input width, so `mov r11, rax; shl r11, 32` reads 8 bytes of a 32-bit result (hashes O2 `djb2`, `WidthBetween`): demanded bytes would decide it.
+
 ## Open questions
 
 1. The register effect is computed on ask or deposited by `SiteFates` ("S31b as built", ruled). pumasim `0x3b6b20` does not meet the note's gate (-0.07 G against -0.08 G, run spread 0.014 G); the next lever is D354.

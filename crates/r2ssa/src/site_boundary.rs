@@ -124,8 +124,13 @@ pub fn argument_registers(slots: &ConventionModel) -> Vec<CanonicalStorageId> {
 pub enum LaneFate {
     /// No path reads them, hands them back or leaves them: overwritten, or the path ends first.
     Dead,
-    /// Some path reads these bytes, the lowest among them, before any call that may leave them.
-    Read(ByteMask),
+    /// Some path reads these bytes, the lowest among them, before any call that may leave them;
+    /// another may return `returned` to the caller's callers, or lose some (`lost`), as `Unknown` (D610).
+    Read {
+        bytes: ByteMask,
+        returned: ByteMask,
+        lost: bool,
+    },
     /// No path reads or loses them; some returns with these bytes in place.
     Returned(ByteMask),
     /// Some path leaves them where the walk did not follow, a call may take them, a tail transfer
@@ -601,7 +606,11 @@ impl Live {
     /// esi` after `sete dl` is not); dead only where nothing reads, loses, returns or hands it on.
     fn fate(&self, lane: usize) -> LaneFate {
         if self.read[lane] & 1 != 0 {
-            LaneFate::Read(ByteMask(self.read[lane]))
+            LaneFate::Read {
+                bytes: ByteMask(self.read[lane]),
+                returned: ByteMask(self.returned[lane]),
+                lost: self.open[lane] | self.forwarded[lane] != 0,
+            }
         } else if self.read[lane] | self.open[lane] | self.forwarded[lane] != 0 {
             LaneFate::Unknown
         } else if self.returned[lane] != 0 {
@@ -1516,7 +1525,7 @@ mod tests {
     fn shape(fate: Option<LaneFate>) -> Option<K> {
         fate.map(|fate| match fate {
             LaneFate::Dead => K::Dead,
-            LaneFate::Read(_) => K::Read,
+            LaneFate::Read { .. } => K::Read,
             LaneFate::Returned(_) => K::Returned,
             LaneFate::Unknown => K::Unknown,
         })
@@ -2803,7 +2812,7 @@ mod masks {
         flow.site_fates(LANES, &nothing, &[(0, 1)]).swap_remove(0)
     }
 
-    /// `mov edi, 1; call f; mov [rsi], eax; ret`: four bytes read.
+    /// `mov edi, 1; call f; mov [rsi], eax; ret`: four bytes read, and all eight handed back.
     #[test]
     fn a_fate_states_the_bytes_it_reads() {
         let store = R2ILOp::Store {
@@ -2814,8 +2823,28 @@ mod masks {
         let ret = R2ILOp::Return {
             target: Varnode::register(0x20, 8),
         };
-        let read = after(vec![store, ret.clone()]);
-        assert_eq!(read.fates[0], Some(LaneFate::Read(ByteMask(0xf))));
+        let read = after(vec![store.clone(), ret.clone()]);
+        let (bytes, lost) = (ByteMask(0xf), false);
+        let returned = ByteMask(0xff);
+        let fate = LaneFate::Read {
+            bytes,
+            returned,
+            lost,
+        };
+        assert_eq!(read.fates[0], Some(fate));
+        // `xor eax, eax` before the return: the four bytes read are every byte taken (D610).
+        let cleared = R2ILOp::Copy {
+            dst: Varnode::register(0, 8),
+            src: Varnode::constant(0, 8),
+        };
+        let whole = after(vec![store, cleared, ret.clone()]);
+        let returned = ByteMask(0);
+        let fate = LaneFate::Read {
+            bytes,
+            returned,
+            lost,
+        };
+        assert_eq!(whole.fates[0], Some(fate));
         let returned = after(vec![ret]);
         assert_eq!(returned.fates[0], Some(LaneFate::Returned(ByteMask(0xff))));
         assert_eq!(ByteMask(0xf).low_run(), Some(4));

@@ -154,11 +154,11 @@ pub struct SourceSlotOrigin {
 /// The result lanes a reading call takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SourceReadLanes {
-    Integer,
+    /// The integer register's low bytes; `widest` is the widest read's extent in bytes where every
+    /// read of the lane is known (D610), none where a way in or a read's reach is not.
+    Integer { widest: Option<u8> },
     /// The float register's low bytes, as wide as every read that states a width.
-    Float {
-        bytes: u8,
-    },
+    Float { bytes: u8 },
     /// The integer and second integer registers, one value.
     Pair,
 }
