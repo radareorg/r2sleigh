@@ -192,7 +192,15 @@ struct Frame {
 #[derive(Clone)]
 enum Dep {
     Bytes(Range<u64>),
-    Query { table: TypeId, key: Rc<dyn Any> },
+    Query {
+        table: TypeId,
+        key: Rc<dyn Any>,
+    },
+    /// A held answer's reads past its byte ranges, shared with its entry, never copied (D588).
+    Held {
+        deps: Rc<[Dep]>,
+        from: usize,
+    },
 }
 
 impl Dep {
@@ -211,6 +219,12 @@ impl Dep {
                     .verify(db, key.as_ref())?
                     .is_none_or(|changed| changed > verified_at)
             }
+            // In order, the first that moved or cycled decides, as if spliced in place.
+            Dep::Held { deps, from } => (deps[*from..].iter())
+                .map(|dep| dep.moved_since(db, verified_at))
+                .find(|moved| !matches!(moved, Ok(false)))
+                .transpose()?
+                .is_some(),
         })
     }
 }
@@ -452,22 +466,53 @@ impl<I: Inputs + 'static> Db<I> {
         let Some((value, deps)) = typed.green(self, key)? else {
             return Ok(None);
         };
-        // Deposits share one list, so each list is taken once per frame.
+        // Deposits share one list, so each list is taken once per frame: its byte ranges join this
+        // frame's, and its other reads are its own list's (doc/adr-memory-model.md, "D588 as built").
         if let Some(frame) = self.frames.borrow_mut().last_mut()
             && frame.taken.insert(deps.as_ptr())
         {
-            frame.deps.extend(deps.iter().cloned());
+            let from = deps.partition_point(|dep| matches!(dep, Dep::Bytes(_)));
+            frame.deps.extend(deps[..from].iter().cloned());
+            if from < deps.len() {
+                frame.deps.push(Dep::Held { deps, from });
+            }
         }
         Ok(Some(value))
+    }
+
+    /// The dependencies `Q`'s entry at `key` stores in its own list; none where nothing is held.
+    #[cfg(test)]
+    fn stored<Q: Query<I>>(&self, key: &Q::Key) -> usize {
+        let table = self.table::<Q>();
+        let typed = table.as_any().downcast_ref::<Table<Q, I>>();
+        let entries = typed.map(|typed| typed.entries.borrow());
+        (entries.as_ref())
+            .and_then(|entries| entries.get(key))
+            .map_or(0, |entry| entry.deps.len())
     }
 
     /// Whether the running computation has read some answer of `Q`: what it deposits then depends on it.
     pub fn has_read<Q: Query<I>>(&self) -> bool {
         let table = TypeId::of::<Q>();
-        (self.frames.borrow().last()).is_some_and(|frame| {
-            (frame.deps.iter())
-                .any(|dep| matches!(dep, Dep::Query { table: read, .. } if *read == table))
-        })
+        let frames = self.frames.borrow();
+        let Some(frame) = frames.last() else {
+            return false;
+        };
+        // Each shared list once: `O(reads reachable)`, never more than the lists spliced flat.
+        let mut seen = BTreeSet::new();
+        let mut lists = vec![frame.deps.as_slice()];
+        while let Some(list) = lists.pop() {
+            for dep in list {
+                match dep {
+                    Dep::Query { table: read, .. } if *read == table => return true,
+                    Dep::Held { deps, from } if seen.insert(deps.as_ptr()) => {
+                        lists.push(&deps[*from..]);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
     }
 
     /// Hold answers a computation found besides its own, depending on what it has read; each must equal a direct computation.
@@ -910,6 +955,51 @@ mod tests {
                 *fresh.get::<Prefix>(&at).unwrap()
             );
         }
+    }
+
+    /// The sum of the bytes up to `at`, read through the held answer just below it, as forwarding
+    /// reads each held component below it: the held lists nest one deep per step.
+    struct Chain;
+    impl Query<Memory> for Chain {
+        type Key = u64;
+        type Value = u64;
+        const NAME: &'static str = "chain";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
+            let byte = *db.get::<Sum>(&(at, at + 1)).expect("acyclic");
+            let below = at.checked_sub(1).map(|below| {
+                let held = db.held::<Chain>(&below).expect("never computes");
+                held.map_or_else(
+                    || *db.get::<Sum>(&(0, below + 1)).expect("acyclic"),
+                    |sum| *sum,
+                )
+            });
+            byte + below.unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn a_held_answer_read_is_shared_not_copied_and_still_moves_its_reader() {
+        let mut db = Db::new(Memory::new(vec![1; 64]));
+        for at in 0..64 {
+            assert_eq!(*db.get::<Chain>(&at).unwrap(), at + 1);
+        }
+        // Its own sum, and the list below it shared: the 63 sums below are not copied in (D588).
+        assert_eq!(db.stored::<Chain>(&63), 2);
+        // A write to the first byte reaches the last answer through every nested list.
+        db.inputs_mut().write(0, 5);
+        let fresh = Db::new(db.inputs().clone());
+        assert_eq!(*db.get::<Chain>(&63).unwrap(), 68);
+        assert_eq!(
+            *db.get::<Chain>(&63).unwrap(),
+            *fresh.get::<Chain>(&63).unwrap()
+        );
+        // A write no list reads leaves every answer good.
+        assert_eq!(*db.get::<Chain>(&62).unwrap(), 67);
+        let computed = db.stats().computed;
+        db.inputs_mut().write(63, 1);
+        assert_eq!(*db.get::<Chain>(&62).unwrap(), 67);
+        assert_eq!(db.stats().computed, computed);
     }
 
     /// A byte, where 0xff stands for a request that stopped.

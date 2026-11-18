@@ -192,6 +192,32 @@ allocator's collect is D338's. The facts only sealing reads (MM.3) are
 analysis and its sealing as one query: conditional. ROADMAP item MM
 orders them.
 
+## D588 as built (round 15): a held read shares its list
+
+pumasim's 50-function `pdd` session held 3,290 MB on the Mac (4c6d6e775):
+2,815 MB were `ComponentForwarding`'s dependency lists, 87.8 M `Dep::Query`
+items of 32 bytes in 501 lists. `Db::held` spliced the held answer's whole
+list into the reader's frame, so each component's list copied every list
+below it: `O(Σ components below)` items per component, quadratic in a
+forwarding cone.
+
+`Db::held` now keeps the held list's byte ranges in the reader's frame (they
+coalesce with the reader's own) and its other reads as one `Dep::Held`, an
+`Rc` of that list from its first query on. `Dep::moved_since` walks a nested
+list in order and stops where the spliced list stopped, so revalidation
+after a write and every answer are unchanged; `has_read` walks the nested
+lists once each. Cost: a held read is `O(byte ranges)` in place of
+`O(list)`; a list stores its own reads plus one item per held list read.
+The session peaks at 701 MB (-79%), cold `pdd @ 0x23fdf0` at 364 MB (was
+448), both outputs byte-identical, 356.6 G against 368.7 G.
+
+Measured by a scratch probe that tags each allocation with the innermost
+running query (dhat's backtrace ran 730 times slower): the tables are in
+round 15's `d588-dhat.md`. Left: the session's peak sits inside the request
+that builds the program-wide `ReferenceIndex` (276 MB at its peak, 170 MB
+held, 87% decoded lines in `Claimant.line`), whose cold peak alone is
+506 MB; the gate (1.3 times one cold request) stays open on that fact.
+
 ## Gates
 
 - The heap peak, beside time, RSS and the allocation count: r2s's
