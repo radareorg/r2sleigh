@@ -270,6 +270,7 @@ tests whether a setter's call is the next call line.
   `pdfj` carries each note as `NoteJson` (kind by one exhaustive match, mark,
   basis, grade, premises, refusal, citation); a refusal states no basis.
   `aoj` carries no notes: reading them made D490's `aoj` sample time out on
-  vim and gzdoom.arm_64.1 (stop fact; the row stays open for it). Visual `z` cycles reader, proof (`e asm.proof=true`) and none (the
-  text after the first ` ; ` cut in the held lines). Plain and colour print the
+  vim and gzdoom.arm_64.1 (stop fact; the row stays open for it). Visual `z`
+  cycles reader, proof (`e asm.proof=true`) and none (the text after the first
+  ` ; ` cut in the held lines). Plain and colour print the
   same bytes; the exit paints the cells with D569's proof roles.
