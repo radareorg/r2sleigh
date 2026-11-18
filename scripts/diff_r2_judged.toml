@@ -1597,6 +1597,26 @@ verdict = "r2s-right"
 upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
 reason = "class D570: 128 calls made only in pumasim's cleanup pads (each absent from the parent's axt, which lists the normal flow's calls; the nearest stated pad at or below each states action 0 in every record that names it), e.g. 0x2a44d7 `call _ZdaPvm` in QDragManager's pad; radare2 6.2.4 skips cleanup pads (libr/core/canal.c:684); every pad an instruction start, 0 refused tables"
 
+[[judged]]
+command = "axt"
+binaries = "pumasim"
+corpus = "elf"
+lacking = "r2"
+r2s = '^\S+ 0x(28e4ee|290644|290a67|29b5a0|29b5a9|29b5b2|29fc67|2a0c75|2a0eff|2a145f|2a1625|2a1638|2a17e3|2a17eb|2a17f3|2a19ac|2a19bf|2a1e39|2a1e41|2a1f42|2a2289|2a2439|2a2441|2a2e4a|2a3b80|2a4ac9|2a4ad6|2a4ee9|2a4ef3|2a5907|2a5924|2a8585|2b0fb5|2b1edb|2b1efe|2b1f14|2b1f1c|2b5af6|2b8b02|2b8bf7|2bff09|2bff1b|2bff2d|2c3ee6|2c3eee|2c3f01|2c4653|2c465b|2c466e|2c5290|2c761d|2d3dc7|2d3dd7|2d3ddf|2d3de7|2d41ee|2d41f7|2d41ff|2d628a|2d6294|2db5c2|2dcf3a|2dd1b2|2dde7f|2debac|2debb4|2debc9|2fb83f|2fccc5|326515|355121|365345|37bc82|37bd6a|37f64d|37f655|37f88d|3cab48|3cae81|3cb000|3cba6d|3cc1da|3cc1ed|3cc200|3cd28d|3cd32c|3cd3cc|3da492|3da5f2|3e20cb|3f42d2|3f89ac|3f979a|3f99ad|3fb94c|3ff050|3ff3b3|3ffd51|4014ca|40267b|402b60|402b73|402ea4|402f91|406394|407be9|408a7b|408b65|408f46|409b73|4477ac|4520ba|4520c6|4520d2|4520de|4520ea|452100|452108|452110|45211c|452128|452134|452140|452148|463956|463969|48dbf1|48dcda|4b1d7f|4b20bb|4b20c3|4cba45|4f9353|4ffcbc|50b170|50be34|543c3f|54dfb4|54e114|550ec5|551022|55117a|555426|566dbf|566dc9|5677f7|567801|57ecd3|57ece6|58ed4d) \[CALL:--x\] call '
+verdict = "r2s-right"
+upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
+reason = "class D570, found by the round 14 exit's CI run (radare2 6.2.4, testbins 3bc992e70): 150 more calls made only in pumasim's cleanup pads; each call's block is reached from its function's entry only through an unwind (`u`) edge in `afb` (150 of 150), and the nearest stated pad at or below each states action 0 in every record (150 of 150 cleanup-only); e.g. 0x3cba6d `call _ZdaPvm` in QDir::readDirEntries (radare2 lists 0x3cb020 without it); radare2 6.2.4 skips cleanup pads (libr/core/canal.c:684)"
+
+[[judged]]
+command = "axt"
+binaries = "libhermes.so"
+corpus = "elf"
+lacking = "r2"
+r2s = '^\S+ 0x(9e0b0|9e0d0|a527c|a5458|a556c) \[CALL:--x\] bl '
+verdict = "r2s-right"
+upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
+reason = "class D570 on AArch64, found by the round 14 exit's CI run: 5 `bl operator delete` calls in libhermes.so's pads (getExecutedFunctions 0x9e0b0 and 0x9e0d0, hardenedHermesRuntimeConfig 0xa527c, makeHermesRuntime 0xa5458, makeThreadSafeHermesRuntime 0xa556c); each call's block is reached from its function's entry only through an unwind (`u`) edge in `afb` (5 of 5); radare2 lists each function and not the call, as it skips cleanup pads (libr/core/canal.c:684 at 6.2.4)"
+
 # ── The analysis verbs (ROADMAP D490): afl entries, afb blocks, afi noreturn, afv frame, axt references ──
 #
 # lacking   the side that does not state the fact: `r2` (r2s states it alone) or `r2s`
