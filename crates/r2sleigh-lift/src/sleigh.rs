@@ -254,12 +254,20 @@ const SUPERVISOR_CALLS: &[&str] = &[
     "sysenter",
 ];
 
-/// The `CallOther` indices of the supervisor calls this language declares.
-fn supervisor_calls(user_ops: &[String]) -> Vec<u32> {
+/// The system-call instructions among them: AArch64 and ARM `svc`, x86 `syscall` and `sysenter`.
+const SYSTEM_CALLS: &[&str] = &[
+    "CallSupervisor",
+    "software_interrupt",
+    "syscall",
+    "sysenter",
+];
+
+/// The `CallOther` indices of the operations `names` lists that this language declares.
+fn user_ops_named(user_ops: &[String], names: &[&str]) -> Vec<u32> {
     user_ops
         .iter()
         .enumerate()
-        .filter(|(_, name)| SUPERVISOR_CALLS.contains(&name.as_str()))
+        .filter(|(_, name)| names.contains(&name.as_str()))
         .filter_map(|(index, _)| u32::try_from(index).ok())
         .collect()
 }
@@ -400,7 +408,8 @@ pub(crate) fn extract_architecture(
     // The language's user-defined operations, in the order it declares them.
     // A CALLOTHER names one by index, and the index means nothing without this.
     ctx.arch.user_ops = sleigh.user_op_names();
-    ctx.arch.supervisor_calls = supervisor_calls(&ctx.arch.user_ops);
+    ctx.arch.supervisor_calls = user_ops_named(&ctx.arch.user_ops, SUPERVISOR_CALLS);
+    ctx.arch.system_calls = user_ops_named(&ctx.arch.user_ops, SYSTEM_CALLS);
     // Where an instruction can begin: an undecodable word is stepped over by this, not a byte.
     ctx.arch.alignment = sleigh.instruction_alignment();
 

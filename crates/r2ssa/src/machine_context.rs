@@ -1207,6 +1207,11 @@ impl SourceMachineContext {
             .map(|site| site.identity)
     }
 
+    /// The RAM slot the indirect call lifted from `instruction` loads its target from (D521).
+    pub fn raw_call_slot_at(&self, instruction: u64) -> Option<u64> {
+        self.raw_call_sites.get(&instruction)?.slot
+    }
+
     pub fn is_tail_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
         self.tail_call_sites.contains(&identity)
     }
@@ -1853,6 +1858,7 @@ fn collect_raw_call_site_identities(
     let mut by_instruction: BTreeMap<u64, Option<RawCallSite>> = BTreeMap::new();
     let mut tails = BTreeSet::new();
     for (block_index, block) in blocks.iter().enumerate() {
+        let mut origins = SteppedOrigins::default();
         for (op_index, op) in block.ops.iter().enumerate() {
             let Some(instruction) = block.instruction_of(op_index) else {
                 continue;
@@ -1928,10 +1934,15 @@ fn collect_raw_call_site_identities(
                 }
                 _ => continue,
             };
+            let slot = match op {
+                R2ILOp::CallInd { target } => origins.slot_at(&block.ops, op_index, target),
+                _ => None,
+            };
             let site = RawCallSite {
                 identity,
                 block: u32::try_from(block_index).expect("fewer than 2^32 blocks"),
                 op: u32::try_from(op_index).expect("fewer than 2^32 operations in a block"),
+                slot,
             };
             match by_instruction.entry(instruction) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
@@ -1964,6 +1975,36 @@ pub(crate) struct RawCallSite {
     /// Index of the block in the lifted input, and of the transfer in its operations.
     pub(crate) block: u32,
     pub(crate) op: u32,
+    /// The RAM slot an indirect call loads its target from in its own block (D521).
+    pub(crate) slot: Option<u64>,
+}
+
+/// A block's origins, stepped forward once to each indirect call: O(ops) a block (D521).
+#[derive(Default)]
+struct SteppedOrigins {
+    origins: BlockOrigins,
+    stepped: usize,
+}
+
+impl SteppedOrigins {
+    /// The RAM slot the indirect call at `op_index` loads `target` from in its block.
+    fn slot_at(&mut self, ops: &[R2ILOp], op_index: usize, target: &r2il::Varnode) -> Option<u64> {
+        // A call clears every origin (`BlockOrigins::step`), so the fold starts past the last.
+        if let Some(at) = ops[self.stepped..op_index]
+            .iter()
+            .rposition(R2ILOp::is_call)
+        {
+            *self = Self {
+                origins: BlockOrigins::default(),
+                stepped: self.stepped + at + 1,
+            };
+        }
+        (ops[self.stepped..op_index].iter()).for_each(|op| self.origins.step(op));
+        self.stepped = op_index;
+        let slot = self.origins.of(target);
+        slot.and_then(crate::origin::ValueOrigin::loaded_slot)
+            .map(|slot| slot.offset)
+    }
 }
 
 /// Step a block's origins over `ops`, the operations before its next format site (D437).
@@ -2098,6 +2139,38 @@ mod tests {
     /// The context of an empty body under `arch`.
     fn context_of(arch: &ArchSpec) -> SourceMachineContext {
         SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch.clone())))
+    }
+
+    /// D521: each indirect call's slot is `loaded_target_slot`'s, though the fold restarts past calls.
+    #[test]
+    fn each_indirect_calls_slot_is_the_one_its_block_loads() {
+        let (rax, rdx) = (Varnode::register(0, 8), Varnode::register(0x10, 8));
+        let load = |dst: &Varnode, at| R2ILOp::Load {
+            dst: dst.clone(),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(at, 8),
+        };
+        let mut block = R2ILBlock::new(0x1000, 0x20);
+        block.push_from(load(&rax, 0x4000), 0x1000);
+        block.push_from(
+            R2ILOp::CallInd {
+                target: rax.clone(),
+            },
+            0x1000,
+        );
+        let direct = Varnode::ram(0x2000, 8);
+        block.push_from(R2ILOp::Call { target: direct }, 0x1006);
+        block.push_from(load(&rdx, 0x4008), 0x100b);
+        block.push_from(R2ILOp::CallInd { target: rdx }, 0x100b);
+        block.push_from(R2ILOp::CallInd { target: rax }, 0x1011);
+        let blocks = [block];
+        let (sites, _) = collect_raw_call_site_identities(&blocks, &[], &BTreeSet::new());
+        for (op, instruction, slot) in [(1, 0x1000, Some(0x4000)), (4, 0x100b, Some(0x4008))] {
+            let folded = loaded_target_slot(&blocks[0], op).map(|slot| slot.offset);
+            assert_eq!((sites[&instruction].slot, folded), (slot, slot));
+        }
+        let after_calls = loaded_target_slot(&blocks[0], 5).map(|slot| slot.offset);
+        assert_eq!((sites[&0x1011].slot, after_calls), (None, None));
     }
 
     #[test]

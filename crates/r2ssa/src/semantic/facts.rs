@@ -567,6 +567,8 @@ pub struct CallSiteFact {
     pub raw_identity: Option<SourceCallSiteIdentity>,
     pub target: ValueId,
     pub direct_target: Option<u64>,
+    /// The RAM slot an indirect call loads its target from in its block, bound or not (D521).
+    pub target_slot: Option<u64>,
     pub fallthrough: Option<u64>,
     pub transfer: CallSiteTransfer,
     pub memory_effect: CallMemoryEffect,

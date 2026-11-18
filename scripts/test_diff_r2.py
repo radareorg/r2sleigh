@@ -521,6 +521,59 @@ class Analysis(unittest.TestCase):
         self.assertEqual(sides[("offset", -32)], "r2s")
 
 
+MISSED = """
+[[missed]]
+command = "afl"
+binaries = ["dwarf_go_tree"]
+values = ["0x45c60c"]
+verdict = "r2s-right"
+reason = "0x45c60c lies inside runtime.duffzero (FUNC 0x45c5d0, 305 bytes)"
+r2_line = "libr/core/canal.c:552-554"
+"""
+
+
+class Missed(unittest.TestCase):
+    """A radare2-only value judged by a `[[missed]]` entry leaves the ratchet (ROADMAP D541)."""
+
+    def table(self, text=MISSED):
+        return diff_r2.load_missed(None, tomllib.loads(text))
+
+    def graded(self, table, theirs):
+        ours = session(arch=["x86-64"], afl=afl((0x45C5D0, "sym.runtime.duffzero")))
+        args = type("Args", (), {"jobs": 1, "timeout": 1, "verbose": False})()
+        real = diff_r2.answers
+        diff_r2.answers = lambda binary, *_: (None, {"aa": None, "afl": (ours, theirs)})
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return diff_r2.grade("elf", [pathlib.Path("dwarf_go_tree")], [("afl", "entries")], None, None, [], args, table)[0]
+        finally:
+            diff_r2.answers = real
+
+    def test_a_radare2_only_value_with_its_entry_leaves_the_ratchet(self):
+        table = self.table()
+        theirs = session(afl=afl((0x45C5D0, "sym.runtime.duffzero"), (0x45C60C, "fcn.0045c60c"), (0x500000, "fcn.00500000")))
+        tally = self.graded(table, theirs)["afl"]
+        self.assertEqual((tally["r2-only"], tally["r2-judged"]), (1, 1))
+        self.assertEqual(diff_r2.unmatched_misses(table), [])
+
+    def test_a_radare2_only_value_judged_r2s_right_without_its_radare2_line_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.table(MISSED.replace('r2_line = "libr/core/canal.c:552-554"\n', ""))
+        # r2-right and unfilled name an open ROADMAP row instead.
+        with self.assertRaises(ValueError):
+            self.table(MISSED.replace('"r2s-right"', '"unfilled"').replace("r2_line", "row_line"))
+        self.assertEqual(len(self.table(MISSED.replace('"r2s-right"', '"unfilled"') + 'row = "D542"\n')), 1)
+        # A value is listed, never a pattern.
+        with self.assertRaises(ValueError):
+            self.table(MISSED.replace('"0x45c60c"', '"0x45c6*"'))
+
+    def test_a_listed_value_the_run_did_not_report_fails(self):
+        table = self.table()
+        tally = self.graded(table, session(afl=afl((0x45C5D0, "sym.runtime.duffzero"))))["afl"]
+        self.assertEqual((tally["r2-only"], tally["r2-judged"]), (0, 0))
+        self.assertEqual(diff_r2.unmatched_misses(table), [("afl", "dwarf_go_tree", 0x45C60C)])
+
+
 
 class Sessions(unittest.TestCase):
     def test_a_session_that_ended_before_its_deadline_fired_is_reaped_once(self):

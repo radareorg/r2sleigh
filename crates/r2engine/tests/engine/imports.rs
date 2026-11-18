@@ -246,3 +246,58 @@ fn code_after_a_longjmp_import_call_is_not_in_the_body() {
         assert_eq!(blocks.collect::<Vec<_>>(), [(BASE, 5)], "{import}");
     }
 }
+
+/// AArch64 linkage code no section header states: PLT0 at 0x1000 through GOT[2], cells at 0x1020 and
+/// 0x1030 through lazy slots whose file words are PLT0, then `caller: mov x0, #1; b 0x1020`.
+const LAZY_PLT: &[u8] = &[
+    0xf0, 0x7b, 0xbf, 0xa9, // 0x1000 stp x16, x30, [sp, #-16]!
+    0x10, 0x00, 0x00, 0x90, // 0x1004 adrp x16, 0x1000
+    0x11, 0x32, 0x40, 0xf9, // 0x1008 ldr x17, [x16, #0x60]
+    0x10, 0x82, 0x01, 0x91, // 0x100c add x16, x16, #0x60
+    0x20, 0x02, 0x1f, 0xd6, // 0x1010 br x17
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 0x1014 nop x3
+    0x10, 0x00, 0x00, 0x90, // 0x1020 adrp x16, 0x1000
+    0x11, 0x36, 0x40, 0xf9, // 0x1024 ldr x17, [x16, #0x68]
+    0x10, 0xa2, 0x01, 0x91, // 0x1028 add x16, x16, #0x68
+    0x20, 0x02, 0x1f, 0xd6, // 0x102c br x17
+    0x10, 0x00, 0x00, 0x90, // 0x1030 adrp x16, 0x1000
+    0x11, 0x3a, 0x40, 0xf9, // 0x1034 ldr x17, [x16, #0x70]
+    0x10, 0xc2, 0x01, 0x91, // 0x1038 add x16, x16, #0x70
+    0x20, 0x02, 0x1f, 0xd6, // 0x103c br x17
+    0x20, 0x00, 0x80, 0xd2, // 0x1040 caller: mov x0, #1
+    0xf7, 0xff, 0xff, 0x17, // 0x1044 b 0x1020
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5,
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 0x1048 nop x6
+    0, 0, 0, 0, 0, 0, 0, 0, // 0x1060 GOT[2]
+    0x00, 0x10, 0, 0, 0, 0, 0, 0, // 0x1068 a lazy slot: PLT0
+    0x00, 0x10, 0, 0, 0, 0, 0, 0, // 0x1070 a lazy slot: PLT0
+];
+
+/// Where no section header states the linkage code, the lazy slots (file words at PLT[0], AAELF64)
+/// name each cell's import, and a tail branch to one ends the caller (libarm64.so 0x6c0; D530).
+#[test]
+fn a_stub_no_section_states_is_found_from_its_lazy_slot() {
+    let (caller, got) = (BASE + 0x40, BASE + 0x60);
+    // An empty `.text`: no section holds the code, so the executable mapping does (libarm64.so).
+    let literal = Literal::of_code(LAZY_PLT, &[("caller", caller, 8)])
+        .in_aarch64()
+        .text_ending(BASE)
+        .loader_written(import_write(got + 8, 8, "_Exit"))
+        .loader_written(import_write(got + 0x10, 8, "abort"))
+        .loader_written(r2engine::program::LoaderWrite {
+            place: got,
+            width: 8,
+            kind: r2engine::program::WriteKind::Reserved,
+            encoding: r2engine::program::Encoding::Word,
+        });
+    let mut program = OpenProgram::of(literal);
+    let held = program.imports().stubs.clone();
+    let imports = held
+        .iter()
+        .map(|(at, stub)| (*at, stub.symbol.as_str(), stub.size));
+    let expected = [(BASE + 0x20, "_Exit", 0x10), (BASE + 0x30, "abort", 0x10)];
+    assert_eq!(imports.collect::<Vec<_>>(), expected);
+    let info = program.function_info(caller).expect("it is described");
+    let blocks = (info.blocks.iter()).map(|block| (block.addr, block.size));
+    assert_eq!(blocks.collect::<Vec<_>>(), [(caller, 8)]);
+}

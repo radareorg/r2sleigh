@@ -1090,12 +1090,14 @@ fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
     assert!(meter.reloaded <= meter.reload_bound, "{meter:?}");
 }
 
-/// An unstated call between the spill and the reloads may write the slot: it stays in memory.
+/// Under frame isolation (D471) an indirect call writes no unexposed slot: each reload is the
+/// stored literal and the proof line names the premise; `native.rs` gates its withdrawal.
 #[test]
-fn a_format_reloaded_past_an_unstated_call_stays_in_memory() {
+fn a_format_reloaded_past_an_indirect_call_is_its_literal_under_frame_isolation() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
-    assert!(text.contains("format_argument_not_literal"), "{text}");
-    assert!(text.contains("frame + 16U"), "{text}");
+    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("frame + 16U"), "{text}");
+    assert!(text.contains("(assuming frame-isolation)"), "{text}");
 }
 
 /// `cbz x0` skips the spill: no store reaches the reload on that path, so the format is no
@@ -2287,4 +2289,30 @@ fn a_cited_function_pointer_parameter_keeps_every_parameter_type() {
         "{text}"
     );
     assert!(!text.contains("the parameters are a floor"), "{text}");
+}
+
+/// `f`: `call [0x1020]; ret`, the slot at 0x1020 in memory the program may write and no import binds.
+const CALL_THROUGH_AN_UNBOUND_SLOT: &[u8] = &[
+    0xff, 0x14, 0x25, 0x20, 0x10, 0x00, 0x00, // 1000 call [0x1020]
+    0xc3, // 1007 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1008 padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1020 the slot
+];
+
+/// An indirect call that loads its target from one RAM slot names that slot in its gap (D521).
+#[test]
+fn a_call_through_an_unbound_slot_names_the_slot_in_its_gap() {
+    let literal = Literal::of_code(CALL_THROUGH_AN_UNBOUND_SLOT, &[("f", BASE, 0x08)])
+        .writable_data_after(BASE + 0x20);
+    let text = OpenProgram::of(literal)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(
+        text.contains("call to an indirect target through [0x1020]: "),
+        "{text}"
+    );
 }

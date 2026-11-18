@@ -1571,7 +1571,7 @@ impl SsaArtifact {
             self.liveness.live_out(),
             &crate::dense::IdMap::default(),
             content,
-            self.liveness.ignored_reads(),
+            (self.liveness.ignored_reads(), self.facts.demanded.clone()),
         );
         let spans = crate::span::StorageSpans::compute(graph, &values);
         (values, spans)
@@ -3729,6 +3729,45 @@ impl SSAFunction {
         }
     }
 
+    /// Once the [`crate::cfg::ENTRY_EDGE`] root is the entered address's only predecessor, drop it
+    /// and fold each merge there into its one source (D534); one rename walk, `O(blocks + ops)`.
+    fn unroot_entry_edge(&mut self) {
+        let entered = self.cfg.entered_at();
+        // The root holds no operation until the seal mints entry lanes there; one that does stays.
+        let edge = self.get_block(crate::cfg::ENTRY_EDGE);
+        let (Some(block), false) = (
+            self.get_block(entered),
+            edge.is_some_and(|edge| !edge.is_empty()),
+        ) else {
+            return;
+        };
+        let sole = |phi: &PhiNode<VarId>| match phi.sources.as_slice() {
+            [(crate::cfg::ENTRY_EDGE, source)] => Some((phi.dst, *source)),
+            _ => None,
+        };
+        let folds = block.phis().iter().map(sole).collect::<Option<Vec<_>>>();
+        let Some(folds) = folds.filter(|_| self.cfg.unroot_entry_edge()) else {
+            return;
+        };
+        let mut substitutes = IdMap::<VarId, VarId>::new(self.values.len());
+        for (merged, source) in folds {
+            substitutes.insert(merged, source);
+        }
+        if let Some(mut block) = self.block_for_change(entered) {
+            block.retain_phis(Pass::RemoveBlock, |_| false);
+        }
+        let substitute = |id: &VarId| substitutes.get(*id).copied().unwrap_or(*id);
+        for block in self.blocks.edit().iter_mut() {
+            let sources = (block.phis_mut().iter_mut()).flat_map(|phi| phi.sources.iter_mut());
+            for (_, source) in sources {
+                *source = substitute(source);
+            }
+            for op in block.ops_mut() {
+                *op = op.map_sources(substitute);
+            }
+        }
+    }
+
     /// One block, open for change with the arena; for applying a plan.
     fn block_for_change(&mut self, addr: u64) -> Option<BlockMut<'_, VarId>> {
         let index = *self.block_index.get(&addr)? as usize;
@@ -3746,6 +3785,7 @@ impl SSAFunction {
     /// Keep the blocks the control-flow graph still has, in its reverse
     /// postorder, and recompute the dominators.
     fn reorder_from_cfg(&mut self) {
+        self.unroot_entry_edge();
         let cfg = &self.cfg;
         self.blocks.retain(Pass::RemoveBlock, |block| {
             cfg.get_block(block.addr).is_some()
@@ -4507,7 +4547,17 @@ impl SSAFunction {
 
     /// The frame walk's points decided again where a restatement keeps the build (D365).
     pub(crate) fn restate_frame_points(&mut self, points: crate::semantic::FramePoints) {
+        self.note_isolation(&points);
         self.frame_points = Some(Arc::new(points));
+    }
+
+    /// The frame walk's decision rests on frame isolation exactly where its points say so (D471).
+    fn note_isolation(&mut self, points: &crate::semantic::FramePoints) {
+        let premise = r2source::Premise::FrameIsolation;
+        match points.isolated() {
+            true => self.premises.insert(premise),
+            false => self.premises.remove(&premise),
+        };
     }
 
     /// What the frame's addresses do, by entry offset; none where no walk ran (the whole frame).
@@ -4522,6 +4572,7 @@ impl SSAFunction {
             crate::semantic::FramePoints,
         ),
     ) {
+        self.note_isolation(&points);
         self.frame_points = Some(Arc::new(points));
         let arena = self.arena();
         self.promoted_slots = (ops.iter())

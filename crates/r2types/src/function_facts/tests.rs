@@ -560,6 +560,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         raw_identity: Some(r2ssa::SourceCallSiteIdentity::new(0x401002, target_storage)),
         target,
         direct_target: Some(0x402000),
+        target_slot: None,
         fallthrough: None,
         transfer: r2ssa::CallSiteTransfer::TailCall,
         callee_linkage: r2source::AdvisoryCalleeLinkage::Unknown,

@@ -161,8 +161,8 @@ uint32_t flags_set(uint32_t* flags, uint32_t bits)
         tmp_401140_0_1 = r2sleigh_load_u32((void*)(uint64_t)flags);
         rax_2 = (uint64_t)(uint32_t)tmp_401140_0_1;
         do {
-            tmp_lane_401154_1_0_1 = (uint32_t)((uint64_t)rax_2 >> 0U);
-            tmp_401154_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401154_1_0_1, (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) | (uint32_t)bits));
+            tmp_lane_401154_1_0_1 = (uint32_t)rax_2;
+            tmp_401154_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401154_1_0_1, (uint32_t)((uint32_t)rax_2 | (uint32_t)bits));
             zf_2 = (uint8_t)((uint32_t)tmp_lane_401154_1_0_1 == (uint32_t)tmp_401154_4_1);
             rax_4 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401154_1_0_1 : (uint32_t)tmp_401154_4_1)) : (uint64_t)(uint32_t)tmp_401154_4_1;
             rax_2 = rax_4;
@@ -189,8 +189,8 @@ uint32_t flags_clear(uint32_t* flags, uint32_t bits)
         tmp_401162_0_1 = r2sleigh_load_u32((void*)(uint64_t)flags);
         rax_2 = (uint64_t)(uint32_t)tmp_401162_0_1;
         do {
-            tmp_lane_401174_1_0_1 = (uint32_t)((uint64_t)rax_2 >> 0U);
-            tmp_401174_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401174_1_0_1, (uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) & (uint32_t)tmp_lane_401160_0_1_1));
+            tmp_lane_401174_1_0_1 = (uint32_t)rax_2;
+            tmp_401174_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401174_1_0_1, (uint32_t)((uint32_t)rax_2 & (uint32_t)tmp_lane_401160_0_1_1));
             zf_2 = (uint8_t)((uint32_t)tmp_lane_401174_1_0_1 == (uint32_t)tmp_401174_4_1);
             rax_4 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401174_1_0_1 : (uint32_t)tmp_401174_4_1)) : (uint64_t)(uint32_t)tmp_401174_4_1;
             rax_2 = rax_4;
@@ -217,8 +217,8 @@ uint16_t parity_toggle(uint16_t* word, uint16_t mask)
         tmp_401180_0_1 = r2sleigh_load_u16((void*)(uint64_t)word);
         rax_2 = (uint64_t)(uint16_t)tmp_401180_0_1;
         do {
-            tmp_lane_401194_1_0_1 = (uint16_t)((uint64_t)rax_2 >> 0U);
-            tmp_401194_2_1 = r2sleigh_atomic_compare_exchange_u16_seq_cst((void*)(uint64_t)word, (uint16_t)tmp_lane_401194_1_0_1, (uint16_t)((uint32_t)((uint32_t)((uint64_t)rax_2 >> 0U) ^ (uint32_t)((uint64_t)rsi_1 >> 0U)) >> 0U));
+            tmp_lane_401194_1_0_1 = (uint16_t)rax_2;
+            tmp_401194_2_1 = r2sleigh_atomic_compare_exchange_u16_seq_cst((void*)(uint64_t)word, (uint16_t)tmp_lane_401194_1_0_1, (uint16_t)((uint32_t)rax_2 ^ (uint32_t)rsi_1));
             zf_2 = (uint8_t)((uint16_t)tmp_lane_401194_1_0_1 == (uint16_t)tmp_401194_2_1);
             tmp_lane_401194_11_0_1 = zf_2 ? (uint16_t)tmp_lane_401194_1_0_1 : (uint16_t)tmp_401194_2_1;
             rax_2 = (uint64_t)(((uint64_t)rax_2 & (uint64_t)0xffffffffffff0000U) | ((uint64_t)tmp_lane_401194_11_0_1 & (uint64_t)0xffffU) << 0U);
@@ -247,7 +247,7 @@ int32_t lock_try(int32_t* lock)
     /* r2dec proof: no individual construct is marked; 15 source obligations: 12 rendered, 3 elided, 0 refused; 2 statements rendered */
     {
         tmp_4011b9_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)lock, (uint32_t)0U, (uint32_t)1U);
-        return (int32_t)((uint64_t)(uint8_t)((uint32_t)((uint32_t)0U - (uint32_t)tmp_4011b9_4_1) == (uint32_t)0U) >> 0U);
+        return (int32_t)(uint8_t)((uint32_t)((uint32_t)0U - (uint32_t)tmp_4011b9_4_1) == (uint32_t)0U);
     }
 }
 

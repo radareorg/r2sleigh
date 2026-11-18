@@ -1666,10 +1666,15 @@ pub(crate) fn collect_source_boundary_facts(
                         }
                     })
                     .collect::<Vec<_>>();
+                // A callee whose lanes hold no value leaves none at the carrier (D458).
+                let holds_none = (interface.exact_callee_interface())
+                    .and_then(r2source::SourceFunctionInterface::result_carriers)
+                    .is_some_and(|carriers| carriers.hold_no_value());
                 let results = match (call_site.transfer, interface.result()) {
                     (CallSiteTransfer::TailCall, _) | (_, SourceCallResult::Void) => {
                         Some(Vec::new())
                     }
+                    (_, SourceCallResult::Unstated { .. }) if holds_none => Some(Vec::new()),
                     // A group's value is its integer carrier, as the callee's header spells it (D201).
                     (
                         CallSiteTransfer::Call,

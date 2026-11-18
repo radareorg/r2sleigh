@@ -66,7 +66,7 @@ r2sleigh_result_u32 checked_sum(r2sleigh_word_u32* arg0, r2sleigh_word_u32 arg1,
 
     /* r2dec proof: no individual construct is marked; 15 source obligations: 15 rendered, 0 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     {
-        if ((uint8_t)((uint32_t)((uint32_t)((uint32_t)31U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)arg1 >> (uint32_t)31U)) & (uint32_t)1U) != (uint32_t)0U)) {
+        if ((uint8_t)((uint32_t)((uint32_t)((uint32_t)arg1 >> (uint32_t)31U) & (uint32_t)1U) != (uint32_t)0U)) {
             exit(2);
         }
         r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)arg1);

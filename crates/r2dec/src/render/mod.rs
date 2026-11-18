@@ -73,7 +73,7 @@ pub fn render(
 ) -> Result<Rendered, RenderStop> {
     let work = DecompileWorkControl::new(control, DecompileWorkPhase::Structuring);
     work.poll()?;
-    let name = rendered_name_of(input.name(), input.function().root());
+    let name = rendered_name_of(input.name(), input.function().cfg().entered_at());
     let tags = tags::Tags::of(input);
     let function = input.function();
     let placement = crate::structure::place::Placement::compute(

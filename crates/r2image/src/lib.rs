@@ -763,26 +763,27 @@ impl Image {
         let static_image = loader::is_static_image(&file);
         let versions = versions::read(&file);
         let dylibs = macho_dylibs(&file);
-        let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
-            let name = symbol.name().ok()?;
-            if name.is_empty() || macho_indirect(&file, symbol.index()) {
+        let read_symbol = |symbol: TableSymbol<'_>, dynamic: bool| {
+            let name = symbol.name;
+            if name.is_empty() {
                 return None;
             }
             // An unplaced section's symbols are offsets into it, so they move with it.
             let common = (relocatable && !dynamic)
-                .then(|| placement.common.get(&symbol.index().0))
+                .then(|| placement.common.get(&symbol.index))
                 .flatten();
             let address = match common {
                 Some(address) => *address,
-                None if symbol.section() == object::SymbolSection::Absolute
+                None if symbol.section == object::SymbolSection::Absolute
                     && matches!(format, Format::Pe | Format::Coff) =>
                 {
-                    pe::coff_value(&file, &data, symbol.index().0).unwrap_or_default()
+                    pe::coff_value(&file, &data, symbol.index).unwrap_or_default()
                 }
                 None => {
-                    symbol.address()
+                    symbol.value
                         + symbol
-                            .section_index()
+                            .section
+                            .index()
                             .filter(|_| relocatable)
                             .and_then(|index| file.section_by_index(index).ok())
                             .map_or(0, |section| placed(&section))
@@ -790,20 +791,20 @@ impl Image {
             };
             let mapped = is_arm32(&arch).then(|| mapping(name)).flatten();
             // A weak reference no definition met is left null; with no loader to bind it, it is no import.
-            let import = symbol.section() == object::SymbolSection::Undefined
-                && !(symbol.is_weak() && static_image);
+            let import = symbol.section == object::SymbolSection::Undefined
+                && !(symbol.weak && static_image);
             Some(Symbol {
                 // An import is named by the C identifier it binds.
                 name: match (format, import) {
                     (Format::MachO, true) => macho_identifier(name).into(),
                     _ => name.into(),
                 },
-                vaddr: match symbol.kind() {
+                vaddr: match symbol.kind {
                     object::SymbolKind::Text => code_address(&arch, address),
                     _ => address,
                 },
-                size: symbol.size(),
-                kind: match (mapped, symbol.kind()) {
+                size: symbol.size,
+                kind: match (mapped, symbol.kind) {
                     (Some(mapped), _) => SymbolKind::Mapping(mapped),
                     // A name in code is a function; `__mh_execute_header` is
                     // typed as code and sits at the Mach-O header, where no
@@ -811,7 +812,7 @@ impl Image {
                     // An import's own type is the statement: nothing here is at its address.
                     (None, object::SymbolKind::Text)
                         if executable(address)
-                            || symbol.section() == object::SymbolSection::Undefined =>
+                            || symbol.section == object::SymbolSection::Undefined =>
                     {
                         SymbolKind::Function
                     }
@@ -823,60 +824,55 @@ impl Image {
                 },
                 // Defined where it sits in a section (`object` counts only STT_FUNC and STT_OBJECT); an absolute value is an address only
                 // for a function inside a linked image's code (gABI SHN_ABS), and a thread-local one is an offset into its block.
-                defined: (matches!(symbol.section(), object::SymbolSection::Section(_))
+                defined: (matches!(symbol.section, object::SymbolSection::Section(_))
                     || common.is_some()
-                    || (symbol.section() == object::SymbolSection::Absolute
-                        && symbol.kind() == object::SymbolKind::Text
+                    || (symbol.section == object::SymbolSection::Absolute
+                        && symbol.kind == object::SymbolKind::Text
                         && !relocatable
                         && executable(address)))
-                    && symbol.kind() != object::SymbolKind::Tls,
+                    && symbol.kind != object::SymbolKind::Tls,
                 import,
                 // ELF sets the address's low bit; Mach-O states `N_ARM_THUMB_DEF` in `n_desc`.
                 thumb: is_arm32(&arch)
-                    && symbol.kind() == object::SymbolKind::Text
+                    && symbol.kind == object::SymbolKind::Text
                     && (address & 1 == 1
-                        || matches!(symbol.flags(), object::SymbolFlags::MachO { n_desc, .. }
-                            if n_desc.contains(object::macho::N_ARM_THUMB_DEF))),
-                binding: symbol_binding(&symbol, os_abi),
-                visibility: match symbol.flags() {
-                    object::SymbolFlags::Elf { st_other, .. } => match st_other.visibility() {
-                        object::elf::STV_INTERNAL => Visibility::Internal,
-                        object::elf::STV_HIDDEN => Visibility::Hidden,
-                        object::elf::STV_PROTECTED => Visibility::Protected,
-                        _ => Visibility::Default,
-                    },
-                    _ => Visibility::Default,
-                },
-                section: symbol.section_index().map(|index| index.0),
+                        || symbol
+                            .n_desc
+                            .is_some_and(|n_desc| n_desc.contains(object::macho::N_ARM_THUMB_DEF))),
+                binding: symbol.binding,
+                visibility: symbol.visibility,
+                section: symbol.section.index().map(|index| index.0),
                 origin: match dynamic {
                     true => SymbolOrigin {
                         table: None,
-                        dynamic: Some(symbol.index().0),
+                        dynamic: Some(symbol.index),
                         directory: None,
                     },
                     false => SymbolOrigin {
-                        table: Some(symbol.index().0),
+                        table: Some(symbol.index),
                         dynamic: None,
                         directory: None,
                     },
                 },
-                library: match (import, &dylibs, symbol.flags()) {
-                    (true, Some(dylibs), object::SymbolFlags::MachO { n_desc, .. }) => {
-                        ordinal_dylib(dylibs, n_desc)
-                    }
+                library: match (import, &dylibs, symbol.n_desc) {
+                    (true, Some(dylibs), Some(n_desc)) => ordinal_dylib(dylibs, n_desc),
                     _ => None,
                 },
-                version: dynamic
-                    .then(|| versions.of_symbol(symbol.index().0))
-                    .flatten(),
+                version: dynamic.then(|| versions.of_symbol(symbol.index)).flatten(),
             })
         };
+        // An ELF whose section headers list no `.dynsym` states it through the dynamic table (D542).
+        let unsectioned = loader::unsectioned_dynamic_symbols(&file);
         let mut symbols: Vec<Symbol> = file
             .symbols()
-            .filter_map(|symbol| read_symbol(symbol, false))
+            .map(|symbol| (symbol, false))
+            .chain(file.dynamic_symbols().map(|symbol| (symbol, true)))
+            .filter(|(symbol, _)| !macho_indirect(&file, symbol.index()))
+            .filter_map(|(symbol, dynamic)| read_symbol(TableSymbol::of(&symbol, os_abi)?, dynamic))
             .chain(
-                file.dynamic_symbols()
-                    .filter_map(|symbol| read_symbol(symbol, true)),
+                unsectioned
+                    .iter()
+                    .filter_map(|symbol| read_symbol(TableSymbol::dynamic(symbol), true)),
             )
             .collect();
         // A PE image states its imports by slot and its exports in directories, not a symbol table.
@@ -1533,6 +1529,65 @@ fn section_statement(section: &object::read::Section<'_, '_>) -> SectionStatemen
             characteristics: characteristics.0,
         },
         _ => SectionStatement::Unstated,
+    }
+}
+
+/// One symbol as its table states it, whichever reader found it: `object`'s over a section, or
+/// the dynamic table's where no section header lists `.dynsym` (D542).
+struct TableSymbol<'a> {
+    name: &'a str,
+    index: usize,
+    value: u64,
+    size: u64,
+    kind: object::SymbolKind,
+    section: object::SymbolSection,
+    weak: bool,
+    binding: Binding,
+    visibility: Visibility,
+    /// Mach-O's `n_desc`.
+    n_desc: Option<object::macho::SymbolDesc>,
+}
+
+impl<'a> TableSymbol<'a> {
+    fn of(symbol: &object::read::Symbol<'_, 'a>, os_abi: object::elf::OsAbi) -> Option<Self> {
+        Some(Self {
+            name: symbol.name().ok()?,
+            index: symbol.index().0,
+            value: symbol.address(),
+            size: symbol.size(),
+            kind: symbol.kind(),
+            section: symbol.section(),
+            weak: symbol.is_weak(),
+            binding: symbol_binding(symbol, os_abi),
+            visibility: match symbol.flags() {
+                object::SymbolFlags::Elf { st_other, .. } => match st_other.visibility() {
+                    object::elf::STV_INTERNAL => Visibility::Internal,
+                    object::elf::STV_HIDDEN => Visibility::Hidden,
+                    object::elf::STV_PROTECTED => Visibility::Protected,
+                    _ => Visibility::Default,
+                },
+                _ => Visibility::Default,
+            },
+            n_desc: match symbol.flags() {
+                object::SymbolFlags::MachO { n_desc, .. } => Some(n_desc),
+                _ => None,
+            },
+        })
+    }
+
+    fn dynamic(symbol: &'a loader::DynamicSymbol) -> Self {
+        Self {
+            name: &symbol.name,
+            index: symbol.index,
+            value: symbol.value,
+            size: symbol.size,
+            kind: symbol.kind,
+            section: symbol.section,
+            weak: symbol.weak,
+            binding: symbol.binding,
+            visibility: symbol.visibility,
+            n_desc: None,
+        }
     }
 }
 

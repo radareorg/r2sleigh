@@ -206,6 +206,8 @@ pub struct NativeTarget<'a> {
     pub declarations: &'a r2abi::Declarations,
     /// The target's cited C data model; `None` where no row states one.
     pub data_model: Option<&'static r2abi::CDataModel>,
+    /// What the request grants every derivation ([`accepted_premises`] unless it withdraws one).
+    pub premises: std::collections::BTreeSet<r2source::Premise>,
 }
 
 /// One convention's held model and the specification it reads.
@@ -225,6 +227,7 @@ impl<'a> NativeTarget<'a> {
             call: Arc::clone(&self.call),
             compiler: program.compiler,
             program: None,
+            premises: self.premises.clone(),
             ..*self
         })
     }
@@ -912,7 +915,7 @@ pub(crate) fn convention_seal_of(
     );
     let construction = match stated {
         true => {
-            let premises = accepted_premises();
+            let premises = premises_reading(target, false);
             native.restate_against(&walked.root, construction, (&imports, &premises))?
         }
         false => construction,
@@ -1488,7 +1491,7 @@ fn resolved_alone(
     if stated.asks {
         let asked = construction.unstated_rewriting_callees();
         if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
-            let premises = premises_reading(decided.is_some());
+            let premises = premises_reading(target, decided.is_some());
             let restated =
                 native.restate_against(&walked.root, construction, (&imports, &premises));
             construction = restated.map_err(unreadable)?;
@@ -2274,7 +2277,7 @@ impl<'a> Native<'a> {
         } = built;
         if !owners.is_empty() {
             imports.state(owners, self.program);
-            let premises = premises_reading(false);
+            let premises = premises_reading(self.target, false);
             construction = self.restate_against(&walk.root, construction, (&imports, &premises))?;
         }
         let seal = construction.seal(&self.control);
@@ -2361,7 +2364,7 @@ impl<'a> Native<'a> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(closed),
+            &premises_reading(self.target, closed),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2926,7 +2929,7 @@ impl<'a> Native<'a> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(closed),
+            &premises_reading(self.target, closed),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2963,7 +2966,7 @@ impl<'a> Native<'a> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &accepted_premises(),
+            &premises_reading(self.target, false),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2990,7 +2993,7 @@ impl<'a> Native<'a> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &accepted_premises(),
+            &premises_reading(self.target, false),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -3384,6 +3387,58 @@ impl Native<'_> {
         found.dedup();
         found
     }
+}
+
+/// The supervisor calls of a walked body whose number its convention seal folds to a constant a
+/// kernel row says never returns, by instruction (D505). One seal, then `O(ops)`.
+pub(crate) fn supervisor_halts(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    kernel: r2abi::Kernel,
+    (arch, bits): (&str, u32),
+    body: crate::body::Body,
+) -> BTreeMap<u64, r2source::Citation> {
+    let entry = body.entry;
+    let spec = target.disasm.arch_spec();
+    let table = r2abi::Syscalls::for_kernel(kernel, arch, bits);
+    let number = table
+        .and_then(|table| r2sleigh_lift::lifted_register_storage(spec, table.number_register()));
+    let (Some(number), Ok(native)) = (number, Native::over(target, program)) else {
+        return BTreeMap::new();
+    };
+    let walked = native.walked(body);
+    let restatement = native.restatement(entry);
+    let seal = match native.convention_seal(&walked, &Callees::default(), restatement, &[]) {
+        Ok(seal) => seal,
+        Err(error) => {
+            r2il::refusal_evidence!("supervisor-halt", "{entry:#x}: sealing failed: {error:?}");
+            return BTreeMap::new();
+        }
+    };
+    r2il::refusal_evidence!(
+        "supervisor-halt",
+        "{entry:#x}: sealed for its supervisor calls"
+    );
+    let graph = seal.graph();
+    let enters = |op: &r2ssa::SSAOp<_>| matches!(op, r2ssa::SSAOp::CallOther { userop, .. } if spec.system_calls.contains(userop));
+    let mut halts = BTreeMap::new();
+    for block in &graph.blocks {
+        for &inst in graph.op_insts(block.id) {
+            let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
+                continue;
+            };
+            let Some(instruction) = graph.instruction_for_inst(inst).filter(|_| enters(op)) else {
+                continue;
+            };
+            let value = seal
+                .value_reaching(id, number)
+                .and_then(|value| seal.folded_value(value));
+            let cited =
+                value.and_then(|value| r2source::Citation::syscall(kernel, arch, bits, value));
+            halts.extend(cited.map(|citation| (instruction, citation)));
+        }
+    }
+    halts
 }
 
 /// The text a section of static data holds at an address, where the loader leaves every byte of it and its terminator alone; the one reader a rendering and a listing share.
@@ -4112,18 +4167,22 @@ pub(crate) fn storage(arch: &ArchSpec, name: &str) -> Result<CanonicalStorageId,
 }
 
 /// The premises the engine grants every derivation: a UB-free source, so a stack-protector check
-/// passes (doc/adr-frame-model.md, P4.4). A consumer that refuses it is item A's.
-pub(crate) fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
+/// passes (doc/adr-frame-model.md, P4.4), and frame isolation (D471, user ruling 2026-11-16).
+pub fn accepted_premises() -> std::collections::BTreeSet<r2source::Premise> {
     std::collections::BTreeSet::from([
         r2source::Premise::UbFreeSource,
         r2source::Premise::GoRuntime,
+        r2source::Premise::FrameIsolation,
     ])
 }
 
-/// Those premises, and a closed world where the request read the program's callers (`aa`): what
-/// every call the image shows does is what the program does (doc/adr-resolved-bodies.md).
-fn premises_reading(callers_read: bool) -> std::collections::BTreeSet<r2source::Premise> {
-    let mut premises = accepted_premises();
+/// The target's premises, and a closed world where the request read the program's callers (`aa`):
+/// what every call the image shows does is what the program does (doc/adr-resolved-bodies.md).
+fn premises_reading(
+    target: &NativeTarget<'_>,
+    callers_read: bool,
+) -> std::collections::BTreeSet<r2source::Premise> {
+    let mut premises = target.premises.clone();
     if callers_read {
         premises.insert(r2source::Premise::ClosedWorld);
     }
@@ -4235,6 +4294,7 @@ mod tests {
             imports: &imports,
             declarations: &declarations,
             data_model: None,
+            premises: accepted_premises(),
         };
         let walked = walk(&target, &HandsAfterADouble, BASE).expect("walks");
         let handed = handed(&target, &HandsAfterADouble, walked.root.body.clone());

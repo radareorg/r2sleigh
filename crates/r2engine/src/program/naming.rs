@@ -388,11 +388,29 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         .filter(|section| !declared(section))
         .collect();
     let mut unnamed = BTreeMap::new();
+    let mut held = Vec::new();
     for section in decoded {
-        let Some(cells) = section_stubs(source, decoder, section, &slots, alignment) else {
+        let range = section.vaddr..section.vaddr + section.vsize;
+        let linkage = StubSpan {
+            range,
+            align: section.align,
+        };
+        let Some(cells) = section_stubs(source, decoder, linkage, &slots, alignment) else {
             continue;
         };
-        sections.push(section.range());
+        held.push((section.range(), cells));
+    }
+    // Where no section states the linkage code, its lazy slots do (D530).
+    let covered = |at: u64| {
+        let loaded = image.sections.iter().filter(|section| section.loaded);
+        loaded
+            .map(Section::range)
+            .any(|(start, end)| (start..end).contains(&at))
+    };
+    let lazy = lazy_stubs(source, decoder, &slots, alignment, &covered);
+    held.extend(lazy.map(|(range, cells)| ((range.start, range.end), cells)));
+    for (range, cells) in held {
+        sections.push(range);
         for (start, Cell { symbol, size }) in cells {
             match symbol {
                 Some(symbol) => _ = named.entry(start).or_insert(Stub { symbol, size }),
@@ -430,10 +448,19 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
 /// literal 4, a Mach-O `__stub_helper` header 4; four times that leaves room for padding.
 const STUB_INSTRUCTIONS: usize = 16;
 
+/// A stretch of linkage code and the alignment its stubs start at.
+struct StubSpan {
+    range: std::ops::Range<u64>,
+    align: u64,
+}
+
 fn section_stubs(
     source: &impl Source,
     decoder: &Disassembler,
-    section: &Section,
+    StubSpan {
+        range: section,
+        align,
+    }: StubSpan,
     slots: &BTreeMap<u64, &str>,
     alignment: u32,
 ) -> Option<Vec<(u64, Cell)>> {
@@ -450,12 +477,12 @@ fn section_stubs(
     let mut entered = std::collections::BTreeSet::new();
     // Where each reader's run began, beside it in `readers`.
     let mut runs: Vec<u64> = Vec::new();
-    let mut run = fresh_run(section.vaddr);
+    let mut run = fresh_run(section.start);
     // Where each instruction of the run begins, and its first operation.
     let mut starts: Vec<(u64, usize)> = Vec::new();
     let step = u64::from(alignment.max(1));
-    let mut pc = section.vaddr;
-    let end = section.vaddr + section.vsize;
+    let mut pc = section.start;
+    let end = section.end;
     while pc < end {
         let Some(window) = source.read(pc, DECODE_WINDOW) else {
             break;
@@ -485,7 +512,7 @@ fn section_stubs(
         };
         // A stub's bytes are what the linker wrote; a field it left unstated is no stub's.
         if code.unstated(&(pc..pc + u64::from(lifted.size)))
-            || chooses(&lifted.ops, section.vaddr..end, pc + u64::from(lifted.size))
+            || chooses(&lifted.ops, section.clone(), pc + u64::from(lifted.size))
         {
             return None;
         }
@@ -495,7 +522,7 @@ fn section_stubs(
             .any(|op| matches!(op, R2ILOp::BranchInd { .. }));
         let direct = (lifted.ops.iter()).any(|op| matches!(op, R2ILOp::Branch { .. }));
         let leaves = indirect || direct;
-        let section_range = section.vaddr..end;
+        let section_range = section.clone();
         entered.extend(lifted.ops.iter().filter_map(|op| match op {
             R2ILOp::Branch { target }
                 if target.space == r2il::SpaceId::Ram && section_range.contains(&target.offset) =>
@@ -553,7 +580,7 @@ fn section_stubs(
         let import = slot.and_then(|slot| slots.get(&slot));
         if stated || import.is_some() {
             transfers.push(leaving_at);
-            let start = stub_start(&run, &starts, section.align);
+            let start = stub_start(&run, &starts, align);
             readers.push((leaving_at, start, import.map(|found| (*found).to_owned())));
             runs.push(run.addr);
         }
@@ -566,6 +593,91 @@ fn section_stubs(
     readers.retain(|_| ran.next().is_none_or(|addr| !entered.contains(&addr)));
     // A section that is all linkage code holds no function, whether or not it names a stub.
     left.then(|| cells(readers, &transfers, end))
+}
+
+/// Linkage code no section states, and its cells by start.
+type LazyStubs = (std::ops::Range<u64>, Vec<(u64, Cell)>);
+
+/// The stubs no section states, from the lazy slots' file words, which point into the linkage code
+/// (ELF gABI lazy binding; AAELF64: each starts at PLT[0]); ROADMAP D530. `O(slots)` runs.
+fn lazy_stubs(
+    source: &impl Source,
+    decoder: &Disassembler,
+    slots: &BTreeMap<u64, &str>,
+    alignment: u32,
+    covered: &dyn Fn(u64) -> bool,
+) -> Option<LazyStubs> {
+    let container = source.container();
+    let endian = decoder.arch_spec().memory_endianness;
+    // The word the file holds, as the loader finds it before it binds the slot.
+    let word = |slot: u64| {
+        let width = container.loader_write_at(slot)?.width;
+        let bytes = source.read(slot, usize::try_from(width).ok()?)?;
+        let mut held = [0u8; 8];
+        (bytes.len() == width as usize && width <= 8).then_some(())?;
+        held[..bytes.len()].copy_from_slice(&bytes);
+        match endian {
+            r2il::Endianness::Little => Some(u64::from_le_bytes(held)),
+            r2il::Endianness::Big => Some(u64::from_be_bytes(held) >> (8 * (8 - width))),
+            r2il::Endianness::Mixed | r2il::Endianness::Custom => None,
+        }
+    };
+    let code = |at: u64| {
+        (container.segment_at(at)).is_some_and(|segment| segment.permissions.execute)
+            && container.file_backed(at, 1) > 0
+            && !covered(at)
+    };
+    let lazy = (slots.keys())
+        .filter_map(|slot| Some((*slot, word(*slot).filter(|at| code(*at))?)))
+        .collect::<BTreeMap<_, _>>();
+    let start = lazy.values().copied().min()?;
+    let mut end = None;
+    let mut pc = start;
+    let mut run = fresh_run(pc);
+    let mut instructions = 0;
+    // Each step moves `pc` on, inside a finite mapping; a run no stub is as long ends the code.
+    while let Some(window) = source.read(pc, DECODE_WINDOW)
+        && instructions < STUB_INSTRUCTIONS
+    {
+        let fetched = crate::stated::code(&container.loader_writes, pc, window, endian);
+        let mut fetch = fetched.bytes.clone();
+        fetch.resize(DECODE_WINDOW, 0);
+        let Some(lifted) = decoder
+            .lift(&fetch, pc)
+            .ok()
+            .filter(|lifted| lifted.size != 0)
+        else {
+            break;
+        };
+        instructions += 1;
+        let indirect = (lifted.ops.iter()).any(|op| matches!(op, R2ILOp::BranchInd { .. }));
+        let leaves = indirect || (lifted.ops.iter()).any(|op| matches!(op, R2ILOp::Branch { .. }));
+        run.ops.extend(lifted.ops);
+        pc += u64::from(lifted.size);
+        if !leaves {
+            continue;
+        }
+        instructions = 0;
+        let terminal = run.ops.len().saturating_sub(1);
+        let slot = r2ssa::terminal_indirect_loaded_slot(&run, terminal).map(|slot| slot.offset);
+        let reserved = slot
+            .and_then(|slot| container.loader_write_at(slot))
+            .is_some_and(|write| write.kind == r2abi::statement::WriteKind::Reserved);
+        match (end, slot) {
+            (None, _) if run.addr == start && reserved => {}
+            (_, Some(slot)) if lazy.contains_key(&slot) => end = Some(pc),
+            _ => break,
+        }
+        run = fresh_run(pc);
+    }
+    let range = start..end?;
+    let align = u64::from(alignment.max(1));
+    let linkage = StubSpan {
+        range: range.clone(),
+        align,
+    };
+    let cells = section_stubs(source, decoder, linkage, slots, alignment)?;
+    Some((range, cells))
 }
 
 /// Whether one instruction's operations make a choice no stub makes.

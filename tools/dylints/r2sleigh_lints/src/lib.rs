@@ -5992,7 +5992,7 @@ fn asks_r2il<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Expr<'tcx>) -> bool {
 
 /// What `BuildFacts` may read of the function and its context: the shape, and the call sites the
 /// source names (D289). Every other read is denied.
-const BUILD_FACTS_READS: [&str; 14] = [
+const BUILD_FACTS_READS: [&str; 15] = [
     "entry",
     "root",
     "block_addrs",
@@ -6004,6 +6004,7 @@ const BUILD_FACTS_READS: [&str; 14] = [
     "stack_pointer_carrier",
     "register_projection",
     "raw_call_site_at",
+    "raw_call_slot_at",
     "is_tail_call_site",
     "slot_target",
     "callee_linkage",

@@ -30,6 +30,40 @@ impl StatedStarts {
     }
 }
 
+/// The extent each sized function symbol states, `st_size` bytes from its start (ELF gABI; D506).
+/// Asked only for an entry a call or a jump offers, so a request that runs no discovery builds none.
+pub(super) struct StatedExtents;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for StatedExtents {
+    type Key = ();
+    type Value = crate::discovery::Holders;
+    const NAME: &'static str = "stated-extents";
+    const RETENTION: Retention = Retention::Held;
+
+    /// One sweep over the sized function symbols, `O(S log S)`.
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        let inputs = db.inputs();
+        // A size of 0 states no extent; a symbol placing no code begins no function to hold one.
+        let sized = (inputs.source.container().symbols.iter())
+            .filter(|symbol| symbol.defined && symbol.kind == SymbolKind::Function)
+            .filter(|symbol| symbol.size > 0 && inputs.places_function(symbol.vaddr))
+            .map(|symbol| {
+                (
+                    symbol.vaddr,
+                    symbol.vaddr..symbol.vaddr.saturating_add(symbol.size),
+                )
+            });
+        crate::discovery::Holders::of(sized)
+    }
+}
+
+/// The function whose stated extent holds `vaddr` past its start, the innermost where they nest:
+/// an entry there enters that function. `O(log S)`.
+pub(super) fn within(extents: &crate::discovery::Holders, vaddr: u64) -> Option<u64> {
+    let holding = extents.at(vaddr).iter();
+    holding.rev().copied().find(|start| *start < vaddr)
+}
+
 /// The program's stated starts, read once from the container and the decoded stubs.
 pub(super) struct Stated;
 

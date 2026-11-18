@@ -73,9 +73,9 @@ double twice_half(double x)
     /* r2dec proof: no individual construct is marked; 28 source obligations: 14 rendered, 14 elided, 0 refused; 5 statements rendered; 2 callee prototypes supplied by the source */
     {
         xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(half(x));
-        tmp_lane_1001542_1_0_1 = (uint64_t)((__uint128_t)xmm0_1 >> 0U);
+        tmp_lane_1001542_1_0_1 = (uint64_t)xmm0_1;
         xmm0_5 = (__uint128_t)r2sleigh_float_to_bits_64(half(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U)));
-        tmp_lane_1001559_2_0_1 = (uint64_t)((__uint128_t)xmm0_5 >> 0U);
+        tmp_lane_1001559_2_0_1 = (uint64_t)xmm0_5;
         return (double)(r2sleigh_float_from_bits_64(tmp_lane_1001559_2_0_1) + r2sleigh_float_from_bits_64(tmp_lane_1001542_1_0_1));
     }
 }
@@ -152,7 +152,7 @@ double loop_sum(const double* v, int32_t n)
                 xmm0_5 = (__uint128_t)(((__uint128_t)xmm0_3 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)(uint64_t)0U & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 64U);
                 do {
                     tmp_10015a0_10_1 = r2sleigh_load_u64((void*)((uint64_t)v + (uint64_t)rcx_3 * 8U));
-                    tmp_lane_10015a0_3_0_1 = (uint64_t)((__uint128_t)xmm0_5 >> 0U);
+                    tmp_lane_10015a0_3_0_1 = (uint64_t)xmm0_5;
                     tmp_lane_10015a0_3_1_1 = r2sleigh_float_from_bits_64(tmp_lane_10015a0_3_0_1) + r2sleigh_float_from_bits_64(tmp_10015a0_10_1);
                     xmm0_6 = (__uint128_t)(((__uint128_t)xmm0_5 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0U)) | ((__uint128_t)r2sleigh_float_to_bits_64(tmp_lane_10015a0_3_1_1) & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 0U);
                     tmp_10015a5_18_1 = r2sleigh_load_u64((void*)((uint64_t)v + (uint64_t)((uint64_t)rcx_3 + (uint64_t)1U) * 8U));
@@ -200,7 +200,7 @@ double loop_sum(const double* v, int32_t n)
                 xmm0_15 = xmm0_14;
                 for (; ; ) {
                     tmp_10015f0_10_1 = r2sleigh_load_u64((void*)(uint64_t)((uint64_t)((uint64_t)rdx_5 * (uint64_t)8U) + (uint64_t)tmp_10015dd_8_1));
-                    tmp_lane_10015f0_3_0_1 = (uint64_t)((__uint128_t)xmm0_15 >> 0U);
+                    tmp_lane_10015f0_3_0_1 = (uint64_t)xmm0_15;
                     tmp_lane_10015f0_3_1_1 = r2sleigh_float_from_bits_64(tmp_lane_10015f0_3_0_1) + r2sleigh_float_from_bits_64(tmp_10015f0_10_1);
                     xmm0_16 = (__uint128_t)(((__uint128_t)xmm0_15 & (__uint128_t)((__uint128_t)0xffffffffffffffffULL << 64U | (__uint128_t)0U)) | ((__uint128_t)r2sleigh_float_to_bits_64(tmp_lane_10015f0_3_1_1) & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffffffffffULL)) << 0U);
                     rdx_6 = (uint64_t)((uint64_t)rdx_5 + (uint64_t)1U);
@@ -251,10 +251,10 @@ int32_t main(int32_t argc, char** argv)
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)r2sleigh_float_to_bits_64(tmp_lane_1001608_0_1_1));
         r2sleigh_store_u64((void*)((uint64_t)(frame + 16U) + (uint64_t)8U), (uint64_t)0x4000000000000000U);
         xmm0_2 = (__uint128_t)r2sleigh_float_to_bits_64(twice_half(tmp_lane_1001608_0_1_1));
-        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((__uint128_t)xmm0_2 >> 0U));
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)xmm0_2);
         xmm0_3 = (__uint128_t)r2sleigh_float_to_bits_64(loop_sum((const double*)(uint64_t)(frame + 16U), 2));
         tmp_1001637_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
-        tmp_lane_1001637_2_0_1 = (uint64_t)((__uint128_t)xmm0_3 >> 0U);
+        tmp_lane_1001637_2_0_1 = (uint64_t)xmm0_3;
         tmp_lane_1001637_2_1_1 = r2sleigh_float_from_bits_64(tmp_lane_1001637_2_0_1) + r2sleigh_float_from_bits_64(tmp_1001637_8_1);
         tmp_100163c_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < tmp_lane_1001637_2_1_1) & (uint32_t)(uint8_t)(tmp_lane_1001637_2_1_1 < (double)(int64_t)0x80000000U));
         tmp_100163c_1b_1 = (double)(int32_t)0U;

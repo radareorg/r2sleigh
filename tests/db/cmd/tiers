@@ -133,7 +133,7 @@ r2sleigh_result_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             do {
                 tmp_401348_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U)) * (uint64_t)0x1000193U) >> 0U);
+                tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)rax_2) * (uint64_t)0x1000193U);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401351_3_0_1;
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));

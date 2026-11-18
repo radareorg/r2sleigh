@@ -18,6 +18,8 @@ use crate::Kernel;
 pub struct Syscalls {
     number_register: &'static str,
     names: BTreeMap<u64, String>,
+    /// The numbers a kernel document says never return, each with its citation (D505).
+    never: &'static [(u64, &'static str)],
 }
 
 impl Syscalls {
@@ -25,10 +27,10 @@ impl Syscalls {
     /// Linux kernel, so it reads Linux's.
     pub fn for_kernel(kernel: Kernel, arch: &str, bits: u32) -> Option<Self> {
         let family = crate::family(arch)?;
-        let (number_register, text) = match (kernel, family, bits) {
-            (Kernel::Linux, "x86", 64) => ("rax", LINUX_X86_64),
-            (Kernel::Linux, "x86", 32) => ("eax", LINUX_X86_32),
-            (Kernel::Linux, "arm", 64) => ("x8", LINUX_ARM_64),
+        let (number_register, text, never) = match (kernel, family, bits) {
+            (Kernel::Linux, "x86", 64) => ("rax", LINUX_X86_64, LINUX_X86_64_EXITS),
+            (Kernel::Linux, "x86", 32) => ("eax", LINUX_X86_32, &[][..]),
+            (Kernel::Linux, "arm", 64) => ("x8", LINUX_ARM_64, LINUX_GENERIC_EXITS),
             // Linux arm (EABI) reads r7, but its table is
             // arch/arm/tools/syscall.tbl, which no installed header carries;
             // radare2's is the obsolete OABI numbering. No table, rather than
@@ -38,12 +40,19 @@ impl Syscalls {
         Some(Self {
             number_register,
             names: parse(text),
+            never,
         })
     }
 
     /// The register the number travels in, spelled as the lifter spells it.
     pub const fn number_register(&self) -> &'static str {
         self.number_register
+    }
+
+    /// Why system call `number` never comes back, where the kernel's source states it (D505).
+    pub fn never_returns(&self, number: u64) -> Option<&'static str> {
+        let row = self.never.iter().find(|(held, _)| *held == number);
+        row.map(|(_, cited)| *cited)
     }
 
     /// The kernel's name for a number, where it gives one.
@@ -60,6 +69,26 @@ pub fn interrupt_never_returns(kernel: Kernel, arch: &str, vector: u64) -> Optio
         _ => None,
     }
 }
+
+/// Why system call `number` on `arch` under `kernel` never comes back, where the kernel's source
+/// states it (D505); the number is the table's, read by no name.
+pub fn syscall_never_returns(
+    kernel: Kernel,
+    arch: &str,
+    bits: u32,
+    number: u64,
+) -> Option<&'static str> {
+    Syscalls::for_kernel(kernel, arch, bits)?.never_returns(number)
+}
+
+/// Linux v6.8 `kernel/exit.c`: `void __noreturn do_exit(long code)` (:811); `SYSCALL_DEFINE1(exit, ..)`
+/// calls `do_exit` (:985-988); `exit_group` calls `void __noreturn do_group_exit(..)`, `/* NOTREACHED */` (:995, :1029-1033).
+const EXIT: &str = "Linux v6.8 kernel/exit.c:985-988 sys_exit calls do_exit, `void __noreturn do_exit(long code)` (:811)";
+const EXIT_GROUP: &str = "Linux v6.8 kernel/exit.c:1029-1033 sys_exit_group calls `void __noreturn do_group_exit` (:995-996), `/* NOTREACHED */`";
+/// `arch/x86/entry/syscalls/syscall_64.tbl:71` `60 common exit sys_exit`, `:242` `231 common exit_group sys_exit_group`.
+const LINUX_X86_64_EXITS: &[(u64, &str)] = &[(60, EXIT), (231, EXIT_GROUP)];
+/// `include/uapi/asm-generic/unistd.h:258` `#define __NR_exit 93`, `:260` `#define __NR_exit_group 94`.
+const LINUX_GENERIC_EXITS: &[(u64, &str)] = &[(93, EXIT), (94, EXIT_GROUP)];
 
 const FASTFAIL: &str = "Microsoft Learn, \"__fastfail\": \"The __fastfail intrinsic does not return\"; \
                         x86 and x64: `int 0x29`, the failure code in ecx (rcx)";
@@ -98,6 +127,31 @@ mod tests {
             interrupt_never_returns(Kernel::Windows, "aarch64", 0x29),
             None
         );
+    }
+
+    #[test]
+    fn only_the_exit_numbers_the_kernel_states_never_return() {
+        let exits = |arch, bits, numbers: &[u64]| {
+            (numbers.iter())
+                .map(|number| syscall_never_returns(Kernel::Linux, arch, bits, *number).is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            exits("x86-64", 64, &[60, 231, 39, 93]),
+            [true, true, false, false]
+        );
+        assert_eq!(
+            exits("aarch64", 64, &[93, 94, 60, 231]),
+            [true, true, false, false]
+        );
+        // The i386 table states no exit row yet; Darwin no table.
+        assert_eq!(exits("x86", 32, &[1, 252]), [false, false]);
+        assert_eq!(
+            syscall_never_returns(Kernel::Darwin, "x86-64", 64, 60),
+            None
+        );
+        let cited = syscall_never_returns(Kernel::Linux, "x86-64", 64, 231).expect("a row");
+        assert!(cited.contains("kernel/exit.c") && cited.contains("__noreturn"));
     }
 
     #[test]

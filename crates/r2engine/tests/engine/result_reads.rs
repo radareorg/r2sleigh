@@ -936,3 +936,194 @@ fn a_cited_float_parameter_reads_only_its_own_width() {
     let f = rendered(program);
     assert!(!f.starts_with("double f("), "{f}");
 }
+
+/// grep O2-noinline `0x9570`'s shape (D458): `g` returns XMM0 as entered at one `ret` and after
+/// `error(0, errnum, "x")` at the other; `caller` calls `g`, stores XMM0 and EAX, then tails to `g`.
+fn calling_and_tailing_a_handed_back_float() -> &'static [u8] {
+    let mut code = vec![0x90u8; 0x100];
+    let g = [
+        0x85, 0xff, // 1000 test edi, edi
+        0x75, 0x01, // 1002 jne 0x1005
+        0xc3, // 1004 ret
+        0x89, 0xfe, // 1005 mov esi, edi
+        0x48, 0x8d, 0x15, 0xa2, 0x00, 0x00, 0x00, // 1007 lea rdx, [rip + 0xa2]: "x"
+        0x31, 0xff, // 100e xor edi, edi
+        0x31, 0xc0, // 1010 xor eax, eax
+        0xe8, 0x79, 0x00, 0x00, 0x00, // 1012 call 0x1090: error
+        0xc3, // 1017 ret
+    ];
+    code[..g.len()].copy_from_slice(&g);
+    let caller = [
+        0x53, // 1020 push rbx
+        0x48, 0x89, 0xf3, // 1021 mov rbx, rsi
+        0xbf, 0x01, 0x00, 0x00, 0x00, // 1024 mov edi, 1
+        0xe8, 0xd2, 0xff, 0xff, 0xff, // 1029 call 0x1000
+        0xf2, 0x0f, 0x11, 0x03, // 102e movsd [rbx], xmm0
+        0x89, 0x43, 0x08, // 1032 mov [rbx + 8], eax
+        0xbf, 0x02, 0x00, 0x00, 0x00, // 1035 mov edi, 2
+        0x5b, // 103a pop rbx
+        0xe9, 0xc0, 0xff, 0xff, 0xff, // 103b jmp 0x1000
+    ];
+    code[0x20..0x20 + caller.len()].copy_from_slice(&caller);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0xb0..0xb2].copy_from_slice(b"x\0");
+    Box::leak(code.into_boxed_slice())
+}
+
+/// A float lane holding only entry bytes or calls' leftovers states no result (D458): the extern
+/// is `g`'s header, and the XMM0 and EAX the caller stores are no value of `g`.
+#[test]
+fn a_call_to_an_unwritten_float_lane_keeps_the_callees_header() {
+    let functions = [("g", BASE, 0x18), ("caller", BASE + 0x20, 0x20)];
+    let program = Literal::of_code(calling_and_tailing_a_handed_back_float(), &functions)
+        .with_data_after(BASE + 0xb0)
+        .importing("error")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(program);
+    open.analyse_program().expect("it surveys");
+    let render = |open: &mut OpenProgram<Literal>, at| {
+        let rendering = open.rendered(at).expect("it renders");
+        rendering.response.output.into_text()
+    };
+    let (caller, g) = (render(&mut open, BASE + 0x20), render(&mut open, BASE));
+    assert_extern_is_header(&caller, &g, "g");
+    assert!(!caller.contains("double"), "{caller}");
+    assert!(!caller.contains("= g("), "{caller}");
+}
+
+/// Asserts `caller`'s extern of `name` spells the result and parameter types of `callee`'s header.
+fn assert_extern_is_header(caller: &str, callee: &str, name: &str) {
+    let named = format!(" {name}(");
+    let header = callee
+        .lines()
+        .find(|line| line.contains(&named))
+        .expect("a header");
+    let header = header.trim_end_matches(['{', ' ']).trim();
+    let header = header.split_once(&named).expect("a name");
+    let extern_ = caller
+        .lines()
+        .find(|line| line.contains(&named) && line.trim_end().ends_with(");"));
+    let extern_ = extern_.expect("an extern").trim().trim_end_matches(';');
+    let extern_ = extern_.split_once(&named).expect("a name");
+    let types = |parameters: &str| -> Vec<String> {
+        let inner = parameters.trim_end_matches(')');
+        let first = |one: &str| one.split_whitespace().next().unwrap_or_default().to_owned();
+        inner.split(", ").map(first).collect()
+    };
+    assert_eq!(
+        header.0,
+        extern_.0.trim_start_matches("extern ").trim(),
+        "{caller}\n{callee}"
+    );
+    assert_eq!(types(header.1), types(extern_.1), "{caller}\n{callee}");
+}
+
+/// `g` as in `calling_and_tailing_a_handed_back_float`; `h`: `mov edi, 2; jmp g`; `caller`: `call h`,
+/// then stores XMM0 and EAX.
+fn calling_a_forwarder_of_a_handed_back_float() -> &'static [u8] {
+    let mut code = calling_and_tailing_a_handed_back_float().to_vec();
+    code[0x20..0x60].fill(0x90);
+    let h = [
+        0xbf, 0x02, 0x00, 0x00, 0x00, // 1020 mov edi, 2
+        0xe9, 0xd6, 0xff, 0xff, 0xff, // 1025 jmp 0x1000
+    ];
+    code[0x20..0x20 + h.len()].copy_from_slice(&h);
+    let caller = [
+        0x53, // 1040 push rbx
+        0x48, 0x89, 0xf3, // 1041 mov rbx, rsi
+        0xbf, 0x01, 0x00, 0x00, 0x00, // 1044 mov edi, 1
+        0xe8, 0xd2, 0xff, 0xff, 0xff, // 1049 call 0x1020
+        0xf2, 0x0f, 0x11, 0x03, // 104e movsd [rbx], xmm0
+        0x89, 0x43, 0x08, // 1052 mov [rbx + 8], eax
+        0x5b, // 1055 pop rbx
+        0xc3, // 1056 ret
+    ];
+    code[0x40..0x40 + caller.len()].copy_from_slice(&caller);
+    Box::leak(code.into_boxed_slice())
+}
+
+/// A forwarder whose tail's callee holds no value keeps result carriers (D525): the tail callee's
+/// lanes are the forwarder's at its return, so `caller`'s extern of `h` is `h`'s own header.
+#[test]
+fn a_call_to_a_forwarder_whose_tail_holds_no_value_keeps_its_header() {
+    let functions = [
+        ("g", BASE, 0x18),
+        ("h", BASE + 0x20, 0x0a),
+        ("caller", BASE + 0x40, 0x17),
+    ];
+    let program = Literal::of_code(calling_a_forwarder_of_a_handed_back_float(), &functions)
+        .with_data_after(BASE + 0xb0)
+        .importing("error")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(program);
+    open.analyse_program().expect("it surveys");
+    let mut render = |at| {
+        let rendering = open.rendered(at).expect("it renders");
+        rendering.response.output.into_text()
+    };
+    let (caller, h) = (render(BASE + 0x40), render(BASE + 0x20));
+    assert_extern_is_header(&caller, &h, "h");
+    assert!(!caller.contains("= h("), "{caller}");
+}
+
+/// `g` as in `calling_and_tailing_a_handed_back_float`; `h` returns `k`'s EAX where `edi` is 1, the
+/// caller's RAX where it is 0, else `mov edi, 2; jmp g`; `caller`: `mov edi, 1; call h; xor eax, eax`.
+fn calling_a_forwarder_with_a_direct_return() -> &'static [u8] {
+    let mut code = calling_a_forwarder_of_a_handed_back_float().to_vec();
+    code[0x20..0x70].fill(0x90);
+    let h = [
+        0x85, 0xff, // 1020 test edi, edi
+        0x74, 0x0b, // 1022 je 0x102f
+        0x83, 0xff, 0x01, // 1024 cmp edi, 1
+        0x75, 0x07, // 1027 jne 0x1030
+        0xe8, 0x32, 0x00, 0x00, 0x00, // 1029 call 0x1060
+        0xc3, // 102e ret
+        0xc3, // 102f ret
+        0xbf, 0x02, 0x00, 0x00, 0x00, // 1030 mov edi, 2
+        0xe9, 0xc6, 0xff, 0xff, 0xff, // 1035 jmp 0x1000
+    ];
+    code[0x20..0x20 + h.len()].copy_from_slice(&h);
+    let caller = [
+        0xbf, 0x01, 0x00, 0x00, 0x00, // 1040 mov edi, 1
+        0xe8, 0xd6, 0xff, 0xff, 0xff, // 1045 call 0x1020
+        0x31, 0xc0, // 104a xor eax, eax
+        0xc3, // 104c ret
+    ];
+    code[0x40..0x40 + caller.len()].copy_from_slice(&caller);
+    code[0x60..0x66].copy_from_slice(&[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3]); // 1060 k: mov eax, 7; ret
+    Box::leak(code.into_boxed_slice())
+}
+
+/// grep O2-noinline `fcn_9670`'s shape (D525): a direct return writes EAX beside a tail whose callee
+/// holds no value, and no call reads it; the integer lane stays open, so the extern's result is `h`'s.
+#[test]
+fn a_forwarder_returning_a_value_beside_its_tail_keeps_its_result_type() {
+    let functions = [
+        ("g", BASE, 0x18),
+        ("h", BASE + 0x20, 0x1a),
+        ("caller", BASE + 0x40, 0x0d),
+        ("k", BASE + 0x60, 0x06),
+    ];
+    let program = Literal::of_code(calling_a_forwarder_with_a_direct_return(), &functions)
+        .with_data_after(BASE + 0xb0)
+        .importing("error")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(program);
+    open.analyse_program().expect("it surveys");
+    let mut render = |at| {
+        let rendering = open.rendered(at).expect("it renders");
+        rendering.response.output.into_text()
+    };
+    let (caller, h) = (render(BASE + 0x40), render(BASE + 0x20));
+    let header = h
+        .lines()
+        .find(|line| line.contains(" h("))
+        .expect("a header");
+    let extern_ = caller
+        .lines()
+        .find(|line| line.contains(" h("))
+        .expect("an extern");
+    let result = |line: &str| line.trim().split_once(" h(").expect("a name").0.to_owned();
+    assert_eq!(result(header), result(extern_), "{caller}\n{h}");
+    assert!(header.starts_with("r2sleigh_result_u"), "{h}");
+}

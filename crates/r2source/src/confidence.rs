@@ -166,6 +166,9 @@ pub enum Premise {
     /// grows the stack and resumes the caller after the call, which then re-enters. A name states
     /// the routine; only this premise says it behaves as the runtime does.
     GoRuntime,
+    /// The code is compiler output: a callee writes its caller's frame only through an address
+    /// the caller exposed, and no caller reads a stack parameter home back (D471, a ruling).
+    FrameIsolation,
 }
 
 impl Premise {
@@ -175,6 +178,7 @@ impl Premise {
             Self::ClosedWorld => "closed-world",
             Self::UbFreeSource => "ub-free",
             Self::GoRuntime => "go-runtime",
+            Self::FrameIsolation => "frame-isolation",
         }
     }
 }
@@ -208,6 +212,12 @@ impl Citation {
     /// The document stating that interrupt `vector` never comes back under `kernel` (D229).
     pub fn interrupt(kernel: r2abi::Kernel, arch: &str, vector: u64) -> Option<Self> {
         r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).map(|_| Self(Cited::Kernel))
+    }
+
+    /// The kernel source stating system call `number` never comes back under `kernel` (D505).
+    pub fn syscall(kernel: r2abi::Kernel, arch: &str, bits: u32, number: u64) -> Option<Self> {
+        r2abi::syscalls::syscall_never_returns(kernel, arch, bits, number)
+            .map(|_| Self(Cited::Kernel))
     }
 
     /// The Go runtime model naming `name` among the routines its compiler ends a block at; what it
