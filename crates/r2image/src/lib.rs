@@ -76,6 +76,7 @@ fn architecture_name(architecture: object::Architecture) -> &'static str {
     }
 }
 
+pub use loader::minidebug::{BUDGET as MINIDEBUG_BUDGET, MiniDebugRefusal};
 pub use r2abi::statement::*;
 
 /// The mapping a symbol name states, per the ARM ELF ABI: `$a`, `$t` or `$d`,
@@ -569,6 +570,8 @@ pub struct Image {
     /// keeps an answer beside the image it was computed from records this too,
     /// so one program's answer is never served for another's.
     identity: u64,
+    /// Why `.gnu_debugdata` is refused, where the container holds one that does not read.
+    minidebug: Option<MiniDebugRefusal>,
 }
 
 /// How many programs this process has opened.
@@ -845,14 +848,12 @@ impl Image {
                 section: symbol.section.index().map(|index| index.0),
                 origin: match dynamic {
                     true => SymbolOrigin {
-                        table: None,
                         dynamic: Some(symbol.index),
-                        directory: None,
+                        ..SymbolOrigin::default()
                     },
                     false => SymbolOrigin {
                         table: Some(symbol.index),
-                        dynamic: None,
-                        directory: None,
+                        ..SymbolOrigin::default()
                     },
                 },
                 library: match (import, &dylibs, symbol.n_desc) {
@@ -876,6 +877,44 @@ impl Image {
                     .filter_map(|symbol| read_symbol(TableSymbol::dynamic(symbol), true)),
             )
             .collect();
+        // GDB's MiniDebugInfo: the `.symtab` of the ELF `.gnu_debugdata` holds names what no table
+        // here names; an address `.symtab` or `.dynsym` names keeps that name (adr-minidebuginfo.md).
+        let (minidebug, minidebug_refusal) = match loader::minidebug::decoded_section(&file) {
+            None => (None, None),
+            Some(Ok(inner)) => (Some(inner), None),
+            Some(Err(refusal)) => (None, Some(refusal)),
+        };
+        let inner = minidebug.as_deref().map(object::File::parse);
+        let minidebug_refusal = match inner {
+            Some(Err(error)) => Some(loader::minidebug::MiniDebugRefusal::Inner(
+                error.to_string(),
+            )),
+            _ => minidebug_refusal,
+        };
+        if let Some(Ok(inner)) = &inner {
+            let mut named = (symbols.iter())
+                .filter(|symbol| symbol.defined)
+                .map(|symbol| symbol.vaddr)
+                .collect::<Vec<_>>();
+            named.sort_unstable();
+            let outer = |index: object::SectionIndex| {
+                let name = inner.section_by_index(index).ok()?.name().ok()?;
+                Some(file.section_by_name(name)?.index().0)
+            };
+            let stated = inner.symbols().filter_map(|symbol| {
+                let mut read = read_symbol(TableSymbol::of(&symbol, os_abi)?, false)?;
+                if named.binary_search(&read.vaddr).is_ok() || !read.defined {
+                    return None;
+                }
+                read.section = symbol.section_index().and_then(outer);
+                read.origin = SymbolOrigin {
+                    minidebug: Some(symbol.index().0),
+                    ..SymbolOrigin::default()
+                };
+                Some(read)
+            });
+            symbols.extend(stated.collect::<Vec<_>>());
+        }
         // A PE image states its imports by slot and its exports in directories, not a symbol table.
         let (imports, exports) = match &pe {
             Some(pe) => (&pe.imports[..], &pe.exports[..]),
@@ -922,6 +961,7 @@ impl Image {
                 kept.origin.table = kept.origin.table.or(later.origin.table);
                 kept.origin.dynamic = kept.origin.dynamic.or(later.origin.dynamic);
                 kept.origin.directory = kept.origin.directory.or(later.origin.directory);
+                kept.origin.minidebug = kept.origin.minidebug.or(later.origin.minidebug);
                 kept.library = kept.library.take().or_else(|| later.library.take());
                 kept.version = kept.version.take().or_else(|| later.version.take());
             }
@@ -1069,7 +1109,13 @@ impl Image {
             byte_revision: 0,
             written: Vec::new(),
             identity: next_identity(),
+            minidebug: minidebug_refusal,
         })
+    }
+
+    /// Why the `.gnu_debugdata` section states no symbols, where it is present and refused whole.
+    pub const fn minidebug_refusal(&self) -> Option<&MiniDebugRefusal> {
+        self.minidebug.as_ref()
     }
 
     /// Everything the container states, in the shape every reader shares.
@@ -1720,6 +1766,7 @@ mod tests {
             byte_revision: 0,
             written: Vec::new(),
             identity: next_identity(),
+            minidebug: None,
         }
     }
 

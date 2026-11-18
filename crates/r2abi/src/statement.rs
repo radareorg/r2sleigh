@@ -646,6 +646,8 @@ pub struct SymbolOrigin {
     pub dynamic: Option<usize>,
     /// A PE import or export directory, by position within its library's list, from one.
     pub directory: Option<usize>,
+    /// The `.symtab` of the ELF `.gnu_debugdata` holds (GDB's MiniDebugInfo).
+    pub minidebug: Option<usize>,
 }
 
 /// One relocation record the loader, or the program's own start-up, applies.

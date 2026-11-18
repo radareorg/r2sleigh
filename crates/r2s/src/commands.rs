@@ -557,6 +557,10 @@ fn info(session: &Session) -> Result<String, String> {
         image.container().languages.program.spelled()
     ));
     posture(&mut out, image.container());
+    // A `.gnu_debugdata` section refused whole: no symbol of it is listed (D572).
+    if let Some(refused) = image.minidebug_refusal() {
+        out.push_str(&format!("minidebug refused: {refused}\n"));
+    }
     if let Some(entry) = image
         .entry_points()
         .iter()
@@ -1212,12 +1216,14 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .iter()
         .filter(|symbol| !symbol.import)
         .collect();
-    // Numbered as the static table numbers them, where it states them.
+    // Numbered as the static table numbers them, where it states them; a MiniDebugInfo symbol by
+    // the inner `.symtab`'s number, as radare2 numbers it.
     let nth = |symbol: &r2image::Symbol| {
-        symbol.origin.table.map_or(
-            (true, symbol.origin.dynamic.or(symbol.origin.directory)),
-            |index| (false, Some(index)),
-        )
+        let origin = &symbol.origin;
+        let other = origin.dynamic.or(origin.directory).or(origin.minidebug);
+        origin
+            .table
+            .map_or((true, other), |index| (false, Some(index)))
     };
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {

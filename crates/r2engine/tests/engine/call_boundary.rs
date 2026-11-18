@@ -646,6 +646,7 @@ fn each_way_in() -> Vec<(&'static str, Literal)> {
             table: None,
             dynamic: Some(1),
             directory: None,
+            minidebug: None,
         },
         ..r2abi::statement::Symbol::default()
     });

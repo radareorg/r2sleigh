@@ -766,14 +766,6 @@ verdict = "unfilled"
 reason = "radare2 flags each LSDA call-site range (try.*); r2s states no landing pads yet (owner r2image, ROADMAP I: LSDA landing pads as statements)"
 
 [[judged]]
-command = "pd"
-binaries = "ls-toybox"
-r2 = 'b sym\.\w+$'
-r2s = 'b 0x[0-9a-f]+$'
-verdict = "unfilled"
-reason = "_start_main is named only in .gnu_debugdata (MiniDebugInfo, an xz-packed .symtab), which radare2 reads and r2s does not (owner r2image symbols, ROADMAP I)"
-
-[[judged]]
 command = "is"
 binaries = "*"
 corpus = "mach0"
@@ -1853,15 +1845,6 @@ r2s = ' basis=(called|handed)$'
 r2 = '^<missing> refs='
 verdict = "deliberate"
 reason = "class A: r2s's aa follows each direct call and each code address handed to a call; radare2's aa is `af@@ sym.*;af@entry0;afva` (6.2.4 cmd_anal.inc.c:180) and follows neither (aaa's aac does). rust_nonnull_x86_64 0x5137b: r2s's fcn.502b0 calls it at 0x502d7, radare2 never analyses 0x502b0; ts3server 0x7bde70: fcn.79d0c0 hands it in `lea rdi, [0x7bde70]` at 0x79d110"
-
-[[judged]]
-command = "afl"
-binaries = "fedora_32_bin_ls"
-corpus = "elf"
-lacking = "r2s"
-r2 = ' sym\.[A-Za-z_]+\.cold$'
-verdict = "unfilled"
-reason = "class A: fedora_32_bin_ls carries its symbols in .gnu_debugdata (LZMA MiniDebugInfo, 0xe9c bytes); radare2 reads it and lists sym.main.cold (0x4e15, `e876f9ffff call sym.imp.abort`) and twelve more; r2s's `is` states none of them. Owner ROADMAP I (.gnu_debugdata symbols)"
 
 [[judged]]
 command = "afl"

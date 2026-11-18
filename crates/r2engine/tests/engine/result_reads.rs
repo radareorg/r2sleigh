@@ -777,6 +777,7 @@ fn a_result_another_way_in_may_read_stays_a_residual() {
             table: None,
             dynamic: Some(1),
             directory: None,
+            minidebug: None,
         },
         ..r2abi::statement::Symbol::default()
     });
