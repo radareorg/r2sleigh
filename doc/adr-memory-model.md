@@ -206,7 +206,9 @@ coalesce with the reader's own) and its other reads as one `Dep::Held`, an
 `Rc` of that list from its first query on. `Dep::moved_since` walks a nested
 list in order and stops where the spliced list stopped, so revalidation
 after a write and every answer are unchanged; `has_read` walks the nested
-lists once each. Cost: a held read is `O(byte ranges)` in place of
+lists once each. The deepest nesting on that session is 13 lists
+(`forwarded`; `summary` 8), so the recursive walk and drop stay shallow.
+Cost: a held read is `O(byte ranges)` in place of
 `O(list)`; a list stores its own reads plus one item per held list read.
 The session peaks at 701 MB (-79%), cold `pdd @ 0x23fdf0` at 364 MB (was
 448), both outputs byte-identical, 356.6 G against 368.7 G.
