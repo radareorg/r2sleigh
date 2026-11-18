@@ -23,6 +23,16 @@ pub struct Session {
     pub bytes: bool,
     /// Whether each note names its basis and each setter its call: `asm.proof` (r2s only).
     pub proof: bool,
+    /// Whether `pdf` draws flow lanes: `asm.lines`.
+    pub lines: bool,
+    /// The cells the lanes and arrows take, `asm.lines.width`; by the terminal's width where unset.
+    pub lines_width: Option<usize>,
+    /// The cell each line's first `;` stands at: `asm.cmt.col`.
+    pub cmt_col: usize,
+    /// Box glyphs, or radare2's ASCII: `scr.utf8`.
+    pub utf8: bool,
+    /// The terminal's width, where stdout is one: lines are cut to it. A pipe is never cut.
+    pub columns: Option<usize>,
 }
 
 impl Session {
@@ -34,6 +44,11 @@ impl Session {
             grepped: false,
             bytes: true,
             proof: false,
+            lines: true,
+            lines_width: None,
+            cmt_col: 71,
+            utf8: true,
+            columns: None,
             addr: program.start().unwrap_or(0),
             program,
             path: path.to_owned(),
@@ -45,6 +60,16 @@ impl Session {
         match self.grepped {
             true => None,
             false => r2s_tui::theme::Depth::of(self.color),
+        }
+    }
+
+    /// How `pdf`'s gutter is drawn: 10 cells of lanes in plain mode and from 160 columns, 6 under.
+    pub fn gutter(&self) -> crate::flow::Gutter {
+        let narrow = self.columns.is_some_and(|columns| columns < 160);
+        crate::flow::Gutter {
+            width: (self.lines_width).unwrap_or(if narrow { 6 } else { 10 }),
+            utf8: self.utf8,
+            lanes: self.lines,
         }
     }
 

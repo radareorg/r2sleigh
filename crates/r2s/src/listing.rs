@@ -21,11 +21,96 @@ pub(crate) fn disassemble(session: &mut Session, argument: &str) -> Result<Strin
     {
         return Err(format!("nothing mapped at {at:#x}"));
     }
-    let mut out = String::new();
+    let mut out = Vec::new();
     for (line, next) in answer.value.iter().zip(next_calls(&answer.value)) {
-        out.push_str(&listed(session, line, next));
+        let rows = labels(line)
+            .into_iter()
+            .chain([listed(session, line, next)]);
+        out.extend(rows.map(|row| composed(session, (MARGIN.to_owned(), Roles::new()), row)));
     }
-    Ok(out.trim_end().to_owned())
+    Ok(out.join("\n").trim_end().to_owned())
+}
+
+/// What `pd` writes before the address: the cells `pdf`'s rail and lanes take in the plain grid.
+const MARGIN: &str = "            ";
+
+/// One printed row before its gutter: its text and roles, where its instruction starts, and where
+/// its first `;` stands, the instruction ending there.
+pub(crate) struct Row {
+    text: String,
+    roles: Roles,
+    instruction: usize,
+    notes: Option<usize>,
+}
+
+impl Row {
+    /// A row of comment text alone, which no column moves.
+    fn comment(text: String) -> Self {
+        Self {
+            text,
+            roles: Roles::new(),
+            instruction: 0,
+            notes: None,
+        }
+    }
+}
+
+/// A row behind its gutter, its first `;` at `asm.cmt.col` (a longer instruction pushes only its
+/// own notes), cut to a terminal's width (plain mode never cuts), then painted.
+fn composed(session: &Session, lead: (String, Roles), row: Row) -> String {
+    let cells = |text: &str| text.chars().count();
+    let (mut text, mut roles) = lead;
+    let end = row.notes.unwrap_or(row.text.len());
+    let before = cells(&text) + cells(&row.text[..row.instruction]);
+    let instruction = cells(&row.text[row.instruction..end]);
+    let notes = cells(&row.text[end..]);
+    let gap = match row.notes {
+        Some(_) => session.cmt_col.saturating_sub(before + instruction).max(1),
+        None => 0,
+    };
+    let kept = match session.columns {
+        Some(width) => crate::flow::cut(before, instruction, gap, notes, width),
+        None => crate::flow::Kept {
+            instruction: None,
+            gap,
+            mark: notes > 0,
+            words: None,
+        },
+    };
+    let mut keep = |text: &mut String, range: std::ops::Range<usize>, cells: Option<usize>| {
+        let bytes = cells.map_or(range.end, |cells| {
+            let mut chars = row.text[range.clone()].char_indices();
+            chars
+                .nth(cells)
+                .map_or(range.end, |(at, _)| range.start + at)
+        });
+        let shift = text.len();
+        text.push_str(&row.text[range.start..bytes]);
+        for (span, role) in &row.roles {
+            let (from, to) = (span.start.max(range.start), span.end.min(bytes));
+            if from < to {
+                roles.push((from - range.start + shift..to - range.start + shift, *role));
+            }
+        }
+        if cells.is_some_and(|cells| cells > 0) {
+            text.push_str("..");
+        }
+    };
+    keep(&mut text, 0..row.instruction, None);
+    keep(&mut text, row.instruction..end, kept.instruction);
+    text.extend(std::iter::repeat_n(' ', kept.gap));
+    if kept.mark {
+        let mark = row.text[end..]
+            .char_indices()
+            .nth(3)
+            .map_or(row.text.len(), |(at, _)| end + at);
+        keep(&mut text, end..mark, None);
+        keep(&mut text, mark..row.text.len(), kept.words);
+    }
+    match session.paints() {
+        Some(depth) => r2s_tui::theme::ansi(&text, &roles, depth),
+        None => text,
+    }
 }
 
 /// What a line says, past its address and bytes: the instruction as `pd`
@@ -56,46 +141,62 @@ pub(crate) fn instruction_painted(
     (text, roles)
 }
 
-/// One listing line, in the columns radare2 writes them in.
-fn listed(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> String {
+/// One listing line, in the columns radare2 writes them in, from its address on.
+fn listed(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> Row {
     let mut hex: String = line.bytes.iter().map(|b| format!("{:02x}", b)).collect();
     // radare2 caps the byte column at twelve characters and marks the cut.
     if hex.len() > 12 {
         hex.truncate(10);
         hex.push_str("..");
     }
-    let (text, roles) = match line.decoded() {
+    let (instruction, instruction_roles) = match line.decoded() {
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
         true => painted(line, &session.program.names()),
     };
-    let offset = format!("{:#010x}", line.address);
-    let (notes, marks) = held(session, line, next_call);
-    let (offset, text, notes) = match session.paints() {
-        Some(depth) => (
-            r2s_tui::theme::ansi(&offset, &[(0..offset.len(), Role::Offset)], depth),
-            r2s_tui::theme::ansi(&text, &roles, depth),
-            r2s_tui::theme::ansi(&notes, &marks, depth),
-        ),
-        None => (offset, text, notes),
-    };
+    let mut text = format!("{:#010x}", line.address);
+    let mut roles = vec![(0..text.len(), Role::Offset)];
+    text.push_str("      ");
     // Without the bytes, the text takes the column they stood in.
-    let hex = match session.bytes {
-        true => format!("{hex:<14} "),
-        false => String::new(),
-    };
-    format!(
-        "{}            {offset}      {hex}{text}{notes}\n",
-        labels(line),
-    )
+    if session.bytes {
+        text.push_str(&format!("{hex:<14} "));
+    }
+    let at = text.len();
+    text.push_str(&instruction);
+    roles.extend(
+        instruction_roles
+            .into_iter()
+            .map(|(span, role)| (span.start + at..span.end + at, role)),
+    );
+    let (notes, marks) = held(session, line, next_call);
+    // `held` opens each note with ` ; `: the column puts the first `;` itself.
+    let notes = notes.strip_prefix(' ').map(|notes| (text.len(), notes, 1));
+    let start = notes.map(|(start, _, _)| start);
+    if let Some((start, notes, skipped)) = notes {
+        text.push_str(notes);
+        let shift =
+            |span: std::ops::Range<usize>| span.start + start - skipped..span.end + start - skipped;
+        roles.extend(marks.into_iter().map(|(span, role)| (shift(span), role)));
+    }
+    Row {
+        text,
+        roles,
+        instruction: at,
+        notes: start,
+    }
 }
 
-/// The case and default labels a dispatch puts on this line, each on its own line above it as radare2 writes them.
-fn labels(line: &r2engine::query::Line) -> String {
+/// The case and default labels a dispatch puts on this line, each on its own row above it as radare2 writes them.
+fn labels(line: &r2engine::query::Line) -> Vec<Row> {
     use r2engine::query::AnnotationKind;
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut label = |text: String, dispatch: u64| {
-        let text = format!("            ;-- {text}:");
-        out.push_str(&format!("{text:<71}; from {dispatch:#010x}\n"));
+        let text = format!(";-- {text}:");
+        out.push(Row {
+            notes: Some(text.len()),
+            text: format!("{text}; from {dispatch:#010x}"),
+            roles: Roles::new(),
+            instruction: 0,
+        });
     };
     for annotation in &line.annotations {
         match annotation.kind {
@@ -244,38 +345,76 @@ pub(crate) fn disassemble_function(
     let answer = &listing.lines;
     // A walk refused at the entry lists nothing: the record is the answer (ROADMAP D29).
     match (&listing.refused, answer.value.is_empty()) {
-        (Some(refused), true) => return Ok(unanalysed(refused).trim_end().to_owned()),
+        (Some(refused), true) => {
+            let rows = unanalysed(refused)
+                .into_iter()
+                .map(|row| format!("{MARGIN}{row}"));
+            return Ok(rows.collect::<Vec<_>>().join("\n"));
+        }
         (None, true) => return Err(format!("no blocks at {addr:#x}")),
         _ => {}
     }
-    let next = next_calls(&answer.value);
-    let mut out: String = (answer.value.iter().zip(next))
-        .map(|(line, next)| listed(session, line, next))
-        .collect();
-    out.push_str(&stopped(answer.completion));
-    if let Some(refused) = &listing.refused {
-        out.push_str(&unanalysed(refused));
+    let lines = &answer.value;
+    let mut rows = Vec::new();
+    let mut row_of = Vec::with_capacity(lines.len());
+    for (line, next) in lines.iter().zip(next_calls(lines)) {
+        rows.extend(labels(line));
+        row_of.push(rows.len());
+        rows.push(listed(session, line, next));
     }
-    Ok(out.trim_end().to_owned())
+    rows.extend(stopped(answer.completion).map(Row::comment));
+    if let Some(refused) = &listing.refused {
+        rows.extend(unanalysed(refused).into_iter().map(Row::comment));
+    }
+    // The engine states the edges by address; a row is where its line was laid out.
+    let row = |address: u64| {
+        let line = lines
+            .binary_search_by_key(&address, |line| line.address)
+            .ok()?;
+        Some(row_of[line])
+    };
+    let edges = (listing.edges.iter()).filter_map(|edge| {
+        Some(crate::flow::Edge {
+            from: row(edge.from)?,
+            to: row(edge.to)?,
+            latch: edge.latch,
+        })
+    });
+    let edges = edges.collect::<Vec<_>>();
+    let unknown = (lines.iter().enumerate())
+        .filter(|(_, line)| unresolved(line))
+        .map(|(at, _)| row_of[at])
+        .collect::<Vec<_>>();
+    let gutters = crate::flow::gutters(rows.len(), &edges, &unknown, session.gutter());
+    let out = (rows.into_iter().zip(gutters)).map(|(row, gutter)| composed(session, gutter, row));
+    Ok(out.collect::<Vec<_>>().join("\n").trim_end().to_owned())
 }
 
-/// Why a listing carries no analysis, and each dispatch whose arms it therefore does not reach, as trailing comment lines.
-fn unanalysed(refused: &r2engine::program::AnalysisRefused) -> String {
-    let mut out = format!("            ; analysis refused: {}\n", refused.reason);
+/// Whether the line is an indirect jump no walk followed: an unknown-kind note says so.
+fn unresolved(line: &r2engine::query::Line) -> bool {
+    let unresolved = |annotation: &r2engine::query::Annotation| {
+        matches!(annotation.kind, r2engine::query::AnnotationKind::Unresolved)
+    };
+    line.annotations.iter().any(unresolved)
+}
+
+/// Why a listing carries no analysis, and each dispatch whose arms it therefore does not reach, as trailing comment rows.
+fn unanalysed(refused: &r2engine::program::AnalysisRefused) -> Vec<String> {
+    let mut out = vec![format!("; analysis refused: {}", refused.reason)];
     for dispatch in &refused.unresolved {
-        out.push_str(&format!(
-            "            ; indirect branch at {dispatch:#x} unresolved: what it reaches is not listed\n"
+        out.push(format!(
+            "; indirect branch at {dispatch:#x} unresolved: what it reaches is not listed"
         ));
     }
     out
 }
 
-/// Where a listing ended short of what was asked, as a trailing comment line.
-fn stopped(completion: Completion) -> String {
+/// Where a listing ended short of what was asked, as a trailing comment row.
+fn stopped(completion: Completion) -> Option<String> {
     match completion {
-        Completion::Complete => String::new(),
+        Completion::Complete => None,
         Completion::Unmapped { at } => {
-            format!("            ; listing stopped: nothing mapped at {at:#x}\n")
+            Some(format!("; listing stopped: nothing mapped at {at:#x}"))
         }
     }
 }
@@ -825,10 +964,10 @@ mod tests {
     #[test]
     fn a_listing_cut_short_by_unmapped_bytes_says_where() {
         use r2engine::query::Completion;
-        assert_eq!(stopped(Completion::Complete), "");
+        assert_eq!(stopped(Completion::Complete), None);
         assert_eq!(
-            stopped(Completion::Unmapped { at: 0x401360 }).trim(),
-            "; listing stopped: nothing mapped at 0x401360"
+            stopped(Completion::Unmapped { at: 0x401360 }).as_deref(),
+            Some("; listing stopped: nothing mapped at 0x401360")
         );
     }
 }

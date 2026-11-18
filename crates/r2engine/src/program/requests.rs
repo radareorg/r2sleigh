@@ -26,6 +26,20 @@ pub struct FunctionListing {
     /// Where this is `Some`, the lines are the walk's: every block it reaches without the
     /// analysis, claiming only what each line and the walked def-use show.
     pub refused: Option<AnalysisRefused>,
+    /// Each jump and taken branch between two listed lines, in `(from, to)` order (D565).
+    pub edges: Vec<FlowEdge>,
+}
+
+/// One transfer a listing draws: from the transferring instruction to its target's line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FlowEdge {
+    pub from: u64,
+    pub to: u64,
+    /// `Jump` or `Taken`: a fall-through needs no line, a dispatch's arms are its case labels.
+    pub kind: EdgeKind,
+    /// A back edge of a loop the analysis states: its target carries the `Loop` note, and its
+    /// source block is one of that note's latches.
+    pub latch: bool,
 }
 
 /// One function as its control-flow graph: each block with its lines, and
@@ -134,6 +148,49 @@ fn edges_of(
             edges.push(edge);
         }
     }
+    edges
+}
+
+/// Each block's jump or taken branch as a [`FlowEdge`]: from the block's last listed line to the
+/// line its target starts. `O(B log L)` over the shape's blocks and the listing's sorted lines.
+fn flow_edges(lines: &[Line], shape: &Shape) -> Vec<FlowEdge> {
+    // A target is any listed line: a pad's jump may land inside a block of the body's outline.
+    let at = |address: u64| {
+        lines
+            .binary_search_by_key(&address, |line| line.address)
+            .ok()
+    };
+    let mut edges = Vec::new();
+    for (address, size, successors) in &shape.blocks {
+        let end = lines.partition_point(|line| line.address < address + size);
+        let Some(last) = end
+            .checked_sub(1)
+            .filter(|last| lines[*last].address >= *address)
+        else {
+            continue;
+        };
+        let dispatch = shape.dispatches.contains(&lines[last].address);
+        for edge in edges_of(successors, dispatch, |target| at(target).is_some()) {
+            if !matches!(edge.kind, EdgeKind::Jump | EdgeKind::Taken) {
+                continue;
+            }
+            let Some(target) = at(edge.target) else {
+                continue;
+            };
+            let latch = lines[target].annotations.iter().any(|annotation| {
+                matches!(&annotation.kind, crate::query::AnnotationKind::Loop { latches, .. }
+                    if latches.contains(address))
+            });
+            edges.push(FlowEdge {
+                from: lines[last].address,
+                to: edge.target,
+                kind: edge.kind,
+                latch,
+            });
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
     edges
 }
 
@@ -563,8 +620,16 @@ impl<S: Source + 'static> OpenProgram<S> {
         })
     }
 
-    /// The listing and the shape of the body it lists, within a request already started.
+    /// The listing and the shape of the body it lists, within a request already started; the
+    /// listing's edges are read off the shape once, `O(B log L)`.
     fn listed_body(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
+        let (mut listing, shape) = self.listed_shape(entry)?;
+        listing.edges = flow_edges(&listing.lines.value, &shape);
+        Ok((listing, shape))
+    }
+
+    /// [`Self::listed_body`] before its edges are read.
+    fn listed_shape(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
         self.loaded()?;
         self.assembled()?;
         let target = self.target(entry)?;
@@ -626,6 +691,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted),
             refused: None,
+            edges: Vec::new(),
         };
         Ok((listing, pads))
     }
@@ -658,6 +724,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                         reason: error,
                         unresolved: Vec::new(),
                     }),
+                    edges: Vec::new(),
                 };
                 let shape = shape_of(std::iter::empty(), std::iter::empty(), None);
                 return Ok((listing, shape));
@@ -691,6 +758,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted),
             refused: Some(AnalysisRefused { reason, unresolved }),
+            edges: Vec::new(),
         };
         Ok((listing, shape))
     }

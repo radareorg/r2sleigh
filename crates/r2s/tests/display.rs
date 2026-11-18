@@ -39,9 +39,16 @@ fn a_piped_listing_is_the_painted_one_with_no_escape() {
     let plain = piped(hashes(), "pdf @ 0x401330");
     assert!(!plain.contains('\x1b'), "{plain}");
     assert!(plain.contains(" ; "), "the function has notes: {plain}");
-    let painted = piped(hashes(), "e scr.color=1; pdf @ 0x401330");
-    assert!(painted.contains('\x1b'), "{painted}");
-    assert_eq!(unpainted(&painted), plain);
+    // The lanes and the rail are text too (D565): the `je` leaves, the loop's latch returns.
+    assert!(
+        plain.contains("┌─< 0x00401337") && plain.contains("─< 0x0040135a"),
+        "{plain}"
+    );
+    for depth in 1..=3 {
+        let painted = piped(hashes(), &format!("e scr.color={depth}; pdf @ 0x401330"));
+        assert!(painted.contains('\x1b'), "{painted}");
+        assert_eq!(unpainted(&painted), plain, "scr.color={depth}");
+    }
 }
 
 /// An x86-64 relocatable object whose `f` calls an undeclared import and a function of its own.

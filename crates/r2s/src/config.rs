@@ -38,6 +38,40 @@ pub(crate) const KEYS: &[Key] = &[
         },
     },
     Key {
+        name: "asm.lines",
+        summary: "show ASCII-art lines at disassembly",
+        get: |session| session.lines.to_string(),
+        set: |session, value| {
+            session.lines = boolean("asm.lines", value)?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "asm.lines.width",
+        summary: "number of columns for program flow arrows",
+        get: |session| session.gutter().width.to_string(),
+        set: |session, value| {
+            // Two cells are the arrow's shaft and head; the rest are lanes (D565).
+            session.lines_width = match value.parse::<usize>() {
+                Ok(width @ 2..=64) => Some(width),
+                _ => return Err(format!("asm.lines.width takes 2 to 64, not '{value}'")),
+            };
+            Ok(())
+        },
+    },
+    Key {
+        name: "asm.cmt.col",
+        summary: "column to align comments",
+        get: |session| session.cmt_col.to_string(),
+        set: |session, value| {
+            session.cmt_col = match value.parse::<usize>() {
+                Ok(column @ ..=1024) => column,
+                _ => return Err(format!("asm.cmt.col takes 0 to 1024, not '{value}'")),
+            };
+            Ok(())
+        },
+    },
+    Key {
         name: "scr.color",
         summary: "enable colors (0: none, 1: ansi, 2: 256 colors, 3: truecolor)",
         get: |session| session.color.to_string(),
@@ -47,6 +81,15 @@ pub(crate) const KEYS: &[Key] = &[
                 "0" | "1" | "2" | "3" => value.parse().expect("one digit"),
                 _ => return Err(format!("scr.color takes 0 to 3, not '{value}'")),
             };
+            Ok(())
+        },
+    },
+    Key {
+        name: "scr.utf8",
+        summary: "show UTF-8 characters instead of ANSI",
+        get: |session| session.utf8.to_string(),
+        set: |session, value| {
+            session.utf8 = boolean("scr.utf8", value)?;
             Ok(())
         },
     },

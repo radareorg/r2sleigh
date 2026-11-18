@@ -163,7 +163,8 @@ fn ax_beside_listings(binary: &str) -> (Vec<(u64, u64, String)>, Vec<Shown>) {
         let lines = lines
             .lines()
             .filter_map(|line| {
-                let line = line.trim_start();
+                // From the address on: the rail and lanes before it are layout (D565).
+                let line = &line[line.find("0x")?..];
                 let (address, text) = line.split_once(char::is_whitespace)?;
                 Some((number(address)?, text.trim_start().to_owned()))
             })

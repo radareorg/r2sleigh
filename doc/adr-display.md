@@ -264,3 +264,21 @@ tests whether a setter's call is the next call line.
   and `afi` write every note through `listing::noted`: the cell in its proof
   role, a refusal's words in `ProofReason`, a quoted string in `String`.
   Plain output moves 0 bytes.
+- D565: `FunctionListing.edges` holds each `Jump` and `Taken` edge as
+  `FlowEdge { from, to, kind, latch }`, read once off the shape `listed_body`
+  already builds, `O(B log L)`. `latch` is the engine's: the target line
+  carries `Loop` and the source block is one of its latches (the block starts
+  are in the shape, not in the lines r2s reads). r2s `flow.rs` lays rows out:
+  label, trailing and gap rows are rows, so a lane passes through them.
+  Admission is a segment tree over rows (range add, range maximum) taking
+  edges by (span, from); colouring takes admitted edges by span start and
+  gives each the lowest free lane from a min-heap, lane 1 nearest the
+  address. Glyphs are radare2's: `┌─<`, `└─>`, an upward edge mirrored
+  (`┌─>` at its target, `└─<` at its source) with `╎` for its lane, as
+  `get_utf8_char` maps `:` (`libr/core/disasm.c:446-460`); ASCII as
+  `reflines.c:486-503` and `:552-555` write it. A horizontal run keeps a lane
+  it crosses. A row any edge reaches takes `>`, else `<`. A stub sits in cell
+  `w`, or `w + 1` where a head stands. `asm.lines=false` keeps the rail and the
+  address column. The first `;` stands at `asm.cmt.col` on `pd` and `pdf`
+  rows; a terminal cuts note text, then operand text, then the mark
+  (`flow::cut`); a pipe never cuts.

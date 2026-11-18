@@ -45,22 +45,22 @@ fn a_bound_mark_is_painted_at_each_depth() {
     let expected = [
         (
             0,
-            "0x00401995      48c1e730       shl rdi, 0x30 ; ~ defines rdi in [0x0, 0xff000000000000]",
+            "0x00401995      48c1e730       shl rdi, 0x30               ; ~ defines rdi in [0x0, 0xff000000000000]",
         ),
         (
             1,
             "\x1b[32m0x00401995\x1b[0m      48c1e730       shl \x1b[36mrdi\x1b[0m, \
-             \x1b[33m0x30\x1b[0m ; \x1b[94m~\x1b[0m defines rdi in [0x0, 0xff000000000000]",
+             \x1b[33m0x30\x1b[0m               ; \x1b[94m~\x1b[0m defines rdi in [0x0, 0xff000000000000]",
         ),
         (
             2,
             "\x1b[38;5;71m0x00401995\x1b[0m      48c1e730       shl \x1b[38;5;37mrdi\x1b[0m, \
-             \x1b[38;5;178m0x30\x1b[0m ; \x1b[38;5;74m~\x1b[0m defines rdi in [0x0, 0xff000000000000]",
+             \x1b[38;5;178m0x30\x1b[0m               ; \x1b[38;5;74m~\x1b[0m defines rdi in [0x0, 0xff000000000000]",
         ),
         (
             3,
             "\x1b[38;2;95;175;95m0x00401995\x1b[0m      48c1e730       shl \
-             \x1b[38;2;0;175;175mrdi\x1b[0m, \x1b[38;2;215;175;0m0x30\x1b[0m ; \
+             \x1b[38;2;0;175;175mrdi\x1b[0m, \x1b[38;2;215;175;0m0x30\x1b[0m               ; \
              \x1b[38;2;86;180;233m~\x1b[0m defines rdi in [0x0, 0xff000000000000]",
         ),
     ];

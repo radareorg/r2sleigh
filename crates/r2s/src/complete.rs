@@ -148,7 +148,10 @@ mod tests {
     #[test]
     fn a_configuration_key_completes_from_the_key_table() {
         assert_eq!(values("e asm.b", &[]), (2, vec!["asm.bytes".to_owned()]));
-        assert_eq!(values("e s", &[]), (2, vec!["scr.color".to_owned()]));
+        assert_eq!(
+            values("e s", &[]),
+            (2, vec!["scr.color".to_owned(), "scr.utf8".to_owned()])
+        );
         // The value is not a key.
         assert!(values("e scr.color=", &[]).1.is_empty());
     }

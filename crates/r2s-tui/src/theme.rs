@@ -147,6 +147,13 @@ impl Depth {
     }
 }
 
+/// The terminal's width in cells, where stdout is one the shell can ask.
+pub fn columns() -> Option<usize> {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| usize::from(width))
+}
+
 /// SGR parameters as a ratatui style: the sixteen colours by name, 256 and truecolor by value.
 fn styled(params: &str) -> Style {
     const NAMED: [Color; 16] = [
