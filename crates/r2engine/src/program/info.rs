@@ -25,6 +25,9 @@ pub struct FunctionInfo {
     pub arguments: Vec<Argument>,
     /// Whether arguments continue past `arguments`: a variadic tail the interface states.
     pub variadic: bool,
+    /// Where the interface states only a floor of parameters, why: `arguments` are then at least
+    /// the parameters (D37).
+    pub floor: Option<r2source::SourceArityFloor>,
     pub locals: Vec<Local>,
     /// What a definition of it declares it returns, and what that rests on: the decided type, or
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
@@ -123,6 +126,8 @@ impl FunctionInfo {
             arguments: arguments(artifact, sealed),
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),
+            floor: (artifact.machine_context().function_interface())
+                .and_then(|interface| interface.arity_floor().cloned()),
             returns: returns(artifact, sealed),
             unproven: (sealed.return_type())
                 .filter(|fact| fact.is_unproven())
@@ -197,6 +202,7 @@ impl FunctionInfo {
             convention: None,
             arguments: Vec::new(),
             variadic: false,
+            floor: None,
             locals: Vec::new(),
             returns: None,
             unproven: None,

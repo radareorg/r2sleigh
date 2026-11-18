@@ -47,14 +47,14 @@ impl BodyWalk {
         self.trace.exits_after()
     }
 
-    /// Every direct call target the walk reached.
-    pub(super) fn calls(&self) -> &std::collections::BTreeSet<u64> {
-        self.trace.calls()
+    /// Each direct call as (target, instruction): the survey's caller sites (D566).
+    pub(super) fn call_sites(&self) -> &[(u64, u64)] {
+        self.trace.call_sites()
     }
 
-    /// Every function entry the walk leaves for by a direct branch.
-    pub(super) fn tail_calls(&self) -> impl Iterator<Item = u64> + '_ {
-        self.trace.tail_calls().iter().copied()
+    /// Each branch to another function's entry as (target, instruction).
+    pub(super) fn tail_sites(&self) -> &[(u64, u64)] {
+        self.trace.tail_sites()
     }
 
     /// Whether a call of the body unwinds to a landing pad (D570).

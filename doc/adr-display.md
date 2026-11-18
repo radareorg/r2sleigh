@@ -282,3 +282,26 @@ tests whether a setter's call is the next call line.
   address column. The first `;` stands at `asm.cmt.col` on `pd` and `pdf`
   rows; a terminal cuts note text, then operand text, then the mark
   (`flow::cut`); a pipe never cuts.
+- D566: the trace records each call and tail branch with its instruction
+  (`Trace::call_sites`, `tail_sites`; `transfer` and `branch` take the site).
+  `Survey.callers` and `tail_callers` hold one compressed row per callee: the
+  distinct callers as one slice (`callers_of` is unchanged) and each caller's
+  sites, so no second map of callers exists; `xrefs_of` answers in
+  `O(log F + k)`. `FunctionListing.header` holds the calls, the tails,
+  `unresolved` and the `FunctionInfo` read off the seal the `ret` notes read.
+  `unresolved` is `None`: a trace counts neither the indirect calls it walks
+  past nor which dispatch stops a table later resolved, so the header prints
+  `; ? xrefs may be short: indirect transfers unread` on every function
+  (default-deny). r2s spells radare2's grammar (`disasm.c:1723-1734`,
+  `:1849-1866`): `CALL XREF`/`CALL XREFS` per caller, `CODE XREF` for a tail
+  branch, `; XREFS(N)` past 5. `┌ realsz: name (args);` takes the proven
+  parameters by name and `?` where the interface states a floor (`?` alone
+  where no analysis states any). The notes are `afi`'s, one speller in
+  `function.rs`: `~ at least N args` (also on `afi`'s `args:` row) and
+  `! result unproven: carrier, cause`. A span line where blocks lie below the
+  entry, and a gap row `;-- N bytes not in this function: A..B` between
+  non-adjacent lines. Not built: the `*` result line (the closed result's
+  premise moves to the result fact with D592), the `.` unstated-sign width
+  line, the `?` kind of gap (bytes no body holds needs a range query on
+  `Holders`), and the floor's causes in the header (they stay on `pdd`'s proof
+  line, whose speller is r2dec's).

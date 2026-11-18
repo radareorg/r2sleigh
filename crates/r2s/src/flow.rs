@@ -101,6 +101,19 @@ impl Gutter {
     const fn lanes(self) -> usize {
         self.width.saturating_sub(2)
     }
+
+    /// The rail glyph of the function's own line: `┌`, or radare2's `/` (`libr/core/disasm.c:26-50`).
+    pub(crate) const fn head(self) -> char {
+        match self.utf8 {
+            true => '┌',
+            false => '/',
+        }
+    }
+
+    /// The rail glyph of a row that is not the last.
+    pub(crate) const fn rail(self) -> char {
+        self.glyphs().rail
+    }
 }
 
 /// Which edges fit the lane budget, and the lane each takes: `(admitted, lane)` per edge.

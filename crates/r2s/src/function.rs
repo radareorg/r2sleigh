@@ -3,7 +3,7 @@
 //! Every field is one the engine proved; radare2's fields with nothing behind
 //! them here are left out, so a diff reports a missing line, not a wrong one.
 
-use r2engine::program::info::{Argument, Local};
+use r2engine::program::info::{Argument, FunctionInfo, Local};
 use r2engine::query::Mark;
 
 use crate::commands::parse_number;
@@ -39,19 +39,9 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
     ]);
     out.extend(signature(&info, name.as_deref()));
     // An unproven result names where a caller reads it and why it is not proven (D201).
-    out.extend(info.unproven.map(|unproven| {
-        let carrier = (unproven.carrier)
-            .and_then(|storage| session.program.spell_storage(entry, storage))
-            .unwrap_or_else(|| "?".to_owned());
-        let mut row = "result: unproven ; ".to_owned();
-        let mut roles = r2s_tui::theme::Roles::new();
-        let said = format!("{carrier}, {}", unproven.cause_name());
-        crate::listing::noted(&mut row, &mut roles, Mark::Refused, &said, None);
-        match session.paints() {
-            Some(depth) => r2s_tui::theme::ansi(&row, &roles, depth),
-            None => row,
-        }
-    }));
+    out.extend(
+        result(session, &info).map(|said| row(session, "result: unproven", Mark::Refused, &said)),
+    );
     out.extend([
         format!("minaddr: {:#010x}", info.min_addr()),
         format!("maxaddr: {:#010x}", info.max_addr()),
@@ -64,9 +54,59 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("recursive: {}", info.is_recursive()),
         format!("out-degree: {}", info.direct_calls()),
         format!("locals: {}", info.locals.len()),
-        format!("args: {}", info.arguments.len()),
     ]);
+    let arguments = format!("args: {}", info.arguments.len());
+    out.push(match floor(&info) {
+        Some(said) => row(session, &arguments, Mark::Bound, &said),
+        None => arguments,
+    });
     Ok(out.join("\n"))
+}
+
+/// An `afi` row with its note: `key: value ; M words`, painted where the shell paints.
+fn row(session: &Session, value: &str, mark: Mark, said: &str) -> String {
+    let mut text = format!("{value} ; ");
+    let mut roles = r2s_tui::theme::Roles::new();
+    crate::listing::noted(&mut text, &mut roles, mark, said, None);
+    match session.paints() {
+        Some(depth) => r2s_tui::theme::ansi(&text, &roles, depth),
+        None => text,
+    }
+}
+
+/// The unproven result's words: the register a caller reads it from and why (D201).
+fn result(session: &Session, info: &FunctionInfo) -> Option<String> {
+    let unproven = info.unproven?;
+    let carrier = (unproven.carrier)
+        .and_then(|storage| session.program.spell_storage(info.entry, storage))
+        .unwrap_or_else(|| "?".to_owned());
+    Some(format!("{carrier}, {}", unproven.cause_name()))
+}
+
+/// The arity floor's words, where the interface states only a floor (D37).
+fn floor(info: &FunctionInfo) -> Option<String> {
+    info.floor.as_ref()?;
+    Some(format!("at least {} args", info.arguments.len()))
+}
+
+/// What `pdf`'s header notes of a function, in `afi`'s words: one speller, so the two views
+/// cannot disagree (D566). The floor first, then the result.
+pub(crate) fn notes(session: &Session, info: &FunctionInfo) -> Vec<(Mark, String)> {
+    let floor = floor(info).map(|said| (Mark::Bound, said));
+    let result =
+        result(session, info).map(|said| (Mark::Refused, format!("result unproven: {said}")));
+    floor.into_iter().chain(result).collect()
+}
+
+/// The header's argument list: the proven parameters by name, then `?` where the engine states a
+/// floor; `?` alone where no analysis states any.
+pub(crate) fn arguments(info: Option<&FunctionInfo>) -> String {
+    let Some(info) = info else {
+        return "?".to_owned();
+    };
+    let names = info.arguments.iter().map(|argument| argument.name.as_str());
+    let floor = info.floor.as_ref().map(|_| "?");
+    names.chain(floor).collect::<Vec<_>>().join(", ")
 }
 
 /// What `afi` prints of a function the plain walk listed: its extent and shape, and its noreturn proof.

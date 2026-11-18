@@ -38,7 +38,7 @@ end-bbs: 6
 recursive: false
 out-degree: 3
 locals: 2
-args: 1
+args: 1 ; ~ at least 1 args
 EOF
 RUN
 
@@ -46,6 +46,11 @@ NAME=x86-64 O0 try and catch: pdf lists the pads in address order, no analysis a
 FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
 CMDS=pdf @ sym._Z7guardedi
 EXPECT=<<EOF
+; CALL XREF from sym.main @ 0x141f(x)
+; ? xrefs may be short: indirect transfers unread
+┌ 279: sym._Z7guardedi (arg0, ?);
+│ ; ~ at least 1 args
+│ ; ! result unproven: rax, Written
 │           0x000012f0      f30f1efa       endbr64
 │           0x000012f4      55             push rbp
 │           0x000012f5      4889e5         mov rbp, rsp
@@ -67,54 +72,54 @@ EXPECT=<<EOF
 │           0x00001330      488d45d8       lea rax, [rbp - 0x28]
 │           0x00001334      4889c7         mov rdi, rax                ; * a1
 │           0x00001337      e80effffff     call sym._ZN5GuardD1Ev      ; * (rdi)
-│           0x0000133c      89d8           mov eax, ebx
-│           0x0000133e      488b55e8       mov rdx, qword [rbp - 0x18]
-│           0x00001342      64482b1425..   sub rdx, qword fs:[0x28]
-│       ┌─< 0x0000134b      0f84ad000000   je 0x13fe
-│      ┌│─< 0x00001351      e9a3000000     jmp 0x13f9
-│      ││   0x00001356      f30f1efa       endbr64
-│      ││   0x0000135a      4989c4         mov r12, rax
-│      ││   0x0000135d      4889d3         mov rbx, rdx
-│      ││   0x00001360      488d45d8       lea rax, [rbp - 0x28]
-│      ││   0x00001364      4889c7         mov rdi, rax
-│      ││   0x00001367      e8defeffff     call sym._ZN5GuardD1Ev
-│      ││   0x0000136c      4c89e0         mov rax, r12
-│      ││   0x0000136f      4889da         mov rdx, rbx
-│      ││   0x00001372      4883fa01       cmp rdx, 0x1
-│     ┌││─< 0x00001376      741c           je 0x1394
-│     │││   0x00001378      488b55e8       mov rdx, qword [rbp - 0x18]
-│     │││   0x0000137c      64482b1425..   sub rdx, qword fs:[0x28]
-│    ┌│││─< 0x00001385      7405           je 0x138c
-│    ││││   0x00001387      e884fdffff     call sym.imp.__stack_chk_fail
-│    └│││─> 0x0000138c      4889c7         mov rdi, rax
-│     │││   0x0000138f      e8bcfdffff     call sym.imp._Unwind_Resume
-│     └││─> 0x00001394      4889c7         mov rdi, rax
-│      ││   0x00001397      e844fdffff     call sym.imp.__cxa_begin_catch
-│      ││   0x0000139c      488945e0       mov qword [rbp - 0x20], rax
-│      ││   0x000013a0      488b45e0       mov rax, qword [rbp - 0x20]
-│      ││   0x000013a4      488b00         mov rax, qword [rax]
-│      ││   0x000013a7      4883c010       add rax, 0x10
-│      ││   0x000013ab      488b10         mov rdx, qword [rax]
-│      ││   0x000013ae      488b45e0       mov rax, qword [rbp - 0x20]
-│      ││   0x000013b2      4889c7         mov rdi, rax
-│      ││   0x000013b5      ffd2           call rdx
-│      ││   0x000013b7      4889c7         mov rdi, rax
-│      ││   0x000013ba      e861fdffff     call sym.imp.puts
-│      ││   0x000013bf      bbffffffff     mov ebx, 0xffffffff
-│      ││   0x000013c4      e867fdffff     call sym.imp.__cxa_end_catch
-│      ││   0x000013c9      e96effffff     jmp 0x133c
-│      ││   0x000013ce      f30f1efa       endbr64
-│      ││   0x000013d2      4889c3         mov rbx, rax
-│      ││   0x000013d5      e856fdffff     call sym.imp.__cxa_end_catch
-│      ││   0x000013da      4889d8         mov rax, rbx
-│      ││   0x000013dd      488b55e8       mov rdx, qword [rbp - 0x18]
-│      ││   0x000013e1      64482b1425..   sub rdx, qword fs:[0x28]
-│     ┌││─< 0x000013ea      7405           je 0x13f1
+│       ┌─> 0x0000133c      89d8           mov eax, ebx
+│       ╎   0x0000133e      488b55e8       mov rdx, qword [rbp - 0x18]
+│       ╎   0x00001342      64482b1425..   sub rdx, qword fs:[0x28]
+│      ┌╎─< 0x0000134b      0f84ad000000   je 0x13fe
+│     ┌│╎─< 0x00001351      e9a3000000     jmp 0x13f9
+│     ││╎   0x00001356      f30f1efa       endbr64
+│     ││╎   0x0000135a      4989c4         mov r12, rax
+│     ││╎   0x0000135d      4889d3         mov rbx, rdx
+│     ││╎   0x00001360      488d45d8       lea rax, [rbp - 0x28]
+│     ││╎   0x00001364      4889c7         mov rdi, rax
+│     ││╎   0x00001367      e8defeffff     call sym._ZN5GuardD1Ev
+│     ││╎   0x0000136c      4c89e0         mov rax, r12
+│     ││╎   0x0000136f      4889da         mov rdx, rbx
+│     ││╎   0x00001372      4883fa01       cmp rdx, 0x1
+│    ┌││╎─< 0x00001376      741c           je 0x1394
+│    │││╎   0x00001378      488b55e8       mov rdx, qword [rbp - 0x18]
+│    │││╎   0x0000137c      64482b1425..   sub rdx, qword fs:[0x28]
+│   ┌│││╎─< 0x00001385      7405           je 0x138c
+│   ││││╎   0x00001387      e884fdffff     call sym.imp.__stack_chk_fail
+│   └│││╎─> 0x0000138c      4889c7         mov rdi, rax
+│    │││╎   0x0000138f      e8bcfdffff     call sym.imp._Unwind_Resume
+│    └││╎─> 0x00001394      4889c7         mov rdi, rax
+│     ││╎   0x00001397      e844fdffff     call sym.imp.__cxa_begin_catch
+│     ││╎   0x0000139c      488945e0       mov qword [rbp - 0x20], rax
+│     ││╎   0x000013a0      488b45e0       mov rax, qword [rbp - 0x20]
+│     ││╎   0x000013a4      488b00         mov rax, qword [rax]
+│     ││╎   0x000013a7      4883c010       add rax, 0x10
+│     ││╎   0x000013ab      488b10         mov rdx, qword [rax]
+│     ││╎   0x000013ae      488b45e0       mov rax, qword [rbp - 0x20]
+│     ││╎   0x000013b2      4889c7         mov rdi, rax
+│     ││╎   0x000013b5      ffd2           call rdx
+│     ││╎   0x000013b7      4889c7         mov rdi, rax
+│     ││╎   0x000013ba      e861fdffff     call sym.imp.puts
+│     ││╎   0x000013bf      bbffffffff     mov ebx, 0xffffffff
+│     ││╎   0x000013c4      e867fdffff     call sym.imp.__cxa_end_catch
+│     ││└─< 0x000013c9      e96effffff     jmp 0x133c
+│     ││    0x000013ce      f30f1efa       endbr64
+│     ││    0x000013d2      4889c3         mov rbx, rax
+│     ││    0x000013d5      e856fdffff     call sym.imp.__cxa_end_catch
+│     ││    0x000013da      4889d8         mov rax, rbx
+│     ││    0x000013dd      488b55e8       mov rdx, qword [rbp - 0x18]
+│     ││    0x000013e1      64482b1425..   sub rdx, qword fs:[0x28]
+│     ││┌─< 0x000013ea      7405           je 0x13f1
 │     │││   0x000013ec      e81ffdffff     call sym.imp.__stack_chk_fail
-│     └││─> 0x000013f1      4889c7         mov rdi, rax
-│      ││   0x000013f4      e857fdffff     call sym.imp._Unwind_Resume
-│      └│─> 0x000013f9      e812fdffff     call sym.imp.__stack_chk_fail ; ^ () ; ^ noreturn
-│       └─> 0x000013fe      4883c430       add rsp, 0x30
+│     ││└─> 0x000013f1      4889c7         mov rdi, rax
+│     ││    0x000013f4      e857fdffff     call sym.imp._Unwind_Resume
+│     └│──> 0x000013f9      e812fdffff     call sym.imp.__stack_chk_fail ; ^ () ; ^ noreturn
+│      └──> 0x000013fe      4883c430       add rsp, 0x30
 │           0x00001402      5b             pop rbx
 │           0x00001403      415c           pop r12
 │           0x00001405      5d             pop rbp

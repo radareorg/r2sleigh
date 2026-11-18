@@ -117,3 +117,117 @@ fn a_refusal_or_an_unknown_never_takes_the_space_cell() {
         "the object's import call and the indirect `blr`"
     );
 }
+
+/// For every function of hashes: `pdf` header, `afi` and `axt`, split by `?e` fences.
+fn views() -> Vec<(String, String, String, String)> {
+    let functions = piped(hashes(), "afl");
+    let entries = (functions.lines())
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let script = (entries.iter())
+        .map(|entry| format!("?e ==F; pdf @ {entry}; ?e ==A; afi @ {entry}; ?e ==X; axt @ {entry}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let out = piped(hashes(), &script);
+    let parts = out.split("==F\n").skip(1).zip(entries);
+    parts
+        .map(|(part, entry)| {
+            let (listing, rest) = part.split_once("==A\n").expect("afi follows pdf");
+            let (info, references) = rest.split_once("==X\n").expect("axt follows afi");
+            (
+                entry,
+                listing.to_owned(),
+                info.to_owned(),
+                references.to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The header's notes and `afi`'s rows are one speller's: the same mark and words, and an
+/// unproven result is never printed unmarked (D566).
+#[test]
+fn the_header_states_the_result_and_floor_afi_states() {
+    let mut unproven = 0;
+    for (entry, listing, info, _) in views() {
+        let row = |key: &str| {
+            info.lines()
+                .find_map(|line| line.strip_prefix(key)?.split_once(" ; "))
+                .map(|(_, note)| note.to_owned())
+        };
+        let note = |cell: char, prefix: &str| {
+            let line = listing
+                .lines()
+                .find(|line| line.starts_with(&format!("│ ; {cell} {prefix}")));
+            line.map(|line| line[format!("│ ; {cell} ").len()..].to_owned())
+        };
+        let result = row("result: unproven");
+        let header = note('!', "result unproven: ");
+        assert_eq!(
+            result
+                .as_ref()
+                .map(|note| format!("! result unproven: {}", &note[2..])),
+            header.map(|note| format!("! {note}")),
+            "{entry}: {info}\n{listing}"
+        );
+        unproven += usize::from(result.is_some());
+        assert_eq!(
+            row("args: "),
+            note('~', "at least ").map(|note| format!("~ {note}")),
+            "{entry}"
+        );
+        assert!(
+            !listing.contains("returns rax") || result.is_none(),
+            "{entry}"
+        );
+    }
+    assert!(unproven > 0, "hashes has an unproven result (`_init`)");
+}
+
+/// Each header xref is a row of `axt @ entry`, same caller and site; where `axt` lists a call the
+/// header lacks, the `?` line says the list may be short.
+#[test]
+fn every_header_xref_is_a_row_of_axt() {
+    let mut listed = 0;
+    for (entry, listing, _, references) in views() {
+        let rows = (references.lines())
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                Some((
+                    words.next()?.to_owned(),
+                    words.next()?.to_owned(),
+                    line.contains("[CALL"),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let header = listing.lines().take_while(|line| line.starts_with(';'));
+        let mut shown = 0;
+        // `; XREFS(N)` folds the list past `asm.xrefs.fold`: it names no row.
+        for line in header.filter(|line| line.contains(" from ")) {
+            let (from, sites) = line
+                .split_once(" from ")
+                .expect("from")
+                .1
+                .split_once(" @ ")
+                .expect("@");
+            for site in sites.split(", ") {
+                let site = site.trim_end_matches("(x)");
+                let row = rows
+                    .iter()
+                    .any(|(caller, at, _)| caller == from && at == site);
+                assert!(row, "{entry}: {line} is no row of axt:\n{references}");
+                shown += 1;
+            }
+        }
+        listed += shown;
+        let calls = rows.iter().filter(|row| row.2).count();
+        if calls > shown {
+            assert!(
+                listing.contains("; ? xrefs may be short"),
+                "{entry}: {listing}"
+            );
+        }
+    }
+    assert!(listed > 0, "hashes' main calls each hash");
+}

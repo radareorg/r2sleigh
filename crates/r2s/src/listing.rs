@@ -357,7 +357,16 @@ pub(crate) fn disassemble_function(
     let lines = &answer.value;
     let mut rows = Vec::new();
     let mut row_of = Vec::with_capacity(lines.len());
+    let mut end = None;
     for (line, next) in lines.iter().zip(next_calls(lines)) {
+        // Bytes between two blocks no block of this function holds: one pass, `O(L)`.
+        if let Some(end) = end.filter(|end| *end < line.address) {
+            let gap = line.address - end;
+            let last = line.address - 1;
+            let text = format!(";-- {gap} bytes not in this function: {end:#010x}..{last:#010x}");
+            rows.push(Row::comment(text));
+        }
+        end = Some(line.address + line.bytes.len().max(1) as u64);
         rows.extend(labels(line));
         row_of.push(rows.len());
         rows.push(listed(session, line, next));
@@ -386,8 +395,118 @@ pub(crate) fn disassemble_function(
         .map(|(at, _)| row_of[at])
         .collect::<Vec<_>>();
     let gutters = crate::flow::gutters(rows.len(), &edges, &unknown, session.gutter());
-    let out = (rows.into_iter().zip(gutters)).map(|(row, gutter)| composed(session, gutter, row));
+    let body = (rows.into_iter().zip(gutters)).map(|(row, gutter)| composed(session, gutter, row));
+    let out = header(session, addr, &listing, lines)
+        .into_iter()
+        .chain(body);
     Ok(out.collect::<Vec<_>>().join("\n").trim_end().to_owned())
+}
+
+/// `pdf`'s header in radare2's grammar (`libr/core/disasm.c:1723-1734`, `:1849-1866`): the xref
+/// lines, the `?` line unless the engine proves the list complete, `┌ realsz: name (args);`, at
+/// most 2 notes in `afi`'s words, and the span line where blocks lie below the entry.
+fn header(
+    session: &Session,
+    entry: u64,
+    listing: &r2engine::program::FunctionListing,
+    lines: &[r2engine::query::Line],
+) -> Vec<String> {
+    let names = session.program.names();
+    let name = |address: u64| {
+        names.of(address).map_or_else(
+            || format!("fcn.{address:08x}"),
+            r2engine::names::Name::spelled,
+        )
+    };
+    let header = &listing.header;
+    let mut out: Vec<(String, Roles)> = Vec::new();
+    let comment = |text: String| {
+        let roles = vec![(0..text.len(), Role::Comment)];
+        (text, roles)
+    };
+    let count = header.calls.len() + header.tails.len();
+    // radare2 folds past `asm.xrefs.fold` (5, `libr/core/cconfig.c:4203`).
+    if count > 5 {
+        out.push(comment(format!("; XREFS({count})")));
+    } else {
+        for (kind, xrefs) in [("CALL", &header.calls), ("CODE", &header.tails)] {
+            for group in xrefs.chunk_by(|a, b| a.from == b.from) {
+                let plural = if group.len() > 1 { "S" } else { "" };
+                let sites = group.iter().map(|xref| format!("{:#x}(x)", xref.site));
+                let sites = sites.collect::<Vec<_>>().join(", ");
+                let from = name(group[0].from);
+                out.push(comment(format!(
+                    "; {kind} XREF{plural} from {from} @ {sites}"
+                )));
+            }
+        }
+    }
+    // Default-deny: the list is complete only where the engine counts no unfollowed transfer.
+    let short = match header.unresolved {
+        Some(0) => None,
+        Some(count) => Some(format!(
+            "xrefs may be short: {count} indirect transfers unresolved"
+        )),
+        None => Some("xrefs may be short: indirect transfers unread".to_owned()),
+    };
+    if let Some(short) = short {
+        let mut text = "; ".to_owned();
+        let mut roles = Roles::new();
+        noted(
+            &mut text,
+            &mut roles,
+            r2engine::query::Mark::Unknown,
+            &short,
+            Some(Role::Comment),
+        );
+        out.push((text, roles));
+    }
+    let gutter = session.gutter();
+    let info = header.info.as_ref();
+    let size = info.map_or_else(
+        || lines.iter().map(|line| line.bytes.len() as u64).sum(),
+        r2engine::program::info::FunctionInfo::real_size,
+    );
+    let (mut text, mut roles) = (String::new(), Roles::new());
+    text.push(gutter.head());
+    roles.push((0..text.len(), Role::Rail));
+    text.push_str(&format!(" {size}: "));
+    let at = text.len();
+    text.push_str(&name(entry));
+    roles.push((at..text.len(), Role::Name));
+    let arguments = crate::function::arguments(info);
+    text.push_str(&format!(" ({arguments});"));
+    out.push((text, roles));
+    let rail = |mark: r2engine::query::Mark, said: &str| {
+        let mut text = String::new();
+        text.push(gutter.rail());
+        let mut roles = vec![(0..text.len(), Role::Rail)];
+        text.push_str(" ; ");
+        noted(&mut text, &mut roles, mark, said, None);
+        (text, roles)
+    };
+    for (mark, said) in info
+        .into_iter()
+        .flat_map(|info| crate::function::notes(session, info))
+    {
+        out.push(rail(mark, &said));
+    }
+    let low = lines.first().map_or(entry, |line| line.address);
+    if low < entry {
+        let high = lines
+            .last()
+            .map_or(entry, |line| line.address + line.bytes.len() as u64 - 1);
+        let blocks = info.map_or(0, |info| info.blocks.len());
+        let said =
+            format!("{blocks} blocks over {low:#010x}..{high:#010x}; blocks below the entry first");
+        out.push(rail(r2engine::query::Mark::Holds, &said));
+    }
+    out.into_iter()
+        .map(|(text, roles)| match session.paints() {
+            Some(depth) => r2s_tui::theme::ansi(&text, &roles, depth),
+            None => text,
+        })
+        .collect()
 }
 
 /// Whether the line is an indirect jump no walk followed: an unknown-kind note says so.

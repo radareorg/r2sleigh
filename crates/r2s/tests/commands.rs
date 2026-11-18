@@ -1131,7 +1131,12 @@ mod listing {
         let run = super::r2s("s 0x401330; pdf");
         assert!(run.ok, "{}", run.out);
         assert!(run.out.contains("0x0040135c"), "{}", run.out);
-        assert!(!run.out.contains("0x0040135d"), "{}", run.out);
+        // The padding is a gap row, never a line of its own (D566).
+        assert!(!run.out.contains("0x0040135d      "), "{}", run.out);
+        assert!(
+            run.out
+                .contains(";-- 3 bytes not in this function: 0x0040135d..0x0040135f")
+        );
         assert!(run.out.contains("0x00401360"), "{}", run.out);
     }
 
@@ -1303,7 +1308,7 @@ mod dispatch_table {
             "cyclomatic-complexity: 2",
             "is-lineal: true",
             "locals: 5",
-            "args: 2",
+            "args: 2 ; ~ at least 2 args",
         ] {
             assert!(
                 run.out.lines().any(|out| out == line),
