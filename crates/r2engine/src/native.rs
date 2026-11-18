@@ -1196,8 +1196,13 @@ pub(crate) fn handed(
     body: &crate::body::Body,
 ) -> Vec<u64> {
     let entry = body.entry;
-    let machine = match machine(target) {
-        Ok(machine) => machine,
+    let native = match machine(target) {
+        Ok(machine) => Native {
+            target,
+            program,
+            machine,
+            control: program.control().ssa_execution_control(),
+        },
         Err(error) => {
             r2il::refusal_evidence!("handed-function", "{entry:#x}: {error}");
             return Vec::new();
@@ -1219,7 +1224,8 @@ pub(crate) fn handed(
                 continue;
             };
             let registers = |placement: &Placement<'_>| placement.registers(declared);
-            let placed = placing_imports(target, Some(&machine), registers).unwrap_or_default();
+            let placed = placing_imports(target, Some(&native.machine), registers);
+            let placed = placed.unwrap_or_default();
             let parameters = declared.prototype.parameters.iter().zip(&placed);
             for (index, (parameter, storage)) in parameters.enumerate() {
                 let code = parameter.code_returns(declared.graph).is_some();
@@ -1253,7 +1259,12 @@ pub(crate) fn handed(
         target.arch.call_effect_on(call, storage)
             == r2source::convention::CallRegisterEffect::Clobbered
     };
-    let answers = r2ssa::reaching_constant::reaching_constants(&flow, &writes, &seeds);
+    // The read-only words a capture of this body holds, as the seal's load fold reads them (P5).
+    let (loads, stores) = literal_accesses(body);
+    let windows = native.read_only(loads, &written_ranges(stores));
+    let memory = r2ssa::reaching_constant::Memory::new(windows, target.arch.memory_endianness);
+    let read = (&writes as &dyn Fn(_) -> bool, &memory);
+    let answers = r2ssa::reaching_constant::reaching_constants(&flow, read, &seeds);
     let mut found = Vec::new();
     for ((instruction, name, index), answer) in named.iter().zip(answers) {
         let r2ssa::reaching_constant::Reaching::Constant(address) = answer else {

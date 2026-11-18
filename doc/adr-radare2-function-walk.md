@@ -150,11 +150,17 @@ fold one register per site.
 
 `r2ssa::reaching_constant` reads the same constant off the walk's own lift: reaching definitions
 over the walked blocks, demanded from each (call, register) seed, then each reaching definition
-folded with `r2il::eval`. A call writes what `Arch::call_effect_on` under the calls' convention
-does not keep; a load, a partial write, the entry value and two definitions meeting answer
-`NotConstant` with that witness. Two definitions of one constant still meet: the seal places a
-phi there and folds it to nothing, so the reader answers as the seal does. `O((B + E) x k)` for
-`k` demanded storages; no SSA, promotion, prep facts or fold table.
+folded with `r2il::eval`. It reads what the seal reads and nothing else:
+
+- a call writes what `Arch::call_effect_on` under the calls' convention does not keep;
+- a load at a literal address reads the read-only word a capture of the body holds
+  (`Native::read_only`, `read_only::bits_in`, the seal's `fold_loads`), any other load nothing;
+- a wider write read narrower is its lane (`mov ecx, 1; mov r8d, ecx`);
+- an operand the result ignores by `r2il::eval::independence` need not fold (`xor r8d, r8d`);
+- two definitions meeting answer `NotConstant`, even of one constant: the seal places a phi there
+  and folds it to nothing.
+
+`O((B + E) x k)` for `k` demanded storages; no SSA, promotion, prep facts or fold table.
 
 Step 0 (`designs/round15/d590-sites.md`): 1,909 sites on the pinned ELF corpus, 1,288 a constant
 in the call's block, 1 across a block edge, 1 through arithmetic on constants, 0 through a

@@ -3,8 +3,9 @@
 
 use std::collections::BTreeMap;
 
+use r2il::eval::independence::{Known, Operand, ignored_operands};
 use r2il::eval::{Operation, Word, apply};
-use r2il::{R2ILOp, SpaceId, Varnode};
+use r2il::{Endianness, R2ILOp, SpaceId, Varnode};
 use r2source::{CanonicalStorageId, CanonicalStorageSpace};
 
 use crate::site_boundary::Lifted;
@@ -39,6 +40,37 @@ pub enum Unreached {
     Written { block: usize, op: usize },
     /// No path from the entry reaches the seed.
     Unreachable,
+}
+
+/// The read-only words the capture would hold for the body, and the machine's byte order: a load
+/// at a literal address of these reads them on every run, as the seal folds it (`read_only.rs`).
+pub struct Memory {
+    windows: BTreeMap<u64, Box<[u8]>>,
+    endian: Endianness,
+}
+
+impl Memory {
+    pub fn new(windows: Vec<(u64, Vec<u8>)>, endian: Endianness) -> Self {
+        let windows = (windows.into_iter())
+            .map(|(address, bytes)| (address, bytes.into_boxed_slice()))
+            .collect();
+        Self { windows, endian }
+    }
+
+    fn bits(&self, address: u64, size: u32) -> Option<u64> {
+        crate::read_only::bits_in(&self.windows, address, size, self.endian.into())
+    }
+
+    /// How far up from the low byte `inner` sits inside `outer`, in bytes, as registers lay out;
+    /// none in a byte order neither big nor little.
+    fn shift(&self, outer: &Varnode, inner: &Varnode) -> Option<u64> {
+        let end = |varnode: &Varnode| varnode.offset + u64::from(varnode.size);
+        match self.endian {
+            Endianness::Big => Some(end(outer) - end(inner)),
+            Endianness::Little => Some(inner.offset - outer.offset),
+            Endianness::Mixed | Endianness::Custom => None,
+        }
+    }
 }
 
 /// A body's blocks and the flow between them, as the walk states it.
@@ -103,12 +135,13 @@ fn index(at: usize) -> u32 {
 /// register storage, as the convention the calls run under states it.
 pub fn reaching_constants<B: Lifted>(
     flow: &Flow<'_, B>,
-    call_writes: &dyn Fn(CanonicalStorageId) -> bool,
+    (call_writes, memory): (&dyn Fn(CanonicalStorageId) -> bool, &Memory),
     seeds: &[Seed],
 ) -> Vec<Reaching> {
     let mut solver = Solver {
         flow,
         call_writes,
+        memory,
         nodes: Vec::new(),
         node_of: BTreeMap::new(),
         incoming: Vec::new(),
@@ -198,6 +231,9 @@ enum Reach {
     Literal(u64),
     /// The definition at this index of `Solver::defs`.
     Def(u32),
+    /// `bytes` of the definition at this index, `shift` bytes up from its low byte: a wider write
+    /// read narrower.
+    Lane { def: u32, shift: u64, bytes: u32 },
     /// A block's entry value of one storage: the node at this index.
     Node(u32),
     /// A definition no fold reads through, with its witness.
@@ -227,7 +263,7 @@ impl Reached {
 struct Def {
     block: usize,
     op: usize,
-    inputs: Vec<(Reach, u32)>,
+    inputs: Vec<(Reach, Varnode)>,
 }
 
 /// Each definition's fold, computed once per call; `open` marks one being folded.
@@ -239,6 +275,7 @@ struct Folded {
 struct Solver<'s, 'a, B> {
     flow: &'s Flow<'a, B>,
     call_writes: &'s dyn Fn(CanonicalStorageId) -> bool,
+    memory: &'s Memory,
     /// Each demanded block entry: the block and the storage.
     nodes: Vec<(usize, Varnode)>,
     #[cfg_attr(
@@ -315,12 +352,23 @@ impl<B: Lifted> Solver<'_, '_, B> {
             if !overlaps(dst, storage) {
                 continue;
             }
-            if dst != storage {
-                return Reach::Stop(Unreached::Written { block, op: at });
-            }
-            return match operation {
-                R2ILOp::Load { .. } => Reach::Stop(Unreached::Load { block, op: at }),
-                _ => Reach::Def(self.def(block, at)),
+            let covers = dst.offset <= storage.offset
+                && storage.offset + u64::from(storage.size) <= dst.offset + u64::from(dst.size);
+            let literal = |addr: &Varnode| addr.space == SpaceId::Const;
+            let def = match operation {
+                R2ILOp::Load { addr, .. } if literal(addr) => self.def(block, at),
+                R2ILOp::Load { .. } => return Reach::Stop(Unreached::Load { block, op: at }),
+                _ => self.def(block, at),
+            };
+            let shift = covers.then(|| self.memory.shift(dst, storage)).flatten();
+            return match (dst == storage, shift) {
+                (true, _) => Reach::Def(def),
+                (false, Some(shift)) => Reach::Lane {
+                    def,
+                    shift,
+                    bytes: storage.size,
+                },
+                (false, None) => Reach::Stop(Unreached::Written { block, op: at }),
             };
         }
         match block == flow.entry {
@@ -352,13 +400,13 @@ impl<B: Lifted> Solver<'_, '_, B> {
                         continue;
                     };
                     let inputs = inputs.into_iter().cloned().collect::<Vec<_>>();
-                    let reaches = (inputs.iter())
+                    let reaches = (inputs.into_iter())
                         .map(|input| {
                             let reach = match input.space {
                                 SpaceId::Const => Reach::Literal(input.offset),
-                                _ => self.before(block, op, input),
+                                _ => self.before(block, op, &input),
                             };
-                            (reach, input.size)
+                            (reach, input)
                         })
                         .collect();
                     self.defs[def as usize].inputs = reaches;
@@ -414,6 +462,12 @@ impl<B: Lifted> Solver<'_, '_, B> {
             Reach::Literal(value) => Ok(value),
             Reach::Stop(why) => Err(why),
             Reach::Def(def) => self.fold(def, reached, folded),
+            Reach::Lane { def, shift, bytes } => {
+                let bits = self.fold(def, reached, folded)?;
+                let shifted = bits.checked_shr(u32::try_from(8 * shift).unwrap_or(u32::MAX));
+                let mask = 1u64.checked_shl(8 * bytes).map_or(u64::MAX, |bit| bit - 1);
+                Ok(shifted.unwrap_or(0) & mask)
+            }
             Reach::Node(node) => match reached[node as usize] {
                 Reached::Top => Err(Unreached::Unreachable),
                 Reached::Many => Err(Unreached::Join {
@@ -423,6 +477,47 @@ impl<B: Lifted> Solver<'_, '_, B> {
                 Reached::One(reach) => self.value(reach, reached, folded),
             },
         }
+    }
+
+    /// What `operation` computes from `inputs`: an input the result ignores by `r2il`'s
+    /// independence (`x ^ x`, `x & 0`) need not fold, as the seal's identities read it.
+    fn computed(
+        &self,
+        operation: Operation,
+        width: u32,
+        inputs: &[(Reach, Varnode)],
+        (reached, folded): (&[Reached], &mut Folded),
+    ) -> Option<Result<u64, Unreached>> {
+        let values = (inputs.iter())
+            .map(|(reach, _)| self.value(*reach, reached, folded))
+            .collect::<Vec<_>>();
+        let same = |at: usize| {
+            inputs[..at]
+                .iter()
+                .position(|(_, varnode)| *varnode == inputs[at].1)
+        };
+        let operands = (values.iter().enumerate())
+            .map(|(at, value)| Operand {
+                bytes: inputs[at].1.size,
+                known: match (value, same(at)) {
+                    (Ok(value), _) => Known::Value(u128::from(*value)),
+                    (Err(_), Some(earlier)) => Known::Same(earlier),
+                    (Err(_), None) => Known::Nothing,
+                },
+            })
+            .collect::<Vec<_>>();
+        let ignored = ignored_operands(operation, &operands);
+        let mut words = Vec::with_capacity(values.len());
+        for (at, (value, operand)) in values.iter().zip(&operands).enumerate() {
+            let bits = match (value, ignored >> at & 1 == 1) {
+                (_, true) => 0,
+                (Ok(value), false) => u128::from(*value),
+                (Err(why), false) => return Some(Err(*why)),
+            };
+            words.push(Word::new(bits, operand.bytes).ok()?);
+        }
+        let value = apply(operation, &words, width).ok()?;
+        Some(Ok(u64::try_from(value).ok()?))
     }
 
     /// One definition folded with `r2il::eval` from its inputs; a definition reached again while
@@ -438,30 +533,21 @@ impl<B: Lifted> Solver<'_, '_, B> {
             return Err(Unreached::Unreachable);
         }
         folded.open[at] = true;
-        let operation = Operation::of(&self.flow.ops(block)[op])
-            .map(|(operation, dst, _)| (operation, dst.size));
-        let value = match operation {
-            None => Err(written),
-            Some((operation, width)) => {
-                let mut words = Vec::with_capacity(self.defs[at].inputs.len());
-                let mut stop = None;
-                for (reach, bytes) in &self.defs[at].inputs {
-                    match self.value(*reach, reached, folded) {
-                        Ok(value) => words.push(Word::new(u128::from(value), *bytes).ok()),
-                        Err(why) => {
-                            stop = Some(why);
-                            break;
-                        }
-                    }
-                }
-                match stop {
-                    Some(why) => Err(why),
-                    None => (words.into_iter().collect::<Option<Vec<_>>>())
-                        .and_then(|words| apply(operation, &words, width).ok())
-                        .and_then(|value| u64::try_from(value).ok())
-                        .ok_or(written),
-                }
+        let operation = &self.flow.ops(block)[op];
+        let value = match (operation, Operation::of(operation)) {
+            (R2ILOp::Load { addr, dst, .. }, _) => {
+                (self.memory.bits(addr.offset, dst.size)).ok_or(Unreached::Load { block, op })
             }
+            (_, None) => Err(written),
+            (_, Some((operation, dst, _))) => self
+                .computed(
+                    operation,
+                    dst.size,
+                    &self.defs[at].inputs,
+                    (reached, folded),
+                )
+                .ok_or(written)
+                .and_then(|value| value),
         };
         folded.open[at] = false;
         folded.values[at] = Some(value);
@@ -553,6 +639,7 @@ mod tests {
         arch.addr_size = 8;
         arch.add_register(RegisterDef::new("rax", RAX, 8));
         arch.add_register(RegisterDef::new("al", RAX, 1));
+        arch.add_register(RegisterDef::new("eax", RAX, 4));
         arch.add_register(RegisterDef::new("rdi", RDI, 8));
         arch.add_register(RegisterDef::new("edi", RDI, 4));
         arch.add_register(RegisterDef::new("rbx", RBX, 8));
@@ -591,7 +678,8 @@ mod tests {
             op,
             storage: storage(RDI, 8),
         };
-        let reader = reaching_constants(&flow, &writes, &[seed])[0];
+        let memory = Memory::new(Vec::new(), Endianness::Little);
+        let reader = reaching_constants(&flow, (&writes, &memory), &[seed])[0];
         let conventions =
             crate::testing::conventions([storage(RAX, 8), storage(RDI, 8)], [storage(RBX, 8)]);
         let arch = arch();
@@ -783,5 +871,90 @@ mod tests {
         let blocks = [(0x1000, vec![call(0x9000), ret()], vec![])];
         let reader = agrees(both(&blocks, 0x1000));
         assert_eq!(reader, Reaching::NotConstant(Unreached::Entry));
+    }
+
+    /// `xor edi, edi`: the result ignores the value it cancels, as the seal's identity does.
+    #[test]
+    fn a_register_cancelled_against_itself_is_zero() {
+        let blocks = [(
+            0x1000,
+            vec![
+                R2ILOp::IntXor {
+                    dst: reg(RDI, 8),
+                    a: reg(RDI, 8),
+                    b: reg(RDI, 8),
+                },
+                call(0x9000),
+                ret(),
+            ],
+            vec![],
+        )];
+        assert_eq!(agrees(both(&blocks, 0x1000)), Reaching::Constant(0));
+    }
+
+    /// `mov eax, 1; mov edi, eax`: the narrow read of a register a wider write zero-extended is
+    /// that write's low lane.
+    #[test]
+    fn a_narrow_read_of_a_wider_write_is_its_low_lane() {
+        let blocks = [(
+            0x1000,
+            vec![
+                R2ILOp::Copy {
+                    dst: reg(RAX, 4),
+                    src: constant(1, 4),
+                },
+                R2ILOp::IntZExt {
+                    dst: reg(RAX, 8),
+                    src: reg(RAX, 4),
+                },
+                R2ILOp::Copy {
+                    dst: reg(RDI, 4),
+                    src: reg(RAX, 4),
+                },
+                R2ILOp::IntZExt {
+                    dst: reg(RDI, 8),
+                    src: reg(RDI, 4),
+                },
+                call(0x9000),
+                ret(),
+            ],
+            vec![],
+        )];
+        assert_eq!(agrees(both(&blocks, 0x1000)), Reaching::Constant(1));
+    }
+
+    /// A load at a literal address reads the capture's read-only word, and nothing where the
+    /// capture holds none.
+    #[test]
+    fn a_literal_load_of_read_only_bytes_reads_them() {
+        let lifted = [R2ILBlock {
+            addr: 0x1000,
+            size: 16,
+            ops: vec![
+                R2ILOp::Load {
+                    dst: reg(RDI, 8),
+                    space: SpaceId::Ram,
+                    addr: constant(0x2000, 8),
+                },
+                call(0x9000),
+                ret(),
+            ],
+            ..Default::default()
+        }];
+        let flow = Flow::new(&lifted, 0, []);
+        let seed = Seed {
+            block: 0,
+            op: 1,
+            storage: storage(RDI, 8),
+        };
+        let word = vec![(0x2000, vec![0x00, 0x40, 0, 0, 0, 0, 0, 0])];
+        let held = Memory::new(word, Endianness::Little);
+        assert_eq!(
+            reaching_constants(&flow, (&writes, &held), &[seed]),
+            [Reaching::Constant(0x4000)]
+        );
+        let none = Memory::new(Vec::new(), Endianness::Little);
+        let load = Reaching::NotConstant(Unreached::Load { block: 0, op: 0 });
+        assert_eq!(reaching_constants(&flow, (&writes, &none), &[seed]), [load]);
     }
 }
