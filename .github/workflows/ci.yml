@@ -419,7 +419,8 @@ jobs:
     needs: [plan, build, aarch64-toolchain]
     # A scheduled or manual run has no base to time against.
     if: needs.plan.outputs.full == 'true' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
-    timeout-minutes: 60
+    # The cold cases pay the survey and caller closure on both sides (D573): 62 minutes on #417, 30 before.
+    timeout-minutes: 90
     # A cause line names the base commit, so the timing and count steps read it too (D439).
     env:
       BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}

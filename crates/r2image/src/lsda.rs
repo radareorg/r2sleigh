@@ -8,9 +8,8 @@ use r2abi::frames::{CallSiteRange, LsdaRefusal};
 /// `DW_EH_PE_omit` (GCC `libgcc/unwind-pe.h`).
 const OMIT: u8 = 0xff;
 
-/// The call-site ranges of the table at `at`, whose bytes from there are `bytes`, for the frame
-/// covering `frame` of an image whose pointers are `pointer` bytes: absolute, sorted by start.
-/// O(table bytes).
+/// The call-site ranges of the table at `at` (its bytes `bytes`) for the frame covering `frame`, in
+/// an image of `pointer`-byte pointers: absolute, sorted by start. O(table bytes).
 pub(crate) fn call_sites(
     bytes: &[u8],
     at: u64,
