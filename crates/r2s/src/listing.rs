@@ -402,9 +402,8 @@ pub(crate) fn disassemble_function(
     Ok(out.collect::<Vec<_>>().join("\n").trim_end().to_owned())
 }
 
-/// `pdf`'s header in radare2's grammar (`libr/core/disasm.c:1723-1734`, `:1849-1866`): the xref
-/// lines, the `?` line unless the engine proves the list complete, `┌ realsz: name (args);`, at
-/// most 2 notes in `afi`'s words, and the span line where blocks lie below the entry.
+/// `pdf`'s header in radare2's grammar (`libr/core/disasm.c:1723-1734`, `:1849-1866`), in the
+/// order doc/adr-display.md "Round 15 as built: listing" (D566) gives.
 fn header(
     session: &Session,
     entry: u64,

@@ -78,9 +78,8 @@ fn a_piped_pdd_is_the_definitions_bytes() {
     );
 }
 
-/// With both keys, removing the column, the rails and the proof comment's lines and restoring the
-/// proof line gives the plain text; each address is an instruction `pdf` lists; a rail never
-/// widens a line past its plain width and the column.
+/// With both keys the text strips back to the plain one, each address is a `pdf` line, and a
+/// line is at most the column's 11 cells past its plain width.
 #[test]
 fn the_laid_out_pdd_strips_back_to_the_plain_one() {
     let plain = each("pdd");

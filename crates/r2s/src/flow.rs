@@ -1,8 +1,5 @@
-//! `pdf`'s flow lanes and rail, laid out from the edges the engine states (D565).
-//!
-//! Admission by a segment tree, then interval colouring (doc/adr-display.md, "Round 15 as built:
-//! listing"). The gutter is cells 0 to `w + 1`: the rail, `w - 2` lanes, the shaft and head, and
-//! the separator before the address.
+//! `pdf`'s flow lanes and rail from the engine's edges: cells 0 to `w + 1`, the rail, `w - 2`
+//! lanes, the arrow and a separator (doc/adr-display.md, "Round 15 as built: listing", D565).
 
 use r2s_tui::theme::{Role, Roles};
 
@@ -116,12 +113,8 @@ impl Gutter {
     }
 }
 
-/// Which edges fit the lane budget, and the lane each takes: `(admitted, lane)` per edge.
-///
-/// Admission takes edges by (span, from) while the largest overlap over the span stays under the
-/// lane count, a segment tree with range add and range maximum, `O(E log N)`. Colouring takes the
-/// admitted edges by span start and gives each the lowest free lane, `O(E log E)`: an interval
-/// graph whose largest clique is at most `k` is coloured with `k` lanes this way.
+/// Each edge's lane, none past the budget: admission by a segment tree, `O(E log N)`, then
+/// interval colouring by span start, `O(E log E)` (doc/adr-display.md, D565).
 pub(crate) fn plan(rows: usize, edges: &[Edge], lanes: usize) -> Vec<Option<usize>> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -160,9 +153,8 @@ pub(crate) fn plan(rows: usize, edges: &[Edge], lanes: usize) -> Vec<Option<usiz
     lane
 }
 
-/// Each row's gutter, cells 0 to `w + 1`, with its roles: the rail, the lanes and arrows of the
-/// admitted edges, a `+` stub at both ends of an edge past the budget, and a `?` stub on each row
-/// in `unknown`. `O(E log E + R w)`.
+/// Each row's gutter with its roles: rail, lanes and arrows, a `+` stub at both ends of an edge
+/// past the budget, a `?` stub on each `unknown` row. `O(E log E + R w)`.
 pub(crate) fn gutters(
     rows: usize,
     edges: &[Edge],
