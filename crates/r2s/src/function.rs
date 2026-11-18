@@ -198,6 +198,8 @@ pub fn blocks(session: &mut Session, argument: &str) -> Result<String, String> {
                 EdgeKind::Jump | EdgeKind::Fall | EdgeKind::Taken => 'j',
                 EdgeKind::NotTaken => 'f',
                 EdgeKind::Case | EdgeKind::Default => 's',
+                // radare2 reads no LSDA and has no tag for it (D570).
+                EdgeKind::Unwind => 'u',
             };
             out.push_str(&format!(" {tag} {:#010x}", edge.target));
         }

@@ -70,6 +70,8 @@ pub enum EdgeKind {
     Case,
     /// A dispatch's default.
     Default,
+    /// A call's unwind to its landing pad, as a cited personality's table states it (D570).
+    Unwind,
 }
 
 /// Each block's extent and successors, as the walk that the lines came from
@@ -80,15 +82,26 @@ type ShapeBlock = (u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>);
 struct Shape {
     blocks: Vec<ShapeBlock>,
     dispatches: std::collections::BTreeSet<u64>,
+    /// Each call and its landing pad, sorted.
+    unwinds: Vec<(u64, u64)>,
 }
 
+/// The shape of `blocks` and of the pad blocks of `pads`, with its unwind edges.
 fn shape_of(
     blocks: impl Iterator<Item = (u64, u64, Vec<(r2source::AdvisorySuccessorKind, u64)>)>,
     dispatches: impl Iterator<Item = u64>,
+    pads: Option<&crate::body::Pads>,
 ) -> Shape {
+    let pad_blocks = (pads.into_iter())
+        .flat_map(|pads| &pads.blocks)
+        .map(|block| {
+            let successors = block.successors.clone();
+            (block.lifted.addr, u64::from(block.lifted.size), successors)
+        });
     Shape {
-        blocks: blocks.collect(),
+        blocks: blocks.chain(pad_blocks).collect(),
         dispatches: dispatches.collect(),
+        unwinds: pads.map(|pads| pads.unwinds.clone()).unwrap_or_default(),
     }
 }
 
@@ -223,6 +236,8 @@ pub(super) struct Survey {
     tail_callers: BTreeMap<u64, Vec<u64>>,
     /// The address after each call a walk ended at because its callee never comes back, ascending.
     after_exits: Vec<u64>,
+    /// How many walked bodies hold a call that unwinds to a landing pad (D570).
+    pub(super) unwinding: usize,
 }
 
 impl Survey {
@@ -412,8 +427,15 @@ impl<S: Source + 'static> OpenProgram<S> {
             }
         };
         let artifact = prepared.artifact().artifact();
+        let pads = (self.body_of(entry).ok())
+            .zip(self.target(entry).ok())
+            // A pad walk that panics leaves the description without pads, as a listing's does.
+            .and_then(|(walk, target)| isolated(|| walk.pads(target.disasm, &view)).ok());
         let read = |sealed: &SealedFunctionAnalysis| {
-            super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn)
+            let mut info =
+                super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn);
+            (pads.as_ref()).inspect(|pads| info.hold_pads(pads));
+            info
         };
         // The frame's locals are the frame model's, whichever pipeline renders (ADR frame-model).
         self.read_sealed(entry, &prepared, read)?
@@ -503,6 +525,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         let Shape {
             blocks: mut walked,
             dispatches,
+            unwinds,
         } = shape;
         walked.sort_by_key(|(address, _, _)| *address);
         for (address, size, successors) in walked {
@@ -514,11 +537,23 @@ impl<S: Source + 'static> OpenProgram<S> {
             let dispatch = held
                 .last()
                 .is_some_and(|line| dispatches.contains(&line.address));
+            let mut edges = edges_of(&successors, dispatch, |target| starts.contains(&target));
+            let calls = unwinds.partition_point(|(call, _)| *call < address)
+                ..unwinds.partition_point(|(call, _)| *call < address + size);
+            for &(_, pad) in &unwinds[calls] {
+                let edge = GraphEdge {
+                    target: pad,
+                    kind: EdgeKind::Unwind,
+                };
+                if starts.contains(&pad) && !edges.contains(&edge) {
+                    edges.push(edge);
+                }
+            }
             blocks.push(GraphBlock {
                 address,
                 size,
                 lines: held,
-                edges: edges_of(&successors, dispatch, |target| starts.contains(&target)),
+                edges,
             });
         }
         Ok(FunctionGraph {
@@ -537,12 +572,12 @@ impl<S: Source + 'static> OpenProgram<S> {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, entry, &prepared)) {
                 Ok(Err(reason)) => reason,
-                Ok(Ok(listing)) => {
+                Ok(Ok((listing, pads))) => {
                     let blocks = (prepared.outline().blocks.iter()).map(|block| {
                         let successors = block.successors.clone();
                         (block.addr, u64::from(block.size), successors)
                     });
-                    let shape = shape_of(blocks, prepared.dispatches());
+                    let shape = shape_of(blocks, prepared.dispatches(), Some(&pads));
                     return Ok((listing, shape));
                 }
                 Err(panicked) => NativeRefusal::from(panicked),
@@ -565,11 +600,15 @@ impl<S: Source + 'static> OpenProgram<S> {
         target: &crate::native::NativeTarget<'_>,
         entry: u64,
         prepared: &Prepared,
-    ) -> Result<FunctionListing, NativeRefusal> {
+    ) -> Result<(FunctionListing, crate::body::Pads), NativeRefusal> {
         let key = (entry, self.view().thumb_at(entry));
         let walking = (self.db.get::<super::analysis::Walked>(&key))
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
-        let lifted = walking.0.as_ref().map_err(Clone::clone)?.lifted();
+        let walk = walking.0.as_ref().map_err(Clone::clone)?;
+        let mut lifted = walk.lifted();
+        let pads = walk.pads(target.disasm, &self.view());
+        lifted.extend(pads.blocks.iter().map(|block| block.lifted.clone()));
+        lifted.sort_by_key(|block| block.addr);
         let body = WalkedBody::new(entry, &lifted, target.arch);
         // The `ret` notes read the sealed fact `afi` reads; a refused seal states none (D584).
         let sealed = match self.sealing(entry) {
@@ -584,10 +623,11 @@ impl<S: Source + 'static> OpenProgram<S> {
             body: Some(&body),
             ..self.answered(Some(&proved))
         };
-        Ok(FunctionListing {
+        let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted),
             refused: None,
-        })
+        };
+        Ok((listing, pads))
     }
 
     /// The listing of the body of a function whose analysis was refused: the walk `Walked` holds,
@@ -619,7 +659,8 @@ impl<S: Source + 'static> OpenProgram<S> {
                         unresolved: Vec::new(),
                     }),
                 };
-                return Ok((listing, shape_of(std::iter::empty(), std::iter::empty())));
+                let shape = shape_of(std::iter::empty(), std::iter::empty(), None);
+                return Ok((listing, shape));
             }
         };
         let body = walk.body();
@@ -629,15 +670,19 @@ impl<S: Source + 'static> OpenProgram<S> {
             .filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch)
             .map(|stop| stop.addr)
             .collect();
-        let lifted = walk.lifted();
+        let mut lifted = walk.lifted();
         let dispatches = lifted
             .iter()
-            .filter_map(|block| Some(block.switch_info.as_ref()?.switch_addr));
+            .filter_map(|block| Some(block.switch_info.as_ref()?.switch_addr))
+            .collect::<Vec<_>>();
         let blocks = (body.blocks.iter()).map(|block| {
             let successors = block.successors.clone();
             (block.lifted.addr, u64::from(block.lifted.size), successors)
         });
-        let shape = shape_of(blocks, dispatches);
+        let pads = walk.pads(target.disasm, &self.view());
+        let shape = shape_of(blocks, dispatches.into_iter(), Some(&pads));
+        lifted.extend(pads.blocks.iter().map(|block| block.lifted.clone()));
+        lifted.sort_by_key(|block| block.addr);
         let walked = WalkedBody::new(entry, &lifted, target.arch);
         let answered = Answered {
             body: Some(&walked),
@@ -965,13 +1010,22 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 callers: BTreeMap::new(),
                 tail_callers: BTreeMap::new(),
                 after_exits: Vec::new(),
+                unwinding: 0,
             })));
         }
-        let walker = super::returns::Walking::new(view.clone(), true)?;
-        let found = crate::discovery::functions(&view, seeds, &walker);
-        let keyed = (found.returns.into_iter())
+        let walker = super::returns::Walking::new(view.clone(), true)?.recording_unwinds();
+        let mut found = crate::discovery::functions(&view, seeds, &walker);
+        let keyed = (std::mem::take(&mut found.returns).into_iter())
             .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer));
         db.deposit::<super::returns::ComesBack>(keyed);
+        // Pads are walked once every return is known, so a call only a pad makes is answered (D570).
+        let returns = |callee: u64, thumb: bool| {
+            let answer = db.get::<super::returns::ComesBack>(&view.returns_key(callee, thumb));
+            answer.map_or(true, |answer| answer.comes())
+        };
+        for walk in found.walks.values_mut().flatten() {
+            walker.walk_pads(walk, &returns);
+        }
         for (vaddr, confidence) in found.placeless {
             placeless.entry(vaddr).or_insert(confidence);
         }
@@ -1005,6 +1059,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             .collect::<Vec<_>>();
         after_exits.sort_unstable();
         after_exits.dedup();
+        let unwinding = (found.walks.values())
+            .filter(|walk| walk.as_ref().is_ok_and(super::returns::BodyWalk::unwinds))
+            .count();
         let holders =
             crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
                 let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
@@ -1025,6 +1082,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             callers,
             tail_callers,
             after_exits,
+            unwinding,
         })))
     }
 }

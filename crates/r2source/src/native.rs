@@ -129,6 +129,8 @@ pub struct NativeFunction {
     /// The register saves the container's call-frame information states for
     /// this function.
     pub frame_saves: Vec<crate::SourceFrameSave>,
+    /// How many landing pads the walk held apart from these blocks (D570): no analysis reads them.
+    pub landing_pads: u32,
     /// Contracts a first seal minted for calls through a typed member (S32); empty on a first
     /// capture. One about another revision is not about this body and is dropped.
     pub member_calls: Vec<crate::SourceCallSiteInterface>,
@@ -252,6 +254,7 @@ pub fn capture(
                 saves.sort_unstable_by_key(|save| (save.entry_offset, save.register));
                 saves.into_boxed_slice()
             },
+            landing_pads: function.landing_pads,
             total_source_bytes,
         },
         advisory_calls.into_boxed_slice(),
@@ -388,6 +391,7 @@ mod tests {
             signature: None,
             closed_result: None,
             frame_saves: Vec::new(),
+            landing_pads: 0,
             member_calls: Vec::new(),
         }
     }

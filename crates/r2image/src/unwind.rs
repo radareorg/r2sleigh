@@ -27,7 +27,8 @@
 
 use std::collections::BTreeMap;
 
-pub use r2abi::frames::{FrameEntry, UnwindFrame, UnwindFrames};
+pub use r2abi::frames::{FrameEntry, LsdaRead, LsdaRefusal, UnwindFrame, UnwindFrames};
+use r2abi::statement::{LoaderWrite, WriteKind};
 
 /// What a call leaves for the architectures whose CFI this reads, in DWARF register numbers.
 #[derive(Debug, Clone, Copy)]
@@ -64,8 +65,69 @@ pub(crate) struct Relocated<'a> {
     pub targets: &'a [(u64, u64)],
 }
 
+/// What an FDE's LSDA is read against (D570): the loader's writes, which name the personality an
+/// indirect pointer reaches; a relocatable object states none, so its frames read no table.
+struct Tables<'a> {
+    writes: &'a [LoaderWrite],
+    sections: Vec<(u64, &'a [u8])>,
+    little: bool,
+}
+
+impl Tables<'_> {
+    /// The cited row of the import the personality pointer resolves to: a direct pointer, or a
+    /// word no write names as an import, states none.
+    fn personality(&self, pointer: gimli::Pointer) -> Option<&'static r2abi::runtime::Personality> {
+        let gimli::Pointer::Indirect(place) = pointer else {
+            return None;
+        };
+        let at = self.writes.partition_point(|write| write.place <= place);
+        let write = self.writes.get(at.checked_sub(1)?)?;
+        match &write.kind {
+            WriteKind::Import { symbol, .. } if write.place == place => {
+                r2abi::runtime::personality(symbol)
+            }
+            _ => None,
+        }
+    }
+
+    /// The bytes from `at` to the end of the section holding it.
+    fn bytes(&self, at: u64) -> Option<&[u8]> {
+        let (start, data) = (self.sections.iter())
+            .find(|(start, data)| *start <= at && at - *start < data.len() as u64)?;
+        data.get(usize::try_from(at - start).ok()?..)
+    }
+
+    fn read(
+        &self,
+        personality: Option<gimli::Pointer>,
+        lsda: Option<gimli::Pointer>,
+        frame: std::ops::Range<u64>,
+    ) -> (Box<[r2abi::frames::CallSiteRange]>, LsdaRead) {
+        let (Some(personality), Some(lsda)) = (personality, lsda) else {
+            return (Box::default(), LsdaRead::None);
+        };
+        let Some(row) = self.personality(personality) else {
+            return (Box::default(), LsdaRead::PersonalityUnstated);
+        };
+        let gimli::Pointer::Direct(at) = lsda else {
+            return (Box::default(), LsdaRead::Refused(LsdaRefusal::Malformed));
+        };
+        let Some(bytes) = self.bytes(at) else {
+            return (Box::default(), LsdaRead::Refused(LsdaRefusal::Unmapped));
+        };
+        match crate::lsda::call_sites(bytes, at, frame, self.little) {
+            Ok(ranges) => (ranges, LsdaRead::Read(row)),
+            Err(refusal) => (Box::default(), LsdaRead::Refused(refusal)),
+        }
+    }
+}
+
 /// Read every frame `.eh_frame` and `.debug_frame` describe.
-pub(crate) fn read(file: &object::File<'_>, relocated: Option<&Relocated<'_>>) -> UnwindFrames {
+pub(crate) fn read(
+    file: &object::File<'_>,
+    relocated: Option<&Relocated<'_>>,
+    writes: &[LoaderWrite],
+) -> UnwindFrames {
     use object::{Object as _, ObjectSection as _};
     let endian = match file.endianness() {
         object::Endianness::Little => gimli::RunTimeEndian::Little,
@@ -93,6 +155,14 @@ pub(crate) fn read(file: &object::File<'_>, relocated: Option<&Relocated<'_>>) -
     if let Some((address, _)) = section(".got") {
         bases = bases.set_got(address);
     }
+    let tables = Tables {
+        writes: if relocated.is_some() { &[] } else { writes },
+        sections: (file.sections())
+            .filter(|section| section.address() != 0)
+            .filter_map(|section| Some((section.address(), section.data().ok()?)))
+            .collect(),
+        little: endian == gimli::RunTimeEndian::Little,
+    };
     let mut frames = UnwindFrames::default();
     if let Some((address, data)) = section(".eh_frame") {
         let mut eh_frame = gimli::EhFrame::new(data, endian);
@@ -103,7 +173,7 @@ pub(crate) fn read(file: &object::File<'_>, relocated: Option<&Relocated<'_>>) -
             data,
             targets,
         });
-        read_section(&eh_frame, &bases, call, at, &mut frames);
+        read_section(&eh_frame, &bases, call, at, &tables, &mut frames);
     }
     if let Some((address, data)) = section(".debug_frame") {
         let mut debug_frame = gimli::DebugFrame::new(data, endian);
@@ -113,8 +183,9 @@ pub(crate) fn read(file: &object::File<'_>, relocated: Option<&Relocated<'_>>) -
             data,
             targets,
         });
-        read_section(&debug_frame, &bases, call, at, &mut frames);
+        read_section(&debug_frame, &bases, call, at, &tables, &mut frames);
     }
+    frames.seal_pads();
     frames
 }
 
@@ -123,6 +194,7 @@ fn read_section<'a, S>(
     bases: &gimli::BaseAddresses,
     call: Option<CallState>,
     relocated: Option<Placed<'_>>,
+    tables: &Tables<'_>,
     frames: &mut UnwindFrames,
 ) where
     S: gimli::UnwindSection<gimli::EndianSlice<'a, gimli::RunTimeEndian>>,
@@ -163,11 +235,15 @@ fn read_section<'a, S>(
         let (entry, saves) = call
             .and_then(|call| rows(section, bases, &mut context, &fde, call))
             .unwrap_or_default();
+        let personality = fde.cie().personality();
+        let (pads, lsda) = tables.read(personality, fde.lsda(), start..end);
         frames.insert(UnwindFrame {
             start,
             end,
             saves,
             entry,
+            pads,
+            lsda,
         });
     }
 }
@@ -335,7 +411,7 @@ mod tests {
 
     fn frames_of(bytes: &[u8]) -> UnwindFrames {
         let file = object::File::parse(bytes).expect("an object");
-        read(&file, None)
+        read(&file, None, &[])
     }
 
     /// The DWARF fixture is a clang x86-64 ELF; its `.eh_frame` describes every

@@ -140,6 +140,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         }
         let survey = db.get::<SurveyQuery>(&()).ok()?;
         let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
+        // A call made in a landing pad is read by no lane pass, so its callee's lanes stay open (D598).
+        if survey.unwinding > 0 {
+            r2il::refusal_evidence!("closed-world", "unwind flow unread (D598)");
+            return None;
+        }
         // Code no walk decoded may call or name anything; a code byte no body, stub section or padding
         // accounts for refuses before the index is built (doc/adr-call-boundary.md, "S7 cost").
         let mut escaped = Vec::new();

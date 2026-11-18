@@ -91,6 +91,21 @@ fn note_frame_isolation(detail: &mut String, ledger: Option<&crate::ledger::Obli
     }
 }
 
+/// The pads the walk held apart: their flow enters no analysis until D598.
+fn note_landing_pads(detail: &mut String, landing_pads: u32) {
+    let noun = if landing_pads == 1 {
+        "landing pad"
+    } else {
+        "landing pads"
+    };
+    if landing_pads > 0 {
+        let _ = write!(
+            detail,
+            "; {landing_pads} {noun} not rendered: exceptional flow, a store read only there may be elided"
+        );
+    }
+}
+
 /// State what the rendering did and did not show; always emitted, since silence would claim
 /// everything was proven (doc/adr-decompiler-rewrite.md, "The proof line").
 pub(crate) fn note_unproven_constructs(
@@ -104,6 +119,7 @@ pub(crate) fn note_unproven_constructs(
     >,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
+    landing_pads: u32,
 ) {
     let rendered_nothing = func.body.is_empty();
     // Each residual is a construct the rendering says it did not prove, and
@@ -192,6 +208,7 @@ pub(crate) fn note_unproven_constructs(
     }
     note_floor(&mut detail, floor);
     note_frame_isolation(&mut detail, ledger);
+    note_landing_pads(&mut detail, landing_pads);
     if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
         && !premises.is_empty()
     {
