@@ -29,6 +29,15 @@ pub(crate) const KEYS: &[Key] = &[
         },
     },
     Key {
+        name: "asm.demangle",
+        summary: "show demangled symbols in disasm",
+        get: |session| session.demangle.to_string(),
+        set: |session, value| {
+            session.demangle = boolean("asm.demangle", value)?;
+            Ok(())
+        },
+    },
+    Key {
         name: "asm.proof",
         summary: "name each note's basis and each setter's call (r2s only)",
         get: |session| session.proof.to_string(),

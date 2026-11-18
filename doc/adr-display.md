@@ -250,3 +250,54 @@ tests whether a setter's call is the next call line.
   names it, so no line loses a name; the `afi` `noreturn:` row is unchanged
   because `diff_r2_judged.toml` matches it whole-line; notes are unpainted
   until D569's proof roles land, so colour adds nothing yet.
+
+## Round 15 as built: names
+
+- D574, one spelling. An unnamed function is `fcn.%08x`, radare2's form
+  (`libr/core/canal.c:158` and `:888`, `"%s.%08"PFMT64x`), written by
+  `r2source::unnamed_function` alone; `afl`, `axt`, `pddj`'s `name` and the
+  visual mode ask `NameDb::function`. C keeps `unnamed_identifier`
+  (`fcn_1e1d0`): `rendered_name_of` takes no display spelling, and a refused
+  rendering's definition is `rendered_name_of(None, entry)`. A refusal comment
+  of an unnamed function reads the listing's spelling; no census, golden or
+  certification function is one. bash `main` stays `fcn_1e1d0` in `pdd`:
+  `respell_nonconforming_main` (r2dec `ast.rs:2072-2095`) refuses the name
+  `main` to a prototype C11 5.1.2.2.1 does not allow, which is correct C.
+- D574, seeking. `OpenProgram::address_spelled` resolves a name the table
+  holds (`NameDb::address_of`), else `fcn.%08x` where the survey lists that
+  entry (a binary search of its sorted functions); `fcn.1e1d0` names nothing.
+  `s` and every `@` read it through `parse_number`. The command line keeps
+  radare2's operators (`~ ; @ | > " ' # $( &&`, `line.rs`, cmd.c:5241-5247), so
+  a demangled name holding one (`Guard::~Guard()`, a template) seeks through
+  the API, and its flag spelling seeks on the line; `crates/r2s/tests/names.rs`
+  checks every `afl` name both ways.
+- D574, demangling. `r2abi::mangled` parses each type in two readings at once
+  (`Both = (Ty, Node)`): the C spelling `parse` states, unchanged on all 23,770
+  names below, and libiberty's component tree. `Mangled::spelled` is a port of
+  `d_print_comp` (the modifier list that prints a declarator inside out,
+  reference collapsing, `> >`, `operator< <`, literals, `[abi:...]`,
+  `(anonymous namespace)`, `[clone .x]`, `DMGL_VERBOSE` expansions of
+  `Ss`/`Si`/`So`/`Sd`). It refuses what `parse` refuses, a restrict-qualified
+  type (a candidate `parse` does not count), a float literal and an empty one.
+  Differential against GNU `c++filt` 2.42 (contabo) and 2.47 (Mac), which
+  agree, over every `_Z` FUNC symbol (`readelf -sW`, version suffix cut):
+  0pack 8,884 names, 8,371 equal, 513 refused (5.8%), 0 different; pumasim
+  14,814, 14,476, 338 (2.3%), 0; demangle-test-cpp 72, 67, 5, 0. Under 10% on
+  both, so no `cpp_demangle` dependency. Script:
+  `designs/round15/demangle/compare.py` in the round's scratchpad.
+- `Name::shown(demangle)`: the spelled form of a `Symbol` or `Import` whose
+  text parses whole, else `spelled()`. It is the same symbol respelled by the
+  ABI's grammar, so as Stated as the mangled text; no fact reads it.
+  `e asm.demangle` (radare2's, `cconfig.c:4363`, default true) reaches `afl`,
+  `afi`'s `name:`, `axt` and `pdf`/`pd` operands and word notes; `aflj`, `ao`,
+  `f`, `is` and `pddj` keep the flag spelling. `diff_r2.py` runs radare2 with
+  `asm.demangle=false bin.demangle=false` and r2s with `asm.demangle=false`,
+  so names compare as flags. Scripts that read names from `afl` read `aflj`
+  (census `orders`, `run_refuter.py`, DecBench's `renderings.py` and
+  `r2sleigh_raw.py`, the stub `aflj`), which an older r2s also answers; the
+  coverage sweep passes the key.
+- Cost: `Names` keeps no demangled key. A seek that misses every table and
+  holds `(` asks each C++ name in address order, O(names x length): demangling
+  all 14,814 of pumasim's takes 20 ms (Mac), which an eager key would add to
+  every session's `Names`, about 0.1% of the pumasim `aa; pdd` row. Showing a
+  name demangles it at print, O(length).

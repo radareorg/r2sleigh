@@ -12,13 +12,12 @@ use crate::session::Session;
 pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
     let entry = parse_number(session, argument)?;
     let info = session.program.function_info(entry)?;
-    let name = session
-        .program
-        .names()
-        .of(entry)
-        .map(r2engine::names::Name::spelled);
+    let names = session.program.names();
+    let named = names.of(entry);
+    let name = named.map(r2engine::names::Name::spelled);
     let mut out = vec!["#".to_owned(), format!("addr: {entry:#010x}")];
-    out.extend(name.as_ref().map(|name| format!("name: {name}")));
+    let shown = named.map(|named| named.shown(session.demangle));
+    out.extend(shown.map(|shown| format!("name: {shown}")));
     // A refused analysis keeps what the walk shows; what the convention decides is unknown.
     if let Some(refused) = &info.refused {
         out.extend(walked(&info));

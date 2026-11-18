@@ -10,7 +10,7 @@ to survive. It is never a rendering source for a real measurement.
     stub_r2s.py -q <binary>          # one script per stdin line, like r2s
 
 ``?e`` prints its text, ``s`` seeks, ``pddj`` answers for the current address,
-``afl`` lists ``$STUB_R2S_AFL`` (``0x1000 main,0x2000 -``), anything else is an
+``afl`` and ``aflj`` list ``$STUB_R2S_AFL`` (``0x1000 main,0x2000 -``), anything else is an
 unknown command. ``STUB_R2S_MODE`` picks the answer:
 
 * ``minimal``   a valid record with an empty body (the default);
@@ -176,6 +176,15 @@ class Shell:
             for item in filter(None, os.environ.get("STUB_R2S_AFL", "").split(",")):
                 where, _, name = item.partition(" ")
                 print(f"{where} 1 16 {name or '-'}", flush=True)
+        elif statement == "aflj":
+            # The same rows by flag spelling; an unnamed one is `fcn.%08x`, as r2s spells it.
+            rows = []
+            for item in filter(None, os.environ.get("STUB_R2S_AFL", "").split(",")):
+                where, _, name = item.partition(" ")
+                address = int(where, 16)
+                name = f"fcn.{address:08x}" if name in ("", "-") else name
+                rows.append({"addr": address, "name": name, "size": 16, "nbbs": 1})
+            print(json.dumps(rows), flush=True)
         elif statement == "pddj":
             fault = self.faults.get(address, "")
             if fault.startswith("once-"):

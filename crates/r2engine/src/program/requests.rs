@@ -186,14 +186,16 @@ pub struct Rendering {
 }
 
 impl Rendering {
-    /// The record of a function the engine refused to analyse or render, under its name.
+    /// The record of a function the engine refused to analyse or render, under its name; an
+    /// unnamed one is commented as a listing names it and defined as C names it.
     pub(super) fn refused(
-        name: &str,
+        name: Option<&str>,
         entry: u64,
         language: r2abi::statement::SourceLanguage,
         refusal: NativeRefusal,
     ) -> Self {
-        let comment = crate::artifact_guard_fallback_comment(name, &refusal.to_string());
+        let shown = name.map_or_else(|| r2source::unnamed_function(entry), str::to_owned);
+        let comment = crate::artifact_guard_fallback_comment(&shown, &refusal.to_string());
         Self {
             response: RenderedResponse {
                 output: crate::EngineRendering::Listing(comment),
@@ -201,7 +203,7 @@ impl Rendering {
                 premises: std::collections::BTreeSet::new(),
                 undecided: Vec::new(),
             },
-            definition: r2dec::rendered_name_of(Some(name), entry),
+            definition: r2dec::rendered_name_of(name, entry),
             unread: Vec::new(),
             language,
             refused: Some(refusal),
@@ -722,6 +724,26 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn functions_holding(&mut self, vaddr: u64) -> Result<Vec<u64>, String> {
         self.start_request();
         Ok(self.surveyed()?.holders.at(vaddr).to_vec())
+    }
+
+    /// The address a spelling a listing prints names: a name the table holds, else an unnamed
+    /// function's `fcn.%08x` where the survey lists that entry. O(log n) once surveyed.
+    pub fn address_spelled(&mut self, spelling: &str) -> Result<Option<u64>, String> {
+        if let Some(named) = self.address_named(spelling)? {
+            return Ok(Some(named));
+        }
+        let hex = spelling.strip_prefix("fcn.");
+        let Some(entry) = hex.and_then(|hex| u64::from_str_radix(hex, 16).ok()) else {
+            return Ok(None);
+        };
+        // Only the form a listing prints seeks: `fcn.1e1d0` is no name of 0x1e1d0.
+        if r2source::unnamed_function(entry) != spelling {
+            return Ok(None);
+        }
+        self.start_request();
+        let survey = self.surveyed()?;
+        let listed = (survey.functions).binary_search_by_key(&entry, |found| found.address);
+        Ok(listed.is_ok().then_some(entry))
     }
 
     /// Every function's basic blocks and their bytes, from the walk discovery

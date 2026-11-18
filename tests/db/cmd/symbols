@@ -17,3 +17,62 @@ nth paddr      vaddr      bind   type   size lib name
 0x00401010    1      4 sym.absfn
 EOF
 RUN
+
+# A C++ symbol is shown as c++filt prints it under asm.demangle, its default (D574).
+NAME=afl demangled
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=afl
+EXPECT=<<EOF
+0x00001000    3     27 sym._init
+0x000010c0    1     10 sym.imp.__cxa_finalize
+0x000010d0    1     10 std::runtime_error::runtime_error(char const*)
+0x000010e0    1     10 sym.imp.__cxa_begin_catch
+0x000010f0    1     10 sym.imp.__cxa_allocate_exception
+0x00001100    1     10 sym.imp.__cxa_free_exception
+0x00001110    1     10 sym.imp.__stack_chk_fail
+0x00001120    1     10 sym.imp.puts
+0x00001130    1     10 sym.imp.__cxa_end_catch
+0x00001140    1     10 sym.imp.__cxa_throw
+0x00001150    1     10 sym.imp._Unwind_Resume
+0x00001160    1     37 sym._start
+0x00001190    4     34 sym.deregister_tm_clones
+0x000011c0    4     51 sym.register_tm_clones
+0x00001200    5     54 sym.__do_global_dtors_aux
+0x00001240    1      9 sym.frame_dummy
+0x0000124a    3     41 Guard::~Guard()
+0x00001273    5    125 risky(int)
+0x000012f0   12    279 guarded(int)
+0x00001407    1     32 sym.main
+0x00001428    1     13 sym._fini
+EOF
+RUN
+
+# With asm.demangle off every name is its flag spelling, as JSON prints it.
+NAME=afl flag spellings
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+ARGS=-e asm.demangle=false
+CMDS=afl
+EXPECT=<<EOF
+0x00001000    3     27 sym._init
+0x000010c0    1     10 sym.imp.__cxa_finalize
+0x000010d0    1     10 sym.imp._ZNSt13runtime_errorC1EPKc
+0x000010e0    1     10 sym.imp.__cxa_begin_catch
+0x000010f0    1     10 sym.imp.__cxa_allocate_exception
+0x00001100    1     10 sym.imp.__cxa_free_exception
+0x00001110    1     10 sym.imp.__stack_chk_fail
+0x00001120    1     10 sym.imp.puts
+0x00001130    1     10 sym.imp.__cxa_end_catch
+0x00001140    1     10 sym.imp.__cxa_throw
+0x00001150    1     10 sym.imp._Unwind_Resume
+0x00001160    1     37 sym._start
+0x00001190    4     34 sym.deregister_tm_clones
+0x000011c0    4     51 sym.register_tm_clones
+0x00001200    5     54 sym.__do_global_dtors_aux
+0x00001240    1      9 sym.frame_dummy
+0x0000124a    3     41 sym._ZN5GuardD1Ev
+0x00001273    5    125 sym._Z5riskyi
+0x000012f0   12    279 sym._Z7guardedi
+0x00001407    1     32 sym.main
+0x00001428    1     13 sym._fini
+EOF
+RUN

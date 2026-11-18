@@ -171,6 +171,14 @@ class Judged(unittest.TestCase):
         self.assertTrue(script.endswith("s entry0;pd 8"))
         self.assertEqual(argv[-1], "bin")
 
+    def test_both_tools_name_by_flag_spellings(self):
+        theirs = diff_r2.radare2_argv("/usr/bin/radare2", "afl", "bin")
+        for key in ("asm.demangle=false", "bin.demangle=false"):
+            self.assertEqual(theirs[theirs.index(key) - 1], "-e")
+        ours = diff_r2.r2s_argv("r2s", "afl", "bin")
+        self.assertEqual(ours[ours.index("asm.demangle=false") - 1], "-e")
+        self.assertEqual(ours[-3:], ["-c", "afl", "bin"])
+
     def test_two_different_invalid_bytes_stay_different(self):
         def out(byte):
             script = "import sys; sys.stdout.buffer.write(bytes([{}]))".format(byte)

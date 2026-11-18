@@ -164,6 +164,24 @@ impl Name {
         seeks
     }
 
+    /// What a C++ symbol or import is called, as the ABI's grammar spells it: the same
+    /// symbol, so as Stated as its mangled text. None where the text does not parse whole.
+    fn demangled(&self) -> Option<String> {
+        let mangled = matches!(self.namespace, Namespace::Symbol | Namespace::Import);
+        mangled
+            .then(|| r2abi::mangled::parse(&self.text)?.spelled())
+            .flatten()
+    }
+
+    /// The name as a listing shows it: the demangled spelling where `demangle` holds and
+    /// there is one (`asm.demangle`), else [`Name::spelled`]. O(length).
+    pub fn shown(&self, demangle: bool) -> Cow<'_, str> {
+        match self.demangled().filter(|_| demangle) {
+            Some(demangled) => Cow::Owned(demangled),
+            None => Cow::Owned(self.spelled()),
+        }
+    }
+
     /// The text past the prefix, as radare2 names the flag.
     fn flagged(&self) -> Cow<'_, str> {
         match self.namespace {
@@ -266,10 +284,18 @@ impl NameDb {
             let rest = spelling.strip_prefix(namespace.prefix())?;
             self.by_spelling[*namespace as usize].get(rest)
         });
-        prefixed
+        let listed = prefixed
             .chain(self.by_spelling[BARE].get(spelling))
-            .copied()
-            .min()
+            .copied();
+        // A demangled spelling holds its parameter list: asked of each C++ name on a miss, in
+        // address order, so no key is kept for the rare seek (O(names x length)).
+        listed.min().or_else(|| {
+            let shown = |name: &Name| name.demangled().is_some_and(|text| text == spelling);
+            spelling
+                .contains('(')
+                .then(|| self.iter().find(|(_, name)| shown(name)))?
+                .map(|(vaddr, _)| vaddr)
+        })
     }
 
     /// The strongest name at exactly this address.
@@ -295,10 +321,12 @@ impl NameDb {
             .find(|name| !matches!(name.namespace, Namespace::Section | Namespace::Segment))
     }
 
-    /// The function that begins at this address, spelled as a listing spells it, else as an unnamed one.
-    pub fn function(&self, entry: u64) -> String {
-        self.of(entry)
-            .map_or_else(|| r2source::unnamed_function(entry), Name::spelled)
+    /// The function that begins at this address, shown as a listing shows it, else as an unnamed one.
+    pub fn function(&self, entry: u64, demangle: bool) -> String {
+        self.of(entry).map_or_else(
+            || r2source::unnamed_function(entry),
+            |name| name.shown(demangle).into_owned(),
+        )
     }
 
     /// The plain name at exactly this address, which is what the engine keys

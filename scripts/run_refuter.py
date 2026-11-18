@@ -343,8 +343,10 @@ def auxv_entry(remote: Remote) -> int:
 
 def leaves(r2s: Path, binary: Path) -> list[int]:
     """Functions `afi` says call nothing whose listing holds no call, no supervisor call and no indirect jump."""
-    listed = subprocess.run([str(r2s), "-q", "-c", "aa; afl", str(binary)], capture_output=True, text=True).stdout
-    entries = [int(line.split()[0], 16) for line in listed.splitlines() if line.startswith("0x")]
+    listed = subprocess.run([str(r2s), "-q", "-c", "aa; aflj", str(binary)], capture_output=True, text=True).stdout
+    # `aflj` names by flag spelling, which `asm.demangle` leaves alone, so a stub is `sym.imp.` (D574).
+    rows = json.loads(listed[listed.index("["):listed.rindex("]") + 1])
+    entries = [row["addr"] for row in rows if not row["name"].startswith("sym.imp.")]
     script = "aa\n" + "".join(f"?e ==F {e:#x}\nafi @ {e:#x}\npdf @ {e:#x}\n" for e in entries)
     out = subprocess.run([str(r2s), "-q", str(binary)], input=script, capture_output=True, text=True).stdout
     picked = []

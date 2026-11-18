@@ -320,15 +320,11 @@ mod tests {
     }
 }
 
-/// What a function with no name is called.
+/// What a function with no name is called: radare2's `%s.%08x` (`libr/core/canal.c:158`, `:888`).
 ///
-/// Three spellings answered this once -- `fcn.{x}`, `fcn_{x}` and `sub_{x}` --
-/// in seven places across four crates, so the same function was one thing to
-/// the engine, another to the type solver and a third to the renderer. There
-/// is one form now, and one identifier form beside it, because a C identifier
-/// cannot hold the dot a flag carries.
+/// The one listing form; [`unnamed_identifier`] is the C form, since an identifier holds no dot.
 pub fn unnamed_function(entry: u64) -> String {
-    format!("fcn.{entry:x}")
+    format!("fcn.{entry:08x}")
 }
 
 /// The same name, spelled so a C identifier can hold it.
@@ -340,14 +336,12 @@ pub fn unnamed_identifier(entry: u64) -> String {
 mod unnamed_tests {
     use super::*;
 
+    /// The listing form is radare2's flag; the C form is the identifier rendered C has always used.
     #[test]
-    fn the_two_forms_differ_only_where_c_forces_it() {
-        assert_eq!(unnamed_function(0x401330), "fcn.401330");
+    fn the_listing_form_is_radare2s_flag_and_the_c_form_its_identifier() {
+        assert_eq!(unnamed_function(0x401330), "fcn.00401330");
+        assert_eq!(unnamed_function(0x1_0000_0000), "fcn.100000000");
         assert_eq!(unnamed_identifier(0x401330), "fcn_401330");
-        assert_eq!(
-            unnamed_function(0x401330).replace('.', "_"),
-            unnamed_identifier(0x401330)
-        );
     }
 
     #[test]
