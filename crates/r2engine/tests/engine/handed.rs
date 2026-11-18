@@ -7,9 +7,9 @@ use r2engine::discovery::Basis;
 use r2engine::program::OpenProgram;
 
 /// `lea rcx, [rip + 9]` (two), `call qword [rip + 0x7b]` (qsort's slot), `ret`: qsort's fourth
-/// parameter is its comparator, so two is handed, and no body is sealed to read it.
+/// parameter is its comparator, so two is handed.
 #[test]
-fn a_comparator_handed_to_qsort_is_found_with_no_seal() {
+fn a_comparator_handed_to_qsort_is_found_as_handed() {
     let mut program = OpenProgram::of(
         Literal::new()
             .stripped_of("two")
@@ -26,5 +26,4 @@ fn a_comparator_handed_to_qsort_is_found_with_no_seal() {
         .map(|one| (one.address, one.confidence.basis))
         .collect::<Vec<_>>();
     assert!(found.contains(&(TWO, Basis::Handed)), "{found:x?}");
-    assert_eq!(program.analysis_stats().handed_sealed, 0);
 }

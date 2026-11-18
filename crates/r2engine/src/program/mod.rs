@@ -630,7 +630,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             site_fates_in_direct_sites: self.db.stats().site_fates_in_direct_sites,
             site_fates_never_joined: self.db.stats().site_fates_never_joined,
             site_fates_relifted: self.db.stats().site_fates_relifted,
-            handed_sealed: self.db.stats().handed_sealed,
         }
     }
 

@@ -162,8 +162,6 @@ pub struct DbStats {
     pub site_fates_never_joined: u64,
     /// Site fates the callers-first read asked of a body a deep read had lifted first (D354).
     pub site_fates_relifted: u64,
-    /// Bodies sealed against their convention to read what they hand a declared function (D590).
-    pub handed_sealed: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -362,11 +360,6 @@ impl<I: Inputs + 'static> Db<I> {
     /// Count site fates asked of a body a deep read had lifted first (D354).
     pub fn note_site_fates_relifted(&self) {
         self.stats.borrow_mut().site_fates_relifted += 1;
-    }
-
-    /// Count a body sealed against its convention to read what it hands a declared function (D590).
-    pub fn note_handed_sealed(&self) {
-        self.stats.borrow_mut().handed_sealed += 1;
     }
 
     /// Add an ended request's frame builds and table seals (D403).
