@@ -3,8 +3,8 @@
 //! Lifting is the whole point: a number in the operands is an address because
 //! the instruction transfers to it or reads it, not because it looks like one.
 
-use r2il::ValueUse;
 use r2il::{R2ILOp, SpaceId, Varnode};
+use r2il::{ValueMovement, ValueUse};
 use r2sleigh_lift::{NumberSpan, Syntax};
 use r2ssa::origin::{BlockOrigins, ValueOrigin, encoded_target};
 use r2ssa::{CanonicalStorageId, CanonicalStorageSpace};
@@ -422,8 +422,8 @@ fn unclaimed_text(
         .collect()
 }
 
-/// Whether the lift reads `value` only to move it: a copy or an extension into another holder,
-/// and at least once into a register or as the word a store writes.
+/// Whether the lift reads `value` only to move it (r2il `value_movement`): a copy or an extension
+/// into another holder, and at least once into a register or as the word a store writes.
 fn moved_whole(lift: &r2il::R2ILBlock, value: u64) -> bool {
     let mut holders: Vec<&Varnode> = Vec::new();
     let mut moved = false;
@@ -432,20 +432,20 @@ fn moved_whole(lift: &r2il::R2ILBlock, value: u64) -> bool {
             (varnode.space == SpaceId::Const && varnode.offset == value)
                 || holders.contains(&varnode)
         };
-        let carried = match op {
-            R2ILOp::Copy { dst, src }
-            | R2ILOp::IntZExt { dst, src }
-            | R2ILOp::IntSExt { dst, src }
-                if holds(src) =>
-            {
-                moved |= dst.space == SpaceId::Register;
-                Some(dst)
+        let reads = op.inputs().into_iter().filter(|input| holds(input)).count();
+        let carried = match op.value_movement() {
+            ValueMovement::Moves(input) if holds(input) => {
+                moved |= op
+                    .output()
+                    .is_some_and(|output| output.space == SpaceId::Register);
+                op.output()
             }
-            R2ILOp::Store { addr, val, .. } if holds(val) && !holds(addr) => {
+            // The word stored, never its address.
+            ValueMovement::Stores(input) if holds(input) && reads == 1 => {
                 moved = true;
                 None
             }
-            op if op.inputs().into_iter().any(holds) => return false,
+            _ if reads > 0 => return false,
             _ => None,
         };
         // A holder another operation overwrites holds the constant no longer.
