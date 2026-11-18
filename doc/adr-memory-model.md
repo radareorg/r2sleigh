@@ -215,7 +215,7 @@ The session peaks at 701 MB (-79%), cold `pdd @ 0x23fdf0` at 364 MB (was
 
 Measured by a scratch probe that tags each allocation with the innermost
 running query (dhat's backtrace ran 730 times slower): the tables are in
-round 15's `d588-dhat.md`. Left: the session's peak sits inside the request
+round 15's scratchpad `designs/round15/d588-dhat.md`. Left: the session's peak sits inside the request
 that builds the program-wide `ReferenceIndex` (276 MB at its peak, 170 MB
 held, 87% decoded lines in `Claimant.line`), whose cold peak alone is
 506 MB; the gate (1.3 times one cold request) stays open on that fact.
