@@ -205,10 +205,14 @@ impl Anchored {
         };
         let graph = artifact.graph();
         let decided = matches!(standing, ResultStanding::Decided(_));
-        // A decided result's note stands as `afi`'s row does; any other is a refusal on the convention.
+        // A decided result's note stands as `afi`'s row does; any other is a refusal on the
+        // convention, resting on what the result's closed decision does (D592).
         let support = match &standing {
             ResultStanding::Decided(confidence) => confidence.clone(),
-            _ => Confidence::of(Basis::Convention),
+            _ => Confidence {
+                basis: Basis::Convention,
+                premises: (artifact.function().result_premises().iter().copied()).collect(),
+            },
         };
         let convention = artifact.machine_context().return_value_carrier();
         for certificate in &artifact.certificates().returns {

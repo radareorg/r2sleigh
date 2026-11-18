@@ -1558,9 +1558,8 @@ impl Stated<'_> {
     }
 }
 
-/// What a call's argument mapping rests on where `used` states its callee's interface: nothing
-/// where the alone read states that same parameter list exactly with no premise (the witness),
-/// else the used read's premises, the closed world where it states none (D592). O(parameters).
+/// What a call's mapping onto `used`'s interface rests on: nothing where the alone read states that
+/// list exactly with no premise, else `used`'s premises or the closed world (D592). O(parameters).
 fn mapping_premises(alone: &CalleeRead, used: &CalleeRead) -> r2source::Premises {
     let exact = (alone.interface.as_ref()).filter(|interface| interface.arity().is_exact());
     let witnessed = match (exact, used.interface.as_ref()) {
