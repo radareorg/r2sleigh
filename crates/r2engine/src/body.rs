@@ -362,6 +362,14 @@ pub struct Decoded {
     pub continuation: Continuation,
 }
 
+/// The pads' bytes a survey's trace holds once their walk is dropped: joined ranges, blocks, bytes.
+#[derive(Debug, Clone)]
+struct PadExtent {
+    spans: Vec<std::ops::Range<u64>>,
+    blocks: usize,
+    bytes: u64,
+}
+
 /// What a walk does with a call's landing pad (D570, D599): nothing, record the unwind, or walk the pad too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Unwinds {
@@ -662,6 +670,22 @@ impl Trace {
     pub fn walk_pads(&mut self, disasm: &Disassembler, program: &dyn Program) {
         self.0.unwinding = Unwinds::Walk;
         self.0.walk_pads(disasm, program);
+        // Only the pads' extent is read from here on: the walk of them is dropped (D570).
+        let Some(pads) = self.0.pads.take() else {
+            return;
+        };
+        let normal = &self.0.decoded;
+        let own = |at: &&u64| !normal.contains_key(*at);
+        let instructions = (pads.decoded.iter()).filter(|(at, _)| own(at));
+        self.0.pad_extent = Some(Box::new(PadExtent {
+            spans: joined(instructions.clone().map(|(at, size)| (*at, *size))),
+            blocks: (pads.leaders.iter())
+                .filter(|leader| pads.decoded.contains_key(leader))
+                .filter(own)
+                .count(),
+            bytes: instructions.map(|(_, size)| u64::from(*size)).sum(),
+        }));
+        self.0.unwinds = Vec::new();
     }
 
     /// Continue past every call to `callee`, visiting only what is not yet decoded.
@@ -739,7 +763,7 @@ impl Trace {
 
     /// Whether a call of the body, or of its pads, unwinds to a landing pad (D570).
     pub fn unwinds(&self) -> bool {
-        !self.0.unwinds.is_empty()
+        !self.0.unwinds.is_empty() || self.0.pad_extent.is_some()
     }
 
     /// Whether the walk decoded an instruction that begins at `address`. `O(log n)`.
@@ -756,10 +780,21 @@ impl Trace {
     /// order with abutting instructions joined. Padding between blocks is no
     /// instruction of the body and lies in no range. O(instructions).
     pub fn spans(&self) -> Vec<std::ops::Range<u64>> {
-        match self.0.pads {
-            None => joined(self.0.decoded.iter().map(|(at, size)| (*at, *size))),
-            Some(_) => joined(self.0.instructions()),
+        let spans = joined(self.0.decoded.iter().map(|(at, size)| (*at, *size)));
+        let Some(pads) = &self.0.pad_extent else {
+            return spans;
+        };
+        let mut all = spans;
+        all.extend(pads.spans.iter().cloned());
+        all.sort_unstable_by_key(|span| span.start);
+        let mut merged: Vec<std::ops::Range<u64>> = Vec::with_capacity(all.len());
+        for span in all {
+            match merged.last_mut() {
+                Some(last) if last.end >= span.start => last.end = last.end.max(span.end),
+                _ => merged.push(span),
+            }
         }
+        merged
     }
 
     /// A block begins at each leader the walk decoded; padding between
@@ -768,23 +803,19 @@ impl Trace {
     /// counted either. O(instructions).
     pub fn extent(&self) -> TraceExtent {
         let walk = &self.0;
-        let leaders = |walk: &Walk| {
-            (walk.leaders.iter())
-                .filter(|leader| walk.decoded.contains_key(leader))
-                .count()
-        };
-        let pads = (walk.pads.as_deref()).map_or(0, |pads| {
-            (pads.leaders.iter())
-                .filter(|leader| pads.decoded.contains_key(leader))
-                .filter(|leader| !walk.decoded.contains_key(leader))
-                .count()
-        });
+        let leaders = (walk.leaders.iter())
+            .filter(|leader| walk.decoded.contains_key(leader))
+            .count();
+        let bytes = walk
+            .decoded
+            .values()
+            .map(|size| u64::from(*size))
+            .sum::<u64>();
+        let (pad_blocks, pad_bytes) =
+            (walk.pad_extent.as_ref()).map_or((0, 0), |pads| (pads.blocks, pads.bytes));
         TraceExtent {
-            blocks: leaders(walk) + pads,
-            bytes: match walk.pads {
-                None => walk.decoded.values().map(|size| u64::from(*size)).sum(),
-                Some(_) => walk.instructions().map(|(_, size)| u64::from(size)).sum(),
-            },
+            blocks: leaders + pad_blocks,
+            bytes: bytes + pad_bytes,
         }
     }
 }
@@ -894,6 +925,8 @@ struct Walk {
     seeded: BTreeSet<u64>,
     /// What this walk does with its calls' pads (D599).
     unwinding: Unwinds,
+    /// The extent of the pads a trace walked, its walk of them dropped.
+    pad_extent: Option<Box<PadExtent>>,
 }
 
 impl Walk {
@@ -941,6 +974,7 @@ impl Walk {
             pads: None,
             seeded: BTreeSet::new(),
             unwinding,
+            pad_extent: None,
         };
         let Some(first) = walk.decode(entry, disasm, program) else {
             return Err(match walk.unresolved.last().map(|stop| stop.reason) {
@@ -1057,6 +1091,7 @@ impl Walk {
             pads: None,
             seeded: BTreeSet::new(),
             unwinding: Unwinds::Record,
+            pad_extent: None,
         }
     }
 
@@ -1179,22 +1214,6 @@ impl Walk {
                 .range(at..at + len)
                 .next()
                 .map(|(start, _)| *start)
-        })
-    }
-
-    /// Every instruction of the body and of its pads, by address; the normal flow's where both
-    /// decoded. A merge of two ordered maps: O(n + p log n).
-    fn instructions(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
-        let mut normal = (self.decoded.iter())
-            .map(|(at, size)| (*at, *size))
-            .peekable();
-        let pads = (self.pads.as_deref().into_iter()).flat_map(|pads| &pads.decoded);
-        let pads = pads.filter(|(at, _)| !self.decoded.contains_key(at));
-        let mut pads = pads.map(|(at, size)| (*at, *size)).peekable();
-        std::iter::from_fn(move || match (normal.peek(), pads.peek()) {
-            (Some(one), Some(other)) if other.0 < one.0 => pads.next(),
-            (Some(_), _) => normal.next(),
-            (None, _) => pads.next(),
         })
     }
 
