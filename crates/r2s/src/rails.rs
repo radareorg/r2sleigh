@@ -31,6 +31,30 @@ pub(crate) fn notes(
     if residuals > 0 {
         refused.push((Mark::Refused, format!("{residuals} residuals")));
     }
+    // The ledger's columns the proof line counts: refused and residual first, assumed after.
+    if let Some(closed) = response
+        .obligation_ledger
+        .as_ref()
+        .map(|ledger| ledger.close())
+    {
+        let counted = [
+            (Mark::Refused, closed.refused, "obligations refused"),
+            (Mark::Refused, closed.gapped, "obligations residual"),
+        ];
+        for (mark, count, said) in counted.into_iter().filter(|(_, count, _)| *count > 0) {
+            refused.push((mark, format!("{count} {said}")));
+        }
+        if closed.assumed > 0 {
+            let said = format!("{} assumed: frame extent unproven", closed.assumed);
+            bounded.insert(0, (Mark::Assumed, said));
+        }
+        if closed.compiler_inserted > 0 {
+            bounded.push((
+                Mark::Premise,
+                format!("{} compiler-inserted", closed.compiler_inserted),
+            ));
+        }
+    }
     if !response.premises.is_empty() {
         let premises = response.premises.iter().map(|premise| premise.spelled());
         let premises = premises.collect::<Vec<_>>().join(", ");
@@ -84,7 +108,7 @@ pub(crate) fn laid(
             start = end;
             continue;
         }
-        if session.rails && stated.proof == Some(line) {
+        if session.railed() && stated.proof == Some(line) {
             for said in notes {
                 column(&mut out, &mut painted, None);
                 railed(session, &mut out, &mut painted, depth);
@@ -96,7 +120,7 @@ pub(crate) fn laid(
         column(&mut out, &mut painted, lowest.get(line).copied().flatten());
         let indent = depth * stated.indent;
         let stripped =
-            match session.rails && source.as_bytes().iter().take(indent).all(|b| *b == b' ') {
+            match session.railed() && source.as_bytes().iter().take(indent).all(|b| *b == b' ') {
                 true => {
                     railed(session, &mut out, &mut painted, depth);
                     indent.min(source.len())

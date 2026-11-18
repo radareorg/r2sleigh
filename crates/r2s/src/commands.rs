@@ -1601,7 +1601,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
     let laid = match &rendering.response.output {
-        r2engine::EngineRendering::Function(rendered) if session.rails || session.pdd_addr => {
+        r2engine::EngineRendering::Function(rendered) if session.railed() || session.pdd_addr => {
             let emission = rendered.emission();
             let residuals = emission.residuals().len();
             let notes = crate::rails::notes(session, addr, &rendering.response, residuals);
@@ -1625,7 +1625,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     // Plain `pdd` is the definition's bytes; the layout is only where a key asks for it (D568).
     let mut out = match (laid, session.paints()) {
         (Some((text, roles)), Some(depth)) => r2s_tui::theme::ansi(&text, &roles, depth),
-        (Some((laid, _)), None) if session.rails || session.pdd_addr => laid,
+        (Some((laid, _)), None) if session.railed() || session.pdd_addr => laid,
         _ => text,
     };
     // A callee whose analysis panicked is a defect in the engine, not a fact

@@ -69,9 +69,23 @@ impl Session {
         }
     }
 
+    /// The width the running statement's lines are cut to: the terminal's, unless a grep reads
+    /// them, which then reads the plain grid as a pipe would.
+    pub const fn width(&self) -> Option<usize> {
+        match self.grepped {
+            true => None,
+            false => self.columns,
+        }
+    }
+
+    /// Whether `pdd` draws rails for the running statement: `asm.rails`, unless a grep reads it.
+    pub const fn railed(&self) -> bool {
+        self.rails && !self.grepped
+    }
+
     /// How `pdf`'s gutter is drawn: 10 cells of lanes in plain mode and from 160 columns, 6 under.
     pub fn gutter(&self) -> crate::flow::Gutter {
-        let narrow = self.columns.is_some_and(|columns| columns < 160);
+        let narrow = self.width().is_some_and(|columns| columns < 160);
         crate::flow::Gutter {
             width: (self.lines_width).unwrap_or(if narrow { 6 } else { 10 }),
             utf8: self.utf8,
@@ -127,5 +141,25 @@ impl Source for Opened {
 
     fn patched(&self, vaddr: u64) -> bool {
         self.image.patched(vaddr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+
+    /// A grep reads the plain grid on a terminal too: no cut, no rails, no colour (D565, D568).
+    #[test]
+    fn a_grepped_statement_is_laid_out_as_a_pipe_is() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/rv_O0g");
+        let mut session = Session::open(path).expect("the fixture opens");
+        (session.color, session.columns, session.rails) = (1, Some(80), true);
+        assert_eq!(session.width(), Some(80));
+        assert!(session.railed() && session.paints().is_some());
+        assert_eq!(session.gutter().width, 6);
+        session.grepped = true;
+        assert_eq!(session.width(), None);
+        assert!(!session.railed() && session.paints().is_none());
+        assert_eq!(session.gutter().width, 10);
     }
 }

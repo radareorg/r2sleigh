@@ -282,7 +282,8 @@ tests whether a setter's call is the next call line.
   `w`, or `w + 1` where a head stands. `asm.lines=false` keeps the rail and the
   address column. The first `;` stands at `asm.cmt.col` on `pd` and `pdf`
   rows; a terminal cuts note text, then operand text, then the mark
-  (`flow::cut`); a pipe never cuts.
+  (`flow::cut`); a pipe never cuts. `VV` writes radare2's `t` and `f` beside
+  a conditional branch's two edges, each on the side its route turns to.
 - D566: the trace records each call and tail branch with its instruction
   (`Trace::call_sites`, `tail_sites`; `transfer` and `branch` take the site).
   `Survey.callers` and `tail_callers` hold one compressed row per callee: the
@@ -317,9 +318,13 @@ tests whether a setter's call is the next call line.
   and three spaces (`Rail`); past 24 levels one `│ N>`. The column is
   `0x%08x` and a space, blank where a line accounts for no instruction; a
   blank line takes neither. The proof line gives way to at most 2 lines: the
-  refused and undecided facts (`afi`'s result note, the residual count), then
-  bounds and premises (`afi`'s floor note, the response's premises). Not
-  held: the 160-cell bound. A statement alone exceeds it (plain `pdd` on
+  refused and undecided facts (`afi`'s result note, the residual count, the
+  ledger's refused and residual columns), then the assumed column, `afi`'s
+  floor note, the compiler-inserted column and the response's premises. The
+  type clauses (`N data object types refused`, `N never assigned`) are not in
+  the typed response, so they stay in plain `pdd` and `pddo` only. A grep
+  reads plain `pdd` and an uncut `pdf`, as a pipe does. Not held: the
+  160-cell bound. A statement alone exceeds it (plain `pdd` on
   hashes has 57 lines over 149 cells, branchy 12, shapes 41; bash `main`
   reaches 2,594 with the proof line and 310 without); a rail never widens a
   line, so with the column a line is at most 11 cells past its plain width.

@@ -663,10 +663,11 @@ impl<S: Source + 'static> OpenProgram<S> {
     fn listed_body(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
         let (mut listing, shape) = self.listed_shape(entry)?;
         listing.edges = flow_edges(&listing.lines.value, &shape);
-        // The survey every request reads: its caller sets, never the reference index (D566).
-        let (calls, tails) = self.surveyed()?.xrefs_of(entry);
-        listing.header.calls = calls;
-        listing.header.tails = tails;
+        // The survey every request reads: its caller sets, never the reference index (D566). A survey
+        // that fails lists no xref, and the `?` line stands: the listing does not depend on it.
+        if let Ok(survey) = self.surveyed() {
+            (listing.header.calls, listing.header.tails) = survey.xrefs_of(entry);
+        }
         Ok((listing, shape))
     }
 
@@ -727,12 +728,16 @@ impl<S: Source + 'static> OpenProgram<S> {
             .and_then(|sealed| sealed.facts().return_type());
         // The header reads the frame answer `afi` reads, off the seal the `ret` notes read.
         let noreturn = self.view().exit(entry, key.1);
-        let info = sealed.as_ref().map(|sealed| {
+        // Isolated on its own: a defect reading the header drops the header, never the lines.
+        let info = sealed.as_ref().and_then(|sealed| {
             let artifact = prepared.artifact().artifact();
-            let mut info =
-                super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn);
-            info.hold_pads(&pads);
-            info
+            let read = || {
+                let facts = sealed.facts();
+                let mut info = super::info::FunctionInfo::read(entry, artifact, facts, noreturn);
+                info.hold_pads(&pads);
+                info
+            };
+            isolated(read).ok()
         });
         let proved = Proved::new(prepared, result);
         let answered = Answered {

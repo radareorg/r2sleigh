@@ -68,7 +68,7 @@ fn composed(session: &Session, lead: (String, Roles), row: Row) -> String {
         Some(_) => session.cmt_col.saturating_sub(before + instruction).max(1),
         None => 0,
     };
-    let kept = match session.columns {
+    let kept = match session.width() {
         Some(width) => crate::flow::cut(before, instruction, gap, notes, width),
         None => crate::flow::Kept {
             instruction: None,
