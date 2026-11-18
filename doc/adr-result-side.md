@@ -867,3 +867,25 @@ A closed-world read proves a result exists. Its type needs the width pinned and,
 2. The loader-write refusal (`Unknown` writes) costs no census or DecBench binary once r2image states `Reserved` and `Copy` (S31a as built); MIPS's whole reserved table and undecoded Mach-O chain formats still refuse.
 3. A cold `pdd` prepares a function twice where an owner's statement moves its result (D226). The step is S36's f57e1cb57 ("The cold step, bisected"). No output-identical one-preparation design was found: the raw walk has no accept check, and SSA reuse saves at most 1.3 G of the 4.75 G. Open for the maintainer: keep the bound of two and regrade D226 against #366 (24.46 G), or fund a design that states a callee's float lane without its resolved body. Owner `resolved.rs`.
 4. Row numbers come from ROADMAP's "Reserved rows" table. This ADR holds D310 to D313.
+
+## D589 as measured (round 15): the relifts' price, and what a projection must state
+
+A probe kept the walk `RegisterEffects` lifted until the popped `SiteFates`
+read it, and freed it there (never pushed). Only the counted relifts went:
+`walked.computed` fell by 497, 1,794 and 408 against 495, 1,792 and 407
+relifts (the rest are walks `Walked`'s newest entry then reused). Contabo
+`instructions:u`, median of 3: cold 0pack `pdd @ 0x62ecf0` -2.135%, cold
+pumasim `pdd @ 0x23fdf0` -3.721%, bash `pdf @ 0x1e1d0` -2.066%, outputs
+byte-identical. That is the most a lane-flow projection can save.
+
+The ruled projection keeps, per block, the events the site-fate pass reads:
+result-lane reads and overwrites, call sites, returns. The deep read reads
+more. `Reading::effects` folds each printf-format call's format register
+with `BlockOrigins` over every operation of its block (D218), and where that
+leaves the format unknown it asks `ConventionSeal`, which lifts the body
+again and seals it; `count_of` reads the last write of the count register
+the deep effect names before each counting call. A `COPY` into the format
+register is no result-lane event, so the projection drops it. A projection
+that serves the deep read states, per call site and at the lift, the folded
+format address and the count register's last write. That widens the ruled
+event set, so the build stopped there (ROADMAP D589).
