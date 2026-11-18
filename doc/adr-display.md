@@ -259,8 +259,7 @@ tests whether a setter's call is the next call line.
   visual mode ask `NameDb::function`. C keeps `unnamed_identifier`
   (`fcn_1e1d0`): `rendered_name_of` takes no display spelling, and a refused
   rendering's definition is `rendered_name_of(None, entry)`. A refusal comment
-  of an unnamed function reads the listing's spelling; no census, golden or
-  certification function is one. bash `main` stays `fcn_1e1d0` in `pdd`:
+  of an unnamed function reads the listing's spelling (below). bash `main` stays `fcn_1e1d0` in `pdd`:
   `respell_nonconforming_main` (r2dec `ast.rs:2072-2095`) refuses the name
   `main` to a prototype C11 5.1.2.2.1 does not allow, which is correct C.
 - D574, seeking. `OpenProgram::address_spelled` resolves a name the table
@@ -268,9 +267,16 @@ tests whether a setter's call is the next call line.
   entry (a binary search of its sorted functions); `fcn.1e1d0` names nothing.
   `s` and every `@` read it through `parse_number`. The command line keeps
   radare2's operators (`~ ; @ | > " ' # $( &&`, `line.rs`, cmd.c:5241-5247), so
-  a demangled name holding one (`Guard::~Guard()`, a template) seeks through
-  the API, and its flag spelling seeks on the line; `crates/r2s/tests/names.rs`
-  checks every `afl` name both ways.
+  a demangled name holding one seeks through the API and by its flag spelling
+  on the line: 3,096 of 0pack's 8,699 `afl` names, 2,107 of pumasim's 15,298
+  (D624, open). `crates/r2s/tests/names.rs` seeks every `afl` name both ways
+  and holds the uncarried set (`Guard::~Guard()`).
+- D574, the one moved `pdd` class: a refused unnamed function's comment
+  (`/* r2sleigh refused fcn.0001e1d0: ... */`, also `pddj` `code`) reads the
+  listing's spelling. Census, goldens and x86-64 and AArch64 equivalence hold
+  none; win64 equivalence holds 15, whose reason `gate.reason` normalises to
+  the same key (`\b(?:fcn|sub)[._][0-9a-f]+\b`). Keeping `fcn.{x}` there would
+  be the second speller this row deletes.
 - D574, demangling. `r2abi::mangled` parses each type in two readings at once
   (`Both = (Ty, Node)`): the C spelling `parse` states, unchanged on all 23,770
   names below, and libiberty's component tree. `Mangled::spelled` is a port of
@@ -328,6 +334,10 @@ tests whether a setter's call is the next call line.
   `Computes` claim and reference stay. One extra lift per such line, no pass.
   ls-toybox `seq_main` (0x392dc): text notes 15 to 8, the 7 on `adrp` lines
   gone; the AArch64 goldens hold no page-base note, so none moves.
+- D571, quotes: a note's text was Rust's `{:?}`, which escaped `"` and spelled
+  other characters as `\u{..}`; it is `"` + `names::escaped` + `"` now, a quote
+  bare as radare2's comment prints it (bash 0x2c8b9: `"Use "%s" to leave the
+  shell.\n"`). Goldens: 0 lines.
 - D571, `iz` and `izz` against radare2 6.2.5 (Mac) over 241 ELF testbins:
   r2s-only `iz` rows 5,827 to 5,420 and `izz` 5,414 to 3,730; radare2-only
   rows fall too. Rows r2s newly lists alone: `iz` 44 (23 radare2's `izz`

@@ -85,7 +85,8 @@ pub(super) fn over_run(
             // A number that stays put is an address candidate only where a section the program loads holds it: NULL and the header are not objects.
             && (relative.get(index).copied() == Some(true) || memory.declares(computed.value))
         {
-            if relative.get(index).copied() == Some(true) && computed.own {
+            // Only what the revision holds reads a page, so only a reader of holdings pays the lift.
+            if answered.holdings && relative.get(index).copied() == Some(true) && computed.own {
                 page =
                     rounded(answered, run, lines, index, computed.value).then_some(computed.value);
             }

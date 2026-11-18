@@ -67,6 +67,13 @@ fn every_name_afl_lists_seeks_to_its_function_and_afi_names_it_alike() {
                 "{rows:?}"
             ),
         }
+        // The names the line cannot carry, which seek by their flag until D624.
+        let uncarried = (rows.iter())
+            .filter(|(_, name)| !carried(name))
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>();
+        let expected: &[&str] = if demangle { &["Guard::~Guard()"] } else { &[] };
+        assert_eq!(uncarried, expected);
         for ((address, name), (flagged, flag)) in rows.iter().zip(&flags) {
             assert_eq!(address, flagged);
             let sought = if carried(name) { name } else { flag };
