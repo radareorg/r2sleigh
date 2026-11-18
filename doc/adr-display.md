@@ -1,7 +1,8 @@
 # ADR: display
 
 Status: D580, D579, D583, D581 and D567 built in round 14 ("Round 14 as
-built"); D565, D566, D568, D569, D574 and D582 proposed (ROADMAP).
+built"); D569 built in round 15 ("Round 15 as built: listing"); D565, D566,
+D568, D574 and D582 proposed (ROADMAP).
 
 ## Problem
 
@@ -250,3 +251,16 @@ tests whether a setter's call is the next call line.
   names it, so no line loses a name; the `afi` `noreturn:` row is unchanged
   because `diff_r2_judged.toml` matches it whole-line; notes are unpainted
   until D569's proof roles land, so colour adds nothing yet.
+
+## Round 15 as built: listing
+
+- D569: `Role` gains the 8 proof roles, `Flow`, `FlowLoop` and `Rail`. One
+  table in `theme.rs` gives each role its SGR parameters at depth 1, 2 and 3;
+  `ansi` takes the depth and `style()` reads the depth-1 column for the visual
+  mode, so the visual mode and the shell paint from one table. The light
+  column is not built: no key selects it. `Role::marked` maps a mark cell to
+  its proof role, so colour repeats the glyph; r2s-tui reads no `r2source`
+  type. `scr.color` takes 0 to 3 (`Session.color` is the depth). The listing
+  and `afi` write every note through `listing::noted`: the cell in its proof
+  role, a refusal's words in `ProofReason`, a quoted string in `String`.
+  Plain output moves 0 bytes.

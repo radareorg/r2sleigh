@@ -40,12 +40,19 @@ pub(crate) fn instruction_painted(
     session: &Session,
     line: &r2engine::query::Line,
 ) -> (String, Roles) {
-    let (mut text, roles) = match line.decoded() {
+    let (mut text, mut roles) = match line.decoded() {
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
         true => painted(line, &session.program.names()),
     };
     // A pane shows one line, so a setter names its call's address.
-    text.push_str(&held(session, line, None));
+    let (notes, marks) = held(session, line, None);
+    let at = text.len();
+    roles.extend(
+        marks
+            .into_iter()
+            .map(|(range, role)| (range.start + at..range.end + at, role)),
+    );
+    text.push_str(&notes);
     (text, roles)
 }
 
@@ -62,12 +69,14 @@ fn listed(session: &Session, line: &r2engine::query::Line, next_call: Option<u64
         true => painted(line, &session.program.names()),
     };
     let offset = format!("{:#010x}", line.address);
-    let (offset, text) = match session.paints() {
-        true => (
-            r2s_tui::theme::ansi(&offset, &[(0..offset.len(), Role::Offset)]),
-            r2s_tui::theme::ansi(&text, &roles),
+    let (notes, marks) = held(session, line, next_call);
+    let (offset, text, notes) = match session.paints() {
+        Some(depth) => (
+            r2s_tui::theme::ansi(&offset, &[(0..offset.len(), Role::Offset)], depth),
+            r2s_tui::theme::ansi(&text, &roles, depth),
+            r2s_tui::theme::ansi(&notes, &marks, depth),
         ),
-        false => (offset, text),
+        None => (offset, text, notes),
     };
     // Without the bytes, the text takes the column they stood in.
     let hex = match session.bytes {
@@ -75,9 +84,8 @@ fn listed(session: &Session, line: &r2engine::query::Line, next_call: Option<u64
         false => String::new(),
     };
     format!(
-        "{}            {offset}      {hex}{text}{}\n",
+        "{}            {offset}      {hex}{text}{notes}\n",
         labels(line),
-        held(session, line, next_call)
     )
 }
 
@@ -302,9 +310,13 @@ fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
     out
 }
 
-/// Each note on the line as `; M text`, weakest first; `asm.proof` adds the basis (doc/adr-display.md).
-/// A held value is stated beside the read, never substituted: the word holds it now, a load may not.
-fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> String {
+/// Each note on the line as `; M text`, weakest first, with the mark cell's role and a refusal's
+/// reason; `asm.proof` adds the basis (doc/adr-display.md). A held value is stated beside the read.
+fn held(
+    session: &Session,
+    line: &r2engine::query::Line,
+    next_call: Option<u64>,
+) -> (String, Roles) {
     use r2engine::query::{AnnotationKind, Mark, Standing};
     let indirect = line
         .annotations
@@ -326,7 +338,10 @@ fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>)
             _ => note(session, line.address, &annotation.kind, next_call),
         };
         let standing = annotation.kind.standing();
-        notes.extend(said.map(|said| (annotation.mark(), &annotation.confidence, standing, said)));
+        // A string the word holds is painted as one; a refusal's words as its reason.
+        let words = matches!(annotation.kind, AnnotationKind::Text { .. }).then_some(Role::String);
+        let mark = annotation.mark();
+        notes.extend(said.map(|said| (mark, &annotation.confidence, standing, said, words)));
         // The callee's own `Never`, a fact of its own beside what the call hands on.
         if let AnnotationKind::Call {
             noreturn: Some(ref never),
@@ -339,19 +354,44 @@ fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>)
                 confidence,
                 Standing::Fact,
                 "noreturn".into(),
+                None,
             ));
         }
     }
     notes.sort_by(|a, b| Mark::weakest_first((a.0, a.1), (b.0, b.1)));
-    let spelled = notes.into_iter().map(|(mark, confidence, standing, said)| {
+    let mut text = String::new();
+    let mut roles = Roles::new();
+    for (mark, confidence, standing, said, words) in notes {
+        text.push_str(" ; ");
+        noted(&mut text, &mut roles, mark, &said, words);
         // A refusal or an unknown stands on no basis, so none is printed.
-        let basis = match session.proof && standing == Standing::Fact {
-            true => format!(" ({confidence})"),
-            false => String::new(),
-        };
-        format!(" ; {} {said}{basis}", mark.cell())
-    });
-    spelled.collect()
+        if session.proof && standing == Standing::Fact {
+            text.push_str(&format!(" ({confidence})"));
+        }
+    }
+    (text, roles)
+}
+
+/// `M words` appended to `text`: the mark cell in its proof role, and the words in `ProofReason`
+/// after a refusal, else in `words`. `afi` and the listing write notes through this one function.
+pub(crate) fn noted(
+    text: &mut String,
+    roles: &mut Roles,
+    mark: r2engine::query::Mark,
+    said: &str,
+    words: Option<Role>,
+) {
+    let at = text.len();
+    text.push(mark.cell());
+    roles.extend(Role::marked(mark.cell()).map(|role| (at..text.len(), role)));
+    text.push(' ');
+    let at = text.len();
+    text.push_str(said);
+    let words = match mark {
+        r2engine::query::Mark::Refused => Some(Role::ProofReason),
+        _ => words,
+    };
+    roles.extend(words.map(|role| (at..text.len(), role)));
 }
 
 /// What the program calls the address a word holds, after a space, or nothing where it calls it nothing.

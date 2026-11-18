@@ -1601,14 +1601,14 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
     let roles = match (&rendering.response.output, session.paints()) {
-        (r2engine::EngineRendering::Function(rendered), true) => {
-            Some(crate::listing::c_roles(rendered.emission().roles()))
+        (r2engine::EngineRendering::Function(rendered), Some(depth)) => {
+            Some((crate::listing::c_roles(rendered.emission().roles()), depth))
         }
         _ => None,
     };
     let text = rendering.response.output.into_text();
     let mut out = match roles {
-        Some(roles) => r2s_tui::theme::ansi(&text, &roles),
+        Some((roles, depth)) => r2s_tui::theme::ansi(&text, &roles, depth),
         None => text,
     };
     // A callee whose analysis panicked is a defect in the engine, not a fact

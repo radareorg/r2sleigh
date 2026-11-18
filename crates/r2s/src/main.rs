@@ -105,8 +105,9 @@ fn main() {
     };
     // Colour is for a person: a terminal, and nobody who asked for none
     // (https://no-color.org). Anything a program reads gets plain text.
-    session.color = std::io::stdout().is_terminal()
+    let painted = std::io::stdout().is_terminal()
         && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+    session.color = u8::from(painted);
     for setting in &cli.config {
         if let Err(message) = config::run(&mut session, setting) {
             eprintln!("r2s: {message}");

@@ -4,6 +4,7 @@
 //! them here are left out, so a diff reports a missing line, not a wrong one.
 
 use r2engine::program::info::{Argument, Local};
+use r2engine::query::Mark;
 
 use crate::commands::parse_number;
 use crate::session::Session;
@@ -42,7 +43,14 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         let carrier = (unproven.carrier)
             .and_then(|storage| session.program.spell_storage(entry, storage))
             .unwrap_or_else(|| "?".to_owned());
-        format!("result: unproven ; ! {carrier}, {}", unproven.cause_name())
+        let mut row = "result: unproven ; ".to_owned();
+        let mut roles = r2s_tui::theme::Roles::new();
+        let said = format!("{carrier}, {}", unproven.cause_name());
+        crate::listing::noted(&mut row, &mut roles, Mark::Refused, &said, None);
+        match session.paints() {
+            Some(depth) => r2s_tui::theme::ansi(&row, &roles, depth),
+            None => row,
+        }
     }));
     out.extend([
         format!("minaddr: {:#010x}", info.min_addr()),

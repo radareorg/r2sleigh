@@ -39,16 +39,13 @@ pub(crate) const KEYS: &[Key] = &[
     },
     Key {
         name: "scr.color",
-        summary: "enable colors (0: none, 1: ansi)",
-        get: |session| u8::from(session.color).to_string(),
+        summary: "enable colors (0: none, 1: ansi, 2: 256 colors, 3: truecolor)",
+        get: |session| session.color.to_string(),
         set: |session, value| {
+            // radare2's four levels (`libr/core/cconfig.c:4997`); each is one column of the theme table.
             session.color = match value {
-                "0" => false,
-                "1" => true,
-                // The palette is the sixteen ANSI colours; a deeper level would
-                // be accepted and then painted as this one.
-                "2" | "3" => return Err("scr.color: only 1, ansi colour, is painted".to_owned()),
-                _ => return Err(format!("scr.color takes 0 or 1, not '{value}'")),
+                "0" | "1" | "2" | "3" => value.parse().expect("one digit"),
+                _ => return Err(format!("scr.color takes 0 to 3, not '{value}'")),
             };
             Ok(())
         },

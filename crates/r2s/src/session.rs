@@ -13,9 +13,9 @@ pub struct Session {
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
-    /// Whether listings are painted, `scr.color`: on for a terminal unless
-    /// `NO_COLOR` says otherwise.
-    pub color: bool,
+    /// How listings are painted, `scr.color`: 0 none, 1 sixteen colours, 2 256, 3 truecolor;
+    /// 1 for a terminal unless `NO_COLOR` says otherwise.
+    pub color: u8,
     /// Whether a grep reads the output of the statement running, which an
     /// escape would split. Set for one statement, never a setting.
     pub grepped: bool,
@@ -30,7 +30,7 @@ impl Session {
         let image = Image::open(path).map_err(|error| error.to_string())?;
         let program = OpenProgram::of(Opened::of(image));
         Ok(Self {
-            color: false,
+            color: 0,
             grepped: false,
             bytes: true,
             proof: false,
@@ -40,9 +40,12 @@ impl Session {
         })
     }
 
-    /// Whether what the running statement prints is painted.
-    pub const fn paints(&self) -> bool {
-        self.color && !self.grepped
+    /// The depth what the running statement prints is painted at, where it is painted.
+    pub const fn paints(&self) -> Option<r2s_tui::theme::Depth> {
+        match self.grepped {
+            true => None,
+            false => r2s_tui::theme::Depth::of(self.color),
+        }
     }
 
     /// The binary as the container states it.
