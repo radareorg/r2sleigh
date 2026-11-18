@@ -71,6 +71,8 @@ struct Tables<'a> {
     writes: &'a [LoaderWrite],
     sections: Vec<(u64, &'a [u8])>,
     little: bool,
+    /// The image's pointer size, an `absptr` field's width.
+    pointer: usize,
 }
 
 impl Tables<'_> {
@@ -115,7 +117,7 @@ impl Tables<'_> {
         let Some(bytes) = self.bytes(at) else {
             return (Box::default(), LsdaRead::Refused(LsdaRefusal::Unmapped));
         };
-        match crate::lsda::call_sites(bytes, at, frame, self.little) {
+        match crate::lsda::call_sites(bytes, at, frame, self.little, self.pointer) {
             Ok(ranges) => (ranges, LsdaRead::Read(row)),
             Err(refusal) => (Box::default(), LsdaRead::Refused(refusal)),
         }
@@ -162,6 +164,7 @@ pub(crate) fn read(
             .filter_map(|section| Some((section.address(), section.data().ok()?)))
             .collect(),
         little: endian == gimli::RunTimeEndian::Little,
+        pointer: usize::from(address_size),
     };
     let reading = Reading { call, tables };
     let mut frames = UnwindFrames::default();

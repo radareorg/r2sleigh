@@ -9,18 +9,21 @@ use r2abi::frames::{CallSiteRange, LsdaRefusal};
 const OMIT: u8 = 0xff;
 
 /// The call-site ranges of the table at `at`, whose bytes from there are `bytes`, for the frame
-/// covering `frame`: absolute, sorted by start. O(table bytes).
+/// covering `frame` of an image whose pointers are `pointer` bytes: absolute, sorted by start.
+/// O(table bytes).
 pub(crate) fn call_sites(
     bytes: &[u8],
     at: u64,
     frame: Range<u64>,
     little: bool,
+    pointer: usize,
 ) -> Result<Box<[CallSiteRange]>, LsdaRefusal> {
     let mut read = Reader {
         bytes,
         at: 0,
         base: at,
         little,
+        pointer,
     };
     // `info->Start` is `_Unwind_GetRegionStart`, the frame's first address; LPStart defaults to it.
     let lpstart = match read.byte()? {
@@ -74,6 +77,8 @@ struct Reader<'a> {
     /// The address of `bytes[0]`, which a pc-relative LPStart is measured from.
     base: u64,
     little: bool,
+    /// The image's pointer size, which `DW_EH_PE_absptr` reads (GCC `unwind-pe.h`, `sizeof (void *)`).
+    pointer: usize,
 }
 
 impl Reader<'_> {
@@ -152,7 +157,8 @@ impl Reader<'_> {
             0x01 => self.uleb(),
             0x02 => self.fixed(2, false),
             0x03 => self.fixed(4, false),
-            0x04 | 0x00 => self.fixed(8, false),
+            0x00 => self.fixed(self.pointer, false),
+            0x04 => self.fixed(8, false),
             0x09 => self.sleb(),
             0x0a => self.fixed(2, true),
             0x0b => self.fixed(4, true),
@@ -161,8 +167,7 @@ impl Reader<'_> {
         }
     }
 
-    /// An LPStart: absolute or pc-relative, never indirect; an absolute pointer is eight bytes, as
-    /// every architecture this reads states a 64-bit `absptr` only where its pointers are.
+    /// An LPStart: absolute or pc-relative, never indirect.
     fn pointer(&mut self, encoding: u8) -> Result<u64, LsdaRefusal> {
         let place = self.base.wrapping_add(self.at as u64);
         let value = self.value(encoding & 0x0f)?;
@@ -184,7 +189,7 @@ mod tests {
         let table = [
             0xff, 0xff, 0x01, 0x09, 0x2f, 0x0f, 0x00, 0x00, 0x44, 0x05, 0x90, 0x0b, 0x00,
         ];
-        let ranges = call_sites(&table, 0x7684d5, 0x1dc0a0..0x1dc690, true).unwrap();
+        let ranges = call_sites(&table, 0x7684d5, 0x1dc0a0..0x1dc690, true, 8).unwrap();
         assert_eq!(ranges.len(), 2);
         assert_eq!(
             (ranges[0].start, ranges[0].end, ranges[0].pad),
@@ -201,10 +206,23 @@ mod tests {
         let table = [
             0xff, 0xff, 0x01, 0x05, 0x2f, 0x0f, 0x00, 0x00, 0x44, 0x05, 0x90, 0x0b, 0x00,
         ];
-        let read = call_sites(&table, 0, 0x1dc0a0..0x1dc690, true);
+        let read = call_sites(&table, 0, 0x1dc0a0..0x1dc690, true, 8);
         assert_eq!(read, Err(LsdaRefusal::Length));
         let outside = [0xff, 0xff, 0x01, 0x04, 0x2f, 0x0f, 0x00, 0x00];
-        let read = call_sites(&outside, 0, 0x1dc0a0..0x1dc0b0, true);
+        let read = call_sites(&outside, 0, 0x1dc0a0..0x1dc0b0, true, 8);
         assert_eq!(read, Err(LsdaRefusal::RangeOutsideFrame));
+    }
+
+    /// A 32-bit image's absolute LPStart is four bytes: `absptr` is the image's pointer size.
+    #[test]
+    fn an_absolute_lpstart_is_the_images_pointer_size() {
+        let table = [
+            0x00, 0x00, 0x10, 0x00, 0x00, 0xff, 0x01, 0x04, 0x02, 0x05, 0x10, 0x00,
+        ];
+        let ranges = call_sites(&table, 0x2000, 0x1000..0x1100, true, 4).unwrap();
+        assert_eq!(
+            (ranges[0].start, ranges[0].end, ranges[0].pad),
+            (0x1002, 0x1007, Some(0x1010))
+        );
     }
 }
