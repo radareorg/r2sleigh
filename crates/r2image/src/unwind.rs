@@ -163,6 +163,7 @@ pub(crate) fn read(
             .collect(),
         little: endian == gimli::RunTimeEndian::Little,
     };
+    let reading = Reading { call, tables };
     let mut frames = UnwindFrames::default();
     if let Some((address, data)) = section(".eh_frame") {
         let mut eh_frame = gimli::EhFrame::new(data, endian);
@@ -173,7 +174,7 @@ pub(crate) fn read(
             data,
             targets,
         });
-        read_section(&eh_frame, &bases, call, at, &tables, &mut frames);
+        read_section(&eh_frame, &bases, at, &reading, &mut frames);
     }
     if let Some((address, data)) = section(".debug_frame") {
         let mut debug_frame = gimli::DebugFrame::new(data, endian);
@@ -183,23 +184,29 @@ pub(crate) fn read(
             data,
             targets,
         });
-        read_section(&debug_frame, &bases, call, at, &tables, &mut frames);
+        read_section(&debug_frame, &bases, at, &reading, &mut frames);
     }
     frames.seal_pads();
     frames
 }
 
+/// What every FDE of either section is read with: the call state its rows read, the tables its LSDA reads.
+struct Reading<'a> {
+    call: Option<CallState>,
+    tables: Tables<'a>,
+}
+
 fn read_section<'a, S>(
     section: &S,
     bases: &gimli::BaseAddresses,
-    call: Option<CallState>,
     relocated: Option<Placed<'_>>,
-    tables: &Tables<'_>,
+    reading: &Reading<'_>,
     frames: &mut UnwindFrames,
 ) where
     S: gimli::UnwindSection<gimli::EndianSlice<'a, gimli::RunTimeEndian>>,
     S::Offset: gimli::UnwindOffset<usize>,
 {
+    let Reading { call, ref tables } = *reading;
     let mut context = gimli::UnwindContext::new();
     let mut entries = section.entries(bases);
     loop {

@@ -540,12 +540,12 @@ impl<S: Source + 'static> OpenProgram<S> {
             let mut edges = edges_of(&successors, dispatch, |target| starts.contains(&target));
             let calls = unwinds.partition_point(|(call, _)| *call < address)
                 ..unwinds.partition_point(|(call, _)| *call < address + size);
-            for &(_, pad) in &unwinds[calls] {
-                let edge = GraphEdge {
-                    target: pad,
-                    kind: EdgeKind::Unwind,
-                };
-                if starts.contains(&pad) && !edges.contains(&edge) {
+            let pads = unwinds[calls].iter().map(|&(_, target)| GraphEdge {
+                target,
+                kind: EdgeKind::Unwind,
+            });
+            for edge in pads.filter(|edge| starts.contains(&edge.target)) {
+                if !edges.contains(&edge) {
                     edges.push(edge);
                 }
             }
@@ -1042,17 +1042,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 (!calls.is_empty()).then(|| (*entry, calls.clone()))
             })
             .collect();
-        // O(call edges): each walked body's direct call targets, inverted.
-        let mut callers = BTreeMap::<u64, Vec<u64>>::new();
-        let mut tail_callers = BTreeMap::<u64, Vec<u64>>::new();
-        for (entry, walk) in &found.walks {
-            for &callee in walk.as_ref().map(|walk| walk.calls()).into_iter().flatten() {
-                callers.entry(callee).or_default().push(*entry);
-            }
-            for callee in walk.as_ref().into_iter().flat_map(|walk| walk.tail_calls()) {
-                tail_callers.entry(callee).or_default().push(*entry);
-            }
-        }
+        let (callers, tail_callers) = inverted(&found.walks);
         let mut after_exits = (found.walks.values())
             .filter_map(|walk| walk.as_ref().ok())
             .flat_map(|walk| walk.exits_after())
@@ -1085,6 +1075,26 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             unwinding,
         })))
     }
+}
+
+/// Each callee's callers.
+type Inverted = BTreeMap<u64, Vec<u64>>;
+
+/// O(call edges): each walked body's direct call targets and tail call targets, inverted.
+fn inverted(
+    walks: &BTreeMap<u64, Result<super::returns::BodyWalk, NativeRefusal>>,
+) -> (Inverted, Inverted) {
+    let mut callers = Inverted::new();
+    let mut tail_callers = Inverted::new();
+    for (entry, walk) in walks {
+        for &callee in walk.as_ref().map(|walk| walk.calls()).into_iter().flatten() {
+            callers.entry(callee).or_default().push(*entry);
+        }
+        for callee in walk.as_ref().into_iter().flat_map(|walk| walk.tail_calls()) {
+            tail_callers.entry(callee).or_default().push(*entry);
+        }
+    }
+    (callers, tail_callers)
 }
 
 /// Which instruction set the discovered code at each address is in; empty where the machine has one.

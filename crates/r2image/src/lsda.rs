@@ -108,10 +108,11 @@ impl Reader<'_> {
             value |= i64::from(byte & 0x7f) << shift;
             shift += 7;
             if byte & 0x80 == 0 {
-                if shift < 64 && byte & 0x40 != 0 {
-                    value |= -1i64 << shift;
-                }
-                return Ok(value as u64);
+                let sign = match shift < 64 && byte & 0x40 != 0 {
+                    true => -1i64 << shift,
+                    false => 0,
+                };
+                return Ok((value | sign) as u64);
             }
         }
     }

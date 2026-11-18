@@ -24,21 +24,12 @@ fn piped(binary: PathBuf, script: &str) -> String {
 
 /// `text` with every SGR sequence (`ESC [ ... m`) removed.
 fn unpainted(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => {
-                for c in chars.by_ref() {
-                    if c == 'm' {
-                        break;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    out
+    let mut parts = text.split('\x1b');
+    let first = parts.next().unwrap_or_default().to_owned();
+    parts.fold(first, |mut out, part| {
+        out.push_str(part.split_once('m').map_or("", |(_, rest)| rest));
+        out
+    })
 }
 
 /// Plain mode (D581): a pipe gets no escape byte, and the text a terminal gets with its paint

@@ -327,8 +327,7 @@ pub fn lift_body(
 ) -> Result<Body, BodyError> {
     let lifting = Walk::start(
         entry,
-        disasm,
-        program,
+        Reader { disasm, program },
         dispatched.clone(),
         Keep::Lifts,
         Unwinds::Record,
@@ -345,8 +344,7 @@ pub fn listed_body(
 ) -> Result<(Body, Vec<Decoded>), BodyError> {
     let walk = Walk::start(
         entry,
-        disasm,
-        program,
+        Reader { disasm, program },
         dispatched.clone(),
         Keep::Decodes,
         Unwinds::Walk,
@@ -376,6 +374,13 @@ enum Unwinds {
     Ignore,
     Record,
     Walk,
+}
+
+/// The decoder and the program a walk reads its instructions through, passed as one.
+#[derive(Clone, Copy)]
+struct Reader<'a> {
+    disasm: &'a Disassembler,
+    program: &'a dyn Program,
 }
 
 /// What a walk keeps of each instruction it decodes.
@@ -589,8 +594,7 @@ impl Lifting {
     ) -> Result<Self, BodyError> {
         Walk::start(
             entry,
-            disasm,
-            program,
+            Reader { disasm, program },
             BTreeMap::new(),
             Keep::Lifts,
             Unwinds::Ignore,
@@ -652,8 +656,7 @@ impl Trace {
     ) -> Result<Self, BodyError> {
         Walk::start(
             entry,
-            disasm,
-            program,
+            Reader { disasm, program },
             BTreeMap::new(),
             Keep::Nothing,
             if records {
@@ -933,12 +936,12 @@ impl Walk {
     /// Walk the body at `entry`, past every call the program says returns, keeping what `keep` says.
     fn start(
         entry: u64,
-        disasm: &Disassembler,
-        program: &dyn Program,
+        reader: Reader,
         dispatched: BTreeMap<u64, Vec<u64>>,
         keep: Keep,
         unwinding: Unwinds,
     ) -> Result<Self, BodyError> {
+        let Reader { disasm, program } = reader;
         let mut walk = Self {
             entry,
             dispatched,
@@ -1136,7 +1139,7 @@ impl Walk {
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
-        self.run_outside(pending, None, Some(normal), disasm, program);
+        self.run_outside(pending, None, Some(normal), Reader { disasm, program });
     }
 
     /// Walk on from `pending`; `previous` is the lift recorded last where `lifted` keeps none.
@@ -1147,7 +1150,7 @@ impl Walk {
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
-        self.run_outside(pending, previous, None, disasm, program);
+        self.run_outside(pending, previous, None, Reader { disasm, program });
     }
 
     /// Walk on from `pending`, never into an instruction `outside` holds.
@@ -1156,9 +1159,9 @@ impl Walk {
         mut pending: Vec<u64>,
         mut previous: Option<Instruction>,
         outside: Option<&BTreeMap<u64, u32>>,
-        disasm: &Disassembler,
-        program: &dyn Program,
+        reader: Reader,
     ) {
+        let Reader { disasm, program } = reader;
         // Arms wait for every start the instructions state, lowest first: an arm inside an instruction loses to it.
         let mut held = BTreeSet::new();
         loop {
