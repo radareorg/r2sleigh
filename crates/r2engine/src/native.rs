@@ -173,6 +173,9 @@ pub struct CalleeRead {
     /// What the read rests on: its statement's closed world and decision, the reads it consumed,
     /// and its body's own premises; empty only for an alone read of a body that records none (D592).
     pub premises: r2source::Premises,
+    /// What a call's argument mapping onto `interface` rests on: empty only where the body's alone
+    /// read states that same parameter list exactly with no premise (`mapping_premises`, D592).
+    pub mapping: r2source::Premises,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -957,7 +960,7 @@ fn state_asked(
         });
         if let Some(interface) = &read.interface {
             callees.interfaces.insert(address, interface.clone());
-            (callees.mapped).insert(address, mapping_premises(&read, &read));
+            (callees.mapped).insert(address, read.mapping);
         }
         if let Ok(facts) = &read.facts {
             callees.record_reads(address, facts, program);
@@ -1560,19 +1563,30 @@ impl Stated<'_> {
 
 /// What a call's mapping onto `used`'s interface rests on: nothing where the alone read states that
 /// list exactly with no premise, else `used`'s premises or the closed world (D592). O(parameters).
-fn mapping_premises(alone: &CalleeRead, used: &CalleeRead) -> r2source::Premises {
-    let exact = (alone.interface.as_ref()).filter(|interface| interface.arity().is_exact());
-    let witnessed = match (exact, used.interface.as_ref()) {
+pub(crate) fn mapping_premises(
+    (alone, alone_premises): (Option<&r2ssa::SourceFunctionInterface>, r2source::Premises),
+    (used, used_premises): (Option<&r2ssa::SourceFunctionInterface>, r2source::Premises),
+) -> r2source::Premises {
+    let exact = alone.filter(|interface| interface.arity().is_exact());
+    let witnessed = match (exact, used) {
         (Some(stated), Some(interface)) => {
-            alone.premises.is_empty() && stated.parameters() == interface.parameters()
+            alone_premises.is_empty() && stated.parameters() == interface.parameters()
         }
         _ => false,
     };
-    match (witnessed, used.premises.is_empty()) {
+    match (witnessed, used_premises.is_empty()) {
         (true, _) => r2source::Premises::new(),
         (false, true) => [r2source::Premise::ClosedWorld].into_iter().collect(),
-        (false, false) => used.premises,
+        (false, false) => used_premises,
     }
+}
+
+/// A read's mapping onto its own interface: the read is its own alone read (D592).
+fn own_mapping(
+    interface: Option<&r2ssa::SourceFunctionInterface>,
+    premises: r2source::Premises,
+) -> r2source::Premises {
+    mapping_premises((interface, premises), (interface, premises))
 }
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md):
@@ -1683,6 +1697,7 @@ pub(crate) fn callee_read(
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
                 premises: stated.premises(),
+                mapping: own_mapping(None, stated.premises()),
             };
         }
     };
@@ -1757,6 +1772,7 @@ fn read_of(
                 interface: None,
                 facts: Err(reason),
                 premises: stated,
+                mapping: own_mapping(None, stated),
             };
         }
     };
@@ -1777,6 +1793,7 @@ fn read_of(
     let mut premises = stated;
     premises.extend(artifact.shared_artifact().function().premises_with_result());
     CalleeRead {
+        mapping: own_mapping(interface.as_ref(), premises),
         interface,
         facts,
         premises,
@@ -1814,10 +1831,7 @@ fn read_callees(
         // Taking the interface keeps the call rendered as a call.
         if let Some(interface) = &read.interface {
             callees.interfaces.insert(*address, interface.clone());
-            let alone = native.program.callee_statement(*address, &mut || {
-                read_callee(native, target, *address, ptr_bits)
-            });
-            (callees.mapped).insert(*address, mapping_premises(&alone, &read));
+            (callees.mapped).insert(*address, read.mapping);
         }
         match &read.facts {
             Ok(derived) => {
@@ -2016,11 +2030,7 @@ impl Callees {
         for (owner, read) in owners {
             if let Ok(facts) = &read.facts {
                 self.record(*owner, facts, program);
-                // A statement read for an owner's result or arity rests on what its read does.
-                let closed = r2source::Premises::from_iter([r2source::Premise::ClosedWorld]);
-                let mut premises = read.premises;
-                premises.extend(closed.iter());
-                self.mapped.insert(*owner, premises);
+                self.mapped.insert(*owner, read.mapping);
             }
         }
     }

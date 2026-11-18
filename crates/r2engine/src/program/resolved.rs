@@ -239,7 +239,7 @@ fn outside_resolved<S: Source + 'static>(
         asks: true,
         decided,
     };
-    Shared(Arc::new(callee_read(db, node, stated)))
+    Shared(Arc::new(resealed(alone, callee_read(db, node, stated))))
 }
 
 /// A function read alone, again in the closed world where its `CallBoundary` decides its result.
@@ -262,7 +262,14 @@ fn closed_alone<S: Source + 'static>(
         asks: true,
         decided: Some(decided),
     };
-    Shared(Arc::new(callee_read(db, node, stated)))
+    Shared(Arc::new(resealed(alone, callee_read(db, node, stated))))
+}
+
+/// A read made again against what is stated of it: its mapping is the alone read's witness (D592).
+fn resealed(alone: &Shared<CalleeRead>, mut read: CalleeRead) -> CalleeRead {
+    let alone = (alone.0.interface.as_ref(), alone.0.premises);
+    read.mapping = crate::native::mapping_premises(alone, (read.interface.as_ref(), read.premises));
+    read
 }
 
 fn stopped(read: &CalleeRead) -> bool {
@@ -274,6 +281,7 @@ fn stopped_read() -> Shared<CalleeRead> {
         interface: None,
         facts: Err(Unreadable::Stopped),
         premises: r2source::Premises::from_iter([r2source::Premise::ClosedWorld]),
+        mapping: r2source::Premises::from_iter([r2source::Premise::ClosedWorld]),
     }))
 }
 
@@ -683,6 +691,7 @@ mod tests {
             interface: Some(interface),
             facts: Err(Unreadable::NotWalked),
             premises: r2source::Premises::new(),
+            mapping: r2source::Premises::new(),
         }
     }
 

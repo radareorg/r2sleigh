@@ -369,10 +369,16 @@ pub(super) fn callee_read<S: Source + 'static>(
     stated: Stated<'_>,
 ) -> CalleeRead {
     let premises = stated.premises();
+    let closed = r2source::Premises::from_iter([r2source::Premise::ClosedWorld]);
     let unread = |reason| CalleeRead {
         interface: None,
         facts: Err(reason),
         premises,
+        mapping: if premises.is_empty() {
+            closed
+        } else {
+            premises
+        },
     };
     let view = View::new(db, true);
     let target = view
