@@ -205,6 +205,11 @@ impl Anchored {
         };
         let graph = artifact.graph();
         let decided = matches!(standing, ResultStanding::Decided(_));
+        // A decided result's note stands as `afi`'s row does; any other is a refusal on the convention.
+        let support = match &standing {
+            ResultStanding::Decided(confidence) => confidence.clone(),
+            _ => Confidence::of(Basis::Convention),
+        };
         let convention = artifact.machine_context().return_value_carrier();
         for certificate in &artifact.certificates().returns {
             // A pair returns in both of its registers; a result in memory is no register's.
@@ -217,17 +222,13 @@ impl Anchored {
             if decided && certificate.carrier.is_none() {
                 r2il::refusal_evidence!("result-note", "a decided result no return certifies");
             }
-            // The register rests on the certificate where it names one, else on the convention.
-            let support = match decided && certificate.carrier.is_some() {
-                true => Basis::Certified,
-                false => Basis::Convention,
-            };
             let Some(line) = graph.instruction_for_inst(certificate.at) else {
                 continue;
             };
             for storage in storages {
                 let standing = standing.clone();
-                self.push(line, AnnotationKind::Returns { storage, standing }, support);
+                let returns = AnnotationKind::Returns { storage, standing };
+                self.push(line, returns, support.clone());
             }
         }
     }

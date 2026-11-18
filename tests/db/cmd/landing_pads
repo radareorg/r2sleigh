@@ -30,7 +30,7 @@ num-bbs: 12
 num-instrs: 71
 edges: 11
 signature: r2sleigh_result_u32 sym._Z7guardedi (r2sleigh_word_u32 arg0);
-result: unproven (rax, Written)
+result: unproven ; ! rax, Written
 minaddr: 0x000012f0
 maxaddr: 0x00001407
 is-lineal: true
@@ -60,13 +60,13 @@ EXPECT=<<EOF
             0x00001318      488d45d4       lea rax, [rbp - 0x2c]
             0x0000131c      488945d8       mov qword [rbp - 0x28], rax
             0x00001320      8b45cc         mov eax, dword [rbp - 0x34]
-            0x00001323      89c7           mov edi, eax ; arg1 of 0x1325 (certified)
-            0x00001325      e849ffffff     call sym._Z5riskyi ; sym._Z5riskyi(arg1@rdi) (certified)
+            0x00001323      89c7           mov edi, eax ; * a1
+            0x00001325      e849ffffff     call sym._Z5riskyi ; * (rdi)
             0x0000132a      8b55d4         mov edx, dword [rbp - 0x2c]
             0x0000132d      8d1c10         lea ebx, [rax + rdx]
             0x00001330      488d45d8       lea rax, [rbp - 0x28]
-            0x00001334      4889c7         mov rdi, rax ; arg1 of 0x1337 (certified)
-            0x00001337      e80effffff     call sym._ZN5GuardD1Ev ; sym._ZN5GuardD1Ev(arg1@rdi) (certified)
+            0x00001334      4889c7         mov rdi, rax ; * a1
+            0x00001337      e80effffff     call sym._ZN5GuardD1Ev ; * (rdi)
             0x0000133c      89d8           mov eax, ebx
             0x0000133e      488b55e8       mov rdx, qword [rbp - 0x18]
             0x00001342      64482b1425..   sub rdx, qword fs:[0x28]
@@ -113,12 +113,12 @@ EXPECT=<<EOF
             0x000013ec      e81ffdffff     call sym.imp.__stack_chk_fail
             0x000013f1      4889c7         mov rdi, rax
             0x000013f4      e857fdffff     call sym.imp._Unwind_Resume
-            0x000013f9      e812fdffff     call sym.imp.__stack_chk_fail ; sym.imp.__stack_chk_fail() (certified)
+            0x000013f9      e812fdffff     call sym.imp.__stack_chk_fail ; ^ () ; ^ noreturn
             0x000013fe      4883c430       add rsp, 0x30
             0x00001402      5b             pop rbx
             0x00001403      415c           pop r12
             0x00001405      5d             pop rbp
-            0x00001406      c3             ret ; returns rax (certified)
+            0x00001406      c3             ret ; ! result unproven (rax, Written)
 EOF
 RUN
 
@@ -129,7 +129,7 @@ EXPECT=<<EOF
 sym._Z7guardedi 0x1397 [CALL:--x] call sym.imp.__cxa_begin_catch
 
 1 references to 0x10e0
-; covers 21 functions; 9 unresolved indirect transfers — absence is not proof
+; covers 21 functions; 9 unresolved indirect transfers; absence is not proof
 EOF
 RUN
 
@@ -212,7 +212,7 @@ CMDS=pdd @ sym._Z7guardedi
 EXPECT=<<EOF
 r2sleigh_result_u32 _Z7guardedi(r2sleigh_word_u32 arg0)
 {
-    r2sleigh_result_u32 _Z5riskyi(int32_t);
+    r2sleigh_word_u32 _Z5riskyi(int32_t);
     r2sleigh_result_u64 _ZN5GuardD1Ev(r2sleigh_word_u64*);
     __attribute__((noreturn)) void __stack_chk_fail(void);
 
@@ -265,6 +265,6 @@ EXPECT=<<EOF
 sym.guarded 0xa98 [CALL:--x] bl sym.imp._Unwind_Resume
 
 1 references to 0x860
-; covers 21 functions; 11 unresolved indirect transfers — absence is not proof
+; covers 21 functions; 11 unresolved indirect transfers; absence is not proof
 EOF
 RUN
