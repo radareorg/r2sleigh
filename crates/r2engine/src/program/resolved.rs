@@ -273,6 +273,7 @@ fn stopped_read() -> Shared<CalleeRead> {
     Shared(Arc::new(CalleeRead {
         interface: None,
         facts: Err(Unreadable::Stopped),
+        premises: r2source::Premises::from_iter([r2source::Premise::ClosedWorld]),
     }))
 }
 
@@ -681,6 +682,7 @@ mod tests {
         CalleeRead {
             interface: Some(interface),
             facts: Err(Unreadable::NotWalked),
+            premises: r2source::Premises::new(),
         }
     }
 

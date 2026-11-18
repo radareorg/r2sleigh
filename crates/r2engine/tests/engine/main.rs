@@ -9,6 +9,7 @@ mod arm;
 mod body;
 mod builds;
 mod call_boundary;
+mod call_premises;
 mod call_tables;
 mod chain_switch;
 mod control;

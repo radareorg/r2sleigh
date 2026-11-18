@@ -419,7 +419,7 @@ fn drop_unmentioned_locals(c: &mut CFunction) {
 /// What became of each obligation: D2's account, or every one a gap where D2 did not run.
 fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) -> ObligationLedger {
     let mut ledger = ObligationLedger::open(input.obligations(), input.graph())
-        .with_premises(input.function().premises().clone())
+        .with_premises(input.function().premises_with_result())
         .with_result_premises(
             (input.artifact().machine_context().function_interface())
                 .map_or(&[], r2source::SourceFunctionInterface::closed_premises),

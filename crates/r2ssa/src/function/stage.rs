@@ -171,10 +171,18 @@ impl Prepared {
         self.ir.set_callee_passes(preserved);
     }
 
-    /// The same function, one of its facts resting on `premise`.
-    pub(crate) fn assuming(mut self, premise: r2source::Premise) -> Self {
-        self.ir.record_premise(premise);
+    /// The same function, its result's decision resting on `premise` (D592).
+    pub(crate) fn assuming_result(mut self, premise: r2source::Premise) -> Self {
+        self.ir.record_result_premise(premise);
         self
+    }
+
+    /// What each direct callee's parameter list rests on (D592).
+    pub(crate) fn set_callee_premises(
+        &mut self,
+        premises: std::sync::Arc<std::collections::BTreeMap<u64, r2source::Premises>>,
+    ) {
+        self.ir.set_callee_premises(premises);
     }
 
     /// The same function, its walk having ended at these calls on a model's word.

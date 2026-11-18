@@ -368,9 +368,11 @@ pub(super) fn callee_read<S: Source + 'static>(
     (address, thumb): (u64, bool),
     stated: Stated<'_>,
 ) -> CalleeRead {
+    let premises = stated.premises();
     let unread = |reason| CalleeRead {
         interface: None,
         facts: Err(reason),
+        premises,
     };
     let view = View::new(db, true);
     let target = view

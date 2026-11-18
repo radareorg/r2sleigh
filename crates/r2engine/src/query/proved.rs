@@ -11,7 +11,7 @@ use r2ssa::{
 use super::records::{AnnotationKind, Answered, ArgumentSlot, CallArgument, Operand, Trips};
 use super::result::ResultStanding;
 use crate::native::Prepared;
-use r2source::confidence::{Basis, Confidence, Fact, NeverProof, Premise};
+use r2source::confidence::{Basis, Confidence, Fact, NeverProof};
 
 /// A prepared function, with every claim its certificates anchor at an instruction, by the line it is on.
 pub struct Proved<'a> {
@@ -255,12 +255,16 @@ fn handed(artifact: &SsaArtifact, call: &CallsiteCertificate) -> (Vec<CallArgume
 }
 
 /// What a call's argument mapping rests on past `rung`: an import's arity is its name-found
-/// declaration's; any other callee's holds under the closed world, stated per call by none (D592).
+/// declaration's; any other callee's what the site's certificate states (D592).
 fn mapped(call: &CallsiteCertificate) -> impl Fn(Basis) -> Confidence {
     let imported = call.callee_linkage == r2source::AdvisoryCalleeLinkage::Imported;
+    let premises = call.premises;
     move |rung| match imported {
         true => Confidence::of(rung.max(Basis::Declared)),
-        false => Confidence::of(rung).assuming(Premise::ClosedWorld),
+        false => Confidence {
+            basis: rung,
+            premises,
+        },
     }
 }
 

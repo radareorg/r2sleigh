@@ -1871,7 +1871,7 @@ impl EngineSession {
         let premises = sealed
             .trusted_ssa
             .as_ref()
-            .map(|ssa| ssa.artifact().function().premises().clone())
+            .map(|ssa| ssa.artifact().function().premises_with_result())
             .unwrap_or_default();
         EngineDecompileResponse {
             output,

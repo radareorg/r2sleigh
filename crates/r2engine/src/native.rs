@@ -170,6 +170,9 @@ pub struct CalleeRead {
     /// preparation cannot be certified still proved.
     pub interface: Option<r2ssa::SourceFunctionInterface>,
     pub facts: Result<CalleeFacts, Unreadable>,
+    /// What the read rests on: its statement's closed world and decision, the reads it consumed,
+    /// and its body's own premises; empty only for an alone read of a body that records none (D592).
+    pub premises: r2source::Premises,
 }
 
 /// Everything about the machine that does not change between functions.
@@ -954,6 +957,7 @@ fn state_asked(
         });
         if let Some(interface) = &read.interface {
             callees.interfaces.insert(address, interface.clone());
+            (callees.mapped).insert(address, mapping_premises(&read, &read));
         }
         if let Ok(facts) = &read.facts {
             callees.record_reads(address, facts, program);
@@ -1532,6 +1536,46 @@ pub(crate) struct Stated<'a> {
     pub(crate) decided: Option<Option<r2source::SourceClosedDecision>>,
 }
 
+impl Stated<'_> {
+    /// What a read built from this statement rests on before its body's own premises: the closed
+    /// world and its decision's wherever an owner, a member, a decision or the closed world is stated.
+    pub(crate) fn premises(&self) -> r2source::Premises {
+        let stated = self.world == crate::program::World::Closed
+            || !self.owners.is_empty()
+            || !self.assumed.is_empty()
+            || self.decided.is_some();
+        let mut premises = r2source::Premises::new();
+        if stated {
+            premises.insert(r2source::Premise::ClosedWorld);
+        }
+        if let Some(Some(decision)) = self.decided {
+            premises.extend(decision.premises().iter().copied());
+        }
+        for (_, read) in self.owners {
+            premises.extend(read.premises.iter());
+        }
+        premises
+    }
+}
+
+/// What a call's argument mapping rests on where `used` states its callee's interface: nothing
+/// where the alone read states that same parameter list exactly with no premise (the witness),
+/// else the used read's premises, the closed world where it states none (D592). O(parameters).
+fn mapping_premises(alone: &CalleeRead, used: &CalleeRead) -> r2source::Premises {
+    let exact = (alone.interface.as_ref()).filter(|interface| interface.arity().is_exact());
+    let witnessed = match (exact, used.interface.as_ref()) {
+        (Some(stated), Some(interface)) => {
+            alone.premises.is_empty() && stated.parameters() == interface.parameters()
+        }
+        _ => false,
+    };
+    match (witnessed, used.premises.is_empty()) {
+        (true, _) => r2source::Premises::new(),
+        (false, true) => [r2source::Premise::ClosedWorld].into_iter().collect(),
+        (false, false) => used.premises,
+    }
+}
+
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md):
 /// built once, restated where a callee it asks states itself (D376), then sealed.
 fn resolved_alone(
@@ -1553,6 +1597,9 @@ fn resolved_alone(
             imports.writes.insert(*member, writes.clone());
         }
         imports.interfaces.insert(*member, interface.clone());
+        // A member's arity is the cycle's assumption, which holds in the closed world.
+        let closed = [r2source::Premise::ClosedWorld].into_iter().collect();
+        imports.mapped.insert(*member, closed);
     }
     let unreadable = |refusal: NativeRefusal| match refusal.stopped() {
         true => Unreadable::Stopped,
@@ -1636,16 +1683,19 @@ pub(crate) fn callee_read(
             return CalleeRead {
                 interface: None,
                 facts: Err(Unreadable::NotPrepared),
+                premises: stated.premises(),
             };
         }
     };
     let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    let premises = stated.premises();
     let resolved = crate::isolation::isolated(|| {
         resolved_alone(&native, target, address, ptr_bits, walked, stated)
     });
     read_of(
         &native,
         resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
+        premises,
     )
 }
 
@@ -1685,17 +1735,29 @@ fn read_callee(
     address: u64,
     ptr_bits: u32,
 ) -> CalleeRead {
-    read_of(native, prepared_callee(native, target, address, ptr_bits))
+    // Prepared against its imports alone: no statement, so only its body's premises.
+    let alone = r2source::Premises::new();
+    read_of(
+        native,
+        prepared_callee(native, target, address, ptr_bits),
+        alone,
+    )
 }
 
-/// What a resolved callee proves, derived under isolation against the imports it calls.
-fn read_of(native: &Native<'_>, resolved: Result<Resolution, Unreadable>) -> CalleeRead {
+/// What a resolved callee proves, derived under isolation against the imports it calls; `stated`
+/// is what its statement rests on.
+fn read_of(
+    native: &Native<'_>,
+    resolved: Result<Resolution, Unreadable>,
+    stated: r2source::Premises,
+) -> CalleeRead {
     let artifact = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
             return CalleeRead {
                 interface: None,
                 facts: Err(reason),
+                premises: stated,
             };
         }
     };
@@ -1713,7 +1775,13 @@ fn read_of(native: &Native<'_>, resolved: Result<Resolution, Unreadable>) -> Cal
         Ok(None) => Err(Unreadable::NothingProved),
         Err(panicked) => Err(Unreadable::Panicked(panicked)),
     };
-    CalleeRead { interface, facts }
+    let mut premises = stated;
+    premises.extend(artifact.shared_artifact().function().premises_with_result());
+    CalleeRead {
+        interface,
+        facts,
+        premises,
+    }
 }
 
 fn read_callees(
@@ -1747,6 +1815,10 @@ fn read_callees(
         // Taking the interface keeps the call rendered as a call.
         if let Some(interface) = &read.interface {
             callees.interfaces.insert(*address, interface.clone());
+            let alone = native.program.callee_statement(*address, &mut || {
+                read_callee(native, target, *address, ptr_bits)
+            });
+            (callees.mapped).insert(*address, mapping_premises(&alone, &read));
         }
         match &read.facts {
             Ok(derived) => {
@@ -1898,6 +1970,8 @@ pub(crate) fn restate(
 #[derive(Default)]
 struct Callees {
     interfaces: BTreeMap<u64, r2source::SourceFunctionInterface>,
+    /// What each interface's parameter list rests on (`mapping_premises`, D592).
+    mapped: BTreeMap<u64, r2source::Premises>,
     preserved: CalleePreservedCarriers,
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
@@ -1924,6 +1998,7 @@ impl Callees {
     ) -> r2ssa::CalleeEvidence {
         r2ssa::CalleeEvidence {
             interfaces: self.interfaces.clone(),
+            mapping_premises: self.mapped.clone(),
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
             writes: self.writes.clone(),
@@ -1942,6 +2017,11 @@ impl Callees {
         for (owner, read) in owners {
             if let Ok(facts) = &read.facts {
                 self.record(*owner, facts, program);
+                // A statement read for an owner's result or arity rests on what its read does.
+                let closed = r2source::Premises::from_iter([r2source::Premise::ClosedWorld]);
+                let mut premises = read.premises;
+                premises.extend(closed.iter());
+                self.mapped.insert(*owner, premises);
             }
         }
     }

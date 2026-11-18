@@ -19,7 +19,14 @@ impl ResultStanding {
     /// The standing of one sealed fact, its confidence the basis `afi` reads (`FunctionInfo`).
     pub fn of(fact: &ReturnTypeFact, artifact: &r2ssa::SsaArtifact) -> Option<Self> {
         Some(match fact {
-            ReturnTypeFact::Decided { .. } => Self::Decided(fact.basis(artifact)?.into()),
+            // A decision the closed world made rests on its premises, as the result's own (D592).
+            ReturnTypeFact::Decided { .. } => {
+                let premises = artifact.function().result_premises().iter().copied();
+                Self::Decided(Confidence {
+                    basis: fact.basis(artifact)?,
+                    premises: premises.collect(),
+                })
+            }
             ReturnTypeFact::Unproven { cause, .. } => Self::Unproven(*cause),
             ReturnTypeFact::Refused(refusal) => Self::Refused(*refusal),
         })
