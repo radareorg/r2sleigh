@@ -430,7 +430,8 @@ impl<S: Source + 'static> OpenProgram<S> {
         let artifact = prepared.artifact().artifact();
         let pads = (self.body_of(entry).ok())
             .zip(self.target(entry).ok())
-            .map(|(walk, target)| walk.pads(target.disasm, &view));
+            // A pad walk that panics leaves the description without pads, as a listing's does.
+            .and_then(|(walk, target)| isolated(|| walk.pads(target.disasm, &view)).ok());
         let read = |sealed: &SealedFunctionAnalysis| {
             let mut info =
                 super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn);

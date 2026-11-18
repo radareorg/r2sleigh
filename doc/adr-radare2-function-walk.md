@@ -121,11 +121,11 @@ As built:
   import the loader writes at the CIE's indirect pointer (`DW.ref.__gxx_personality_v0`); an import's
   name is a declaration, so pad facts rest on `Basis::Declared`. A direct pointer, an unrowed import
   and a relocatable object's personality state no pad (`PersonalityUnstated`).
-- r2engine `body.rs`: each call, returning or not, records its pad (`Body::pads.unwinds`). The pads
-  are walked by a second `Walk` that never writes the first and stops wherever the normal flow
-  decoded. An instruction both flows reach is the normal flow's. `Body::blocks`, `successors` and
-  `calls` are byte for byte what they were; `Body::pads` holds the pad blocks, every unwind edge,
-  and the calls made only there.
+- r2engine `body.rs`: a walk that reads pads records each call's pad, returning or not
+  (`Body::pads.unwinds`). The pads are walked by a second `Walk` that never writes the first and
+  stops wherever the normal flow decoded. An instruction both flows reach is the normal flow's.
+  `Body::blocks`, `successors` and `calls` are byte for byte what they were; `Body::pads` holds the
+  pad blocks and every unwind edge; a call made only in a pad is read from the pads' lines.
 - Only a reader of pads walks them (D599): the survey walks each body's pads once its fixpoint
   has answered every return, so a call only a pad makes is answered (its extents and holders); the
   reference index's listed walk walks them after its normal flow; the analysis' walk records the
