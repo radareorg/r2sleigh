@@ -1,6 +1,5 @@
-//! D572: the symbols of GDB's MiniDebugInfo, the ELF an xz `.gnu_debugdata` section holds, read
-//! whole under a refusing budget (doc/adr-minidebuginfo.md; tests/fixtures/README.md gives the
-//! recipe).
+//! D572: the symbols of the ELF an xz `.gnu_debugdata` holds, read whole under a refusing budget
+//! (doc/adr-minidebuginfo.md; the fixture's recipe is in tests/fixtures/README.md).
 
 use r2image::{Image, MiniDebugRefusal, SymbolKind};
 
@@ -32,9 +31,8 @@ fn debugdata(elf: &[u8]) -> (usize, usize) {
         .expect("the fixture holds .gnu_debugdata")
 }
 
-/// Each unit's static `helper` is no `.dynsym` name and the stripped file has no `.symtab`: only
-/// the MiniDebugInfo states them, at the places and sizes `readelf -sW` reads in the decoded
-/// `.gnu_debugdata` (tests/fixtures/README.md).
+/// Only the MiniDebugInfo names each unit's static `helper`, at the place and size `readelf -sW`
+/// reads in the decoded `.gnu_debugdata` (tests/fixtures/README.md).
 #[test]
 fn a_local_function_only_minidebuginfo_names_is_listed_with_its_place_and_size() {
     let image = Image::parse(fixture()).expect("an elf");

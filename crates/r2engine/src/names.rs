@@ -72,9 +72,8 @@ pub fn first_text_in(segment: &[u8]) -> Option<(usize, &str)> {
     None
 }
 
-/// Text as radare2 escapes it (`r_str_byte_escape`): a simple escape where C names one, `\\`
-/// for a backslash, `\xNN` for any other control character (ESC is `\x1b`). The one speller of
-/// text for notes, `iz`, `izz` and string flags. O(length).
+/// Text as radare2's `r_str_byte_escape` spells it (`\n`, `\\`, `\x1b`): the one speller of text for
+/// notes, `iz`, `izz` and string flags. O(length).
 pub fn escaped(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {

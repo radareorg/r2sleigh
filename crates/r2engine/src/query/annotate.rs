@@ -24,9 +24,8 @@ use r2source::confidence::{Basis, Confidence};
 /// widest there is, and Thumb's aligned `pc` rounds to four bytes.
 const PAGE: u64 = 0x1000;
 
-/// How far on a line forming a number from its own position is lifted again to see whether it
-/// rounds that position: a multiple of every instruction alignment, so an unrounded number moves
-/// by exactly this much, and a page base moves by 0 or [`PAGE`].
+/// How far on a line forming a number from its own position is lifted again: an unrounded number
+/// moves exactly this much, a page base 0 or [`PAGE`] (doc/adr-display.md, "D571, pages").
 const STEP: u64 = 4;
 
 /// The lifts of a run of lines, and the bytes each lift read.
@@ -376,9 +375,8 @@ fn relative_over(
         .collect()
 }
 
-/// Whether the number a line forms from its own position alone rounds it: lifted [`STEP`] bytes
-/// on, an unrounded number moves [`STEP`] bytes, and a page base (AArch64's `adrp`) does not.
-/// A page is no address until an `add` or a load completes it (D571). O(ops of one instruction).
+/// Whether the number a line forms from its own position alone is a page (AArch64's `adrp`): no
+/// address until an `add` or a load completes it. One lift of one instruction.
 fn rounded(
     answered: &Answered<'_>,
     run: &Run<'_>,
@@ -395,10 +393,8 @@ fn rounded(
     there.is_some_and(|there| there.wrapping_sub(here) != STEP)
 }
 
-/// Each constant the lift moves whole into a register or a stored word, which no owner states a
-/// use of, where the static data it would address reads as terminated text: an unknown note,
-/// no claim that the value is an address (D571). A constant an arithmetic, compare or mask op
-/// reads is not moved whole. O(ops of one instruction).
+/// The text at each constant the lift moves whole and no claim uses: an unknown note, no claim the
+/// value is an address (doc/adr-display.md, "D571, immediates"). O(ops of one instruction).
 fn unclaimed_text(
     memory: &Memory<'_>,
     lift: &r2il::R2ILBlock,

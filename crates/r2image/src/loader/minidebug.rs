@@ -1,6 +1,5 @@
 //! `.gnu_debugdata`, GDB's MiniDebugInfo: an xz stream holding an ELF whose `.symtab` lists the
-//! function symbols the dynamic table lacks (doc/adr-minidebuginfo.md). Decoded whole under a
-//! refusing budget, or not at all.
+//! functions the dynamic table lacks, decoded whole under a refusing budget (adr-minidebuginfo.md).
 
 use std::io::Write;
 
@@ -139,10 +138,8 @@ fn indexed(stream: &[u8]) -> Result<Vec<(u64, u64)>, MiniDebugRefusal> {
     Ok(records)
 }
 
-/// Every LZMA2 chunk header of every block, walked without decoding: lzma-rs decodes a chunk to
-/// exactly the size its header states, so a block whose chunks state other than the index
-/// would decode past or short of it, and is refused before it allocates (LZMA2's chunk layout:
-/// xz-utils `lzma2_decoder.c`). O(compressed / 64 KiB) headers.
+/// Every LZMA2 chunk header, walked undecoded: chunks stating other than the index refuse the
+/// stream before it allocates (adr-minidebuginfo.md). O(compressed / 64 KiB) headers.
 fn chunked(stream: &[u8], records: &[(u64, u64)]) -> Result<(), MiniDebugRefusal> {
     let refuse = MiniDebugRefusal::Container;
     let past = |at: usize| {

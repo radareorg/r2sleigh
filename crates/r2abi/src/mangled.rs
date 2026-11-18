@@ -1,6 +1,5 @@
-//! What an Itanium C++ ABI mangled name states (5.1): its parameters, whose rows return
-//! `Unproven`, and its spelling as `c++filt` prints it. A name this does not parse is refused
-//! whole (doc/adr-call-boundary.md, S13 as built; doc/adr-display.md, "Round 15 as built: names").
+//! An Itanium C++ ABI mangled name's parameters (5.1) and its `c++filt` spelling; a name this does
+//! not parse is refused whole (adr-call-boundary.md, S13; adr-display.md, "Round 15 as built: names").
 
 use std::rc::Rc;
 
@@ -44,9 +43,8 @@ pub struct Mangled {
 }
 
 impl Mangled {
-    /// The name as `c++filt` (GNU binutils, `DMGL_PARAMS | DMGL_ANSI | DMGL_VERBOSE`) prints it,
-    /// or `None` where a production in it is one this does not spell: such a name stays mangled.
-    /// O(name length).
+    /// The name as GNU `c++filt` prints it (`DMGL_PARAMS | DMGL_ANSI | DMGL_VERBOSE`), or `None`
+    /// where a production in it is one this does not spell, so the name stays mangled. O(length).
     pub fn spelled(&self) -> Option<String> {
         let shown = self.shown.as_ref()?;
         let mut printer = Printer::default();
@@ -133,9 +131,8 @@ pub fn parse(name: &str) -> Option<Mangled> {
     })
 }
 
-/// The clone suffixes after an encoding (`.cold`, `.constprop.0`), each as `c++filt` prints it
-/// in `[clone ...]`: `.` and `[a-z0-9_]+`, then `.` and digits any number of times. A suffix
-/// that is not one, or a symbol version after `@`, leaves the name unspelled.
+/// The clone suffixes after an encoding (`.cold`, `.constprop.0`, libiberty `d_clone_suffix`), each
+/// printed in `[clone ...]`; any other suffix, or a version after `@`, leaves the name unspelled.
 fn clone_suffixes(mut rest: &str) -> Option<Vec<String>> {
     let lower = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_';
     let mut clones = Vec::new();
