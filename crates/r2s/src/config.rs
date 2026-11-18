@@ -72,6 +72,24 @@ pub(crate) const KEYS: &[Key] = &[
         },
     },
     Key {
+        name: "asm.rails",
+        summary: "draw a rail per nesting level in pdd (r2s only)",
+        get: |session| session.rails.to_string(),
+        set: |session, value| {
+            session.rails = boolean("asm.rails", value)?;
+            Ok(())
+        },
+    },
+    Key {
+        name: "asm.pdd.addr",
+        summary: "write each pdd line's lowest instruction address (r2s only)",
+        get: |session| session.pdd_addr.to_string(),
+        set: |session, value| {
+            session.pdd_addr = boolean("asm.pdd.addr", value)?;
+            Ok(())
+        },
+    },
+    Key {
         name: "scr.color",
         summary: "enable colors (0: none, 1: ansi, 2: 256 colors, 3: truecolor)",
         get: |session| session.color.to_string(),

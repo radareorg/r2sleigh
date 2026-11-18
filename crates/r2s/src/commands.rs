@@ -1600,16 +1600,33 @@ fn replay_stop(stop: r2engine::query::replay::ReplayStop) -> serde_json::Value {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
-    let roles = match (&rendering.response.output, session.paints()) {
-        (r2engine::EngineRendering::Function(rendered), Some(depth)) => {
-            Some((crate::listing::c_roles(rendered.emission().roles()), depth))
+    let laid = match &rendering.response.output {
+        r2engine::EngineRendering::Function(rendered) if session.rails || session.pdd_addr => {
+            let emission = rendered.emission();
+            let residuals = emission.residuals().len();
+            let notes = crate::rails::notes(session, addr, &rendering.response, residuals);
+            let stated = crate::rails::Stated {
+                text: emission.definition(),
+                indent: emission.indent(),
+                roles: crate::listing::c_roles(emission.roles()),
+                depths: emission.depths(),
+                proof: emission.proof_line(),
+                lowest: emission.lowest_addresses(),
+            };
+            Some(crate::rails::laid(session, &stated, &notes))
         }
-        _ => None,
+        r2engine::EngineRendering::Function(rendered) => {
+            let roles = crate::listing::c_roles(rendered.emission().roles());
+            Some((rendered.emission().definition().to_owned(), roles))
+        }
+        r2engine::EngineRendering::Listing(_) => None,
     };
     let text = rendering.response.output.into_text();
-    let mut out = match roles {
-        Some((roles, depth)) => r2s_tui::theme::ansi(&text, &roles, depth),
-        None => text,
+    // Plain `pdd` is the definition's bytes; the layout is only where a key asks for it (D568).
+    let mut out = match (laid, session.paints()) {
+        (Some((text, roles)), Some(depth)) => r2s_tui::theme::ansi(&text, &roles, depth),
+        (Some((laid, _)), None) if session.rails || session.pdd_addr => laid,
+        _ => text,
     };
     // A callee whose analysis panicked is a defect in the engine, not a fact
     // about the program, so it is printed with the rendering it degraded

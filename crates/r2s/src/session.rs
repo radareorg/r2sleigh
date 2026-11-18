@@ -33,6 +33,10 @@ pub struct Session {
     pub utf8: bool,
     /// The terminal's width, where stdout is one: lines are cut to it. A pipe is never cut.
     pub columns: Option<usize>,
+    /// Whether `pdd` draws a rail per nesting level: `asm.rails` (r2s only), on for a terminal.
+    pub rails: bool,
+    /// Whether `pdd` writes each line's lowest instruction before it: `asm.pdd.addr` (r2s only).
+    pub pdd_addr: bool,
 }
 
 impl Session {
@@ -49,6 +53,8 @@ impl Session {
             cmt_col: 71,
             utf8: true,
             columns: None,
+            rails: false,
+            pdd_addr: false,
             addr: program.start().unwrap_or(0),
             program,
             path: path.to_owned(),

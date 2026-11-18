@@ -894,6 +894,8 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
          asm.lines = true\n\
          asm.lines.width = 10\n\
          asm.cmt.col = 71\n\
+         asm.rails = false\n\
+         asm.pdd.addr = false\n\
          scr.color = 0\n\
          scr.utf8 = true\n\
          \x20           0x00401330      endbr64\n\

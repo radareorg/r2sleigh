@@ -140,13 +140,14 @@ entry.
 
 | Control | Effect | Default |
 |---|---|---|
-| `e scr.color=0..3` | none, 16, 256, truecolor (2 and 3 with D569) | 1 on a tty, 0 in a pipe |
+| `e scr.color=0..3` | none, 16, 256, truecolor (D569) | 1 on a tty, 0 in a pipe |
 | `e scr.utf8` | box rails, or radare2's ASCII rails | true |
 | `e asm.lines`, `asm.lines.width` | flow lanes (D565) | true; 6 at 80 columns |
 | `e asm.bytes` | byte column | true |
 | `e asm.cmt.col` | the `;` column | 71 |
 | `e asm.demangle` | demangled names (D574) | true |
-| `e asm.addr` | `pdd` statement addresses (D568) | false |
+| `e asm.rails` (r2s only) | `pdd` rails, one `│` per level, and the proof comment in the mark grammar (D568) | true on a tty, false in a pipe |
+| `e asm.pdd.addr` (r2s only) | `pdd` statement addresses (D568); radare2's `asm.addr` hides `pd` offsets (`cconfig.c:4301`) | false |
 | `e asm.proof` (r2s only) | the basis word and setter back-links after each note | false |
 | visual `z` (D582) | cycles notes: reader, proof, none | reader |
 | `ao @ addr` (D582) | a `notes:` block with each note in full | |
@@ -305,3 +306,20 @@ tests whether a setter's call is the next call line.
   line, the `?` kind of gap (bytes no body holds needs a range query on
   `Holders`), and the floor's causes in the header (they stay on `pdd`'s proof
   line, whose speller is r2dec's).
+- D568: r2dec's `Emission` states `depths` (one byte per definition line, the
+  indentation `emit_indent` writes), `proof_line` (the line of
+  `/* r2dec proof: ... */`), `indent` (the bytes one level takes) and
+  `lowest_addresses` (each line's lowest instruction, from `lines`, unit
+  numbering less the prelude). r2s `rails.rs` lays the definition out only
+  under `asm.rails` or `asm.pdd.addr`; plain `pdd` prints the definition's
+  bytes, so `census.py:138`, `certify_render.py:98` and the four `r2dec
+  proof:` parsers read what they read. Each level's indentation becomes `│`
+  and three spaces (`Rail`); past 24 levels one `│ N>`. The column is
+  `0x%08x` and a space, blank where a line accounts for no instruction; a
+  blank line takes neither. The proof line gives way to at most 2 lines: the
+  refused and undecided facts (`afi`'s result note, the residual count), then
+  bounds and premises (`afi`'s floor note, the response's premises). Not
+  held: the 160-cell bound. A statement alone exceeds it (plain `pdd` on
+  hashes has 57 lines over 149 cells, branchy 12, shapes 41; bash `main`
+  reaches 2,594 with the proof line and 310 without); a rail never widens a
+  line, so with the column a line is at most 11 cells past its plain width.

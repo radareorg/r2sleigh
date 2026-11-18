@@ -1,0 +1,83 @@
+# `pdd` laid out for a person (D568): a `│` per nesting level, each line's lowest instruction in a
+# 10-cell column, and the proof comment in the mark grammar on at most 2 lines. A pipe's `pdd` is
+# the definition's bytes; these set both keys.
+
+# fnv1a32: a loop inside an if, its proof comment one premise.
+NAME=fnv1a32 rails and addresses
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+ARGS=-e asm.rails=true -e asm.pdd.addr=true
+CMDS=pdd @ sym.fnv1a32
+EXPECT=<<EOF
+           r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
+           {
+           │   uint64_t rsi_1;
+           │   uint64_t rax_2;
+           │   uint64_t rdi_1;
+           │   uint8_t tmp_401348_0_1;
+           │   uint64_t rdi_2;
+           │   uint32_t tmp_lane_401351_3_0_1;
+
+           │   /* * if closed-world */
+           │   {
+0x00401330 │   │   if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
+0x00401365 │   │   │   return (uint32_t)0x811c9dc5U;
+           │   │   } else {
+0x00401339 │   │   │   rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
+           │   │   │   rax_2 = (uint64_t)0x811c9dc5U;
+           │   │   │   rdi_1 = arg0;
+0x00401348 │   │   │   do {
+0x00401348 │   │   │   │   tmp_401348_0_1 = r2sleigh_load_u8((void*)rdi_1);
+0x0040134b │   │   │   │   rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+0x00401351 │   │   │   │   tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)rax_2) * (uint64_t)0x1000193U);
+           │   │   │   │   rax_2 = (uint64_t)(uint32_t)tmp_lane_401351_3_0_1;
+           │   │   │   │   rdi_1 = rdi_2;
+0x00401348 │   │   │   } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
+           │   │   │   {
+0x0040135c │   │   │   │   return (uint32_t)tmp_lane_401351_3_0_1;
+           │   │   │   }
+           │   │   }
+           │   }
+           }
+
+EOF
+RUN
+
+# bool_relay: branches nested 4 levels deep.
+NAME=branchy bool_relay rails and addresses
+FILE=tests/coverage/pinned/branchy_gcc_x64_O0
+ARGS=-e asm.rails=true -e asm.pdd.addr=true
+CMDS=pdd @ sym.bool_relay
+EXPECT=<<EOF
+           r2sleigh_word_u32 bool_relay(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
+           {
+           │   uint32_t tmp_lane_401724_0_1_1;
+           │   uint32_t tmp_lane_401731_0_1_1;
+           │   uint64_t rax_8;
+
+           │   /* * if closed-world */
+           │   {
+0x00401724 │   │   tmp_lane_401724_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0);
+0x00401731 │   │   tmp_lane_401731_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1);
+0x0040170f │   │   if ((uint8_t)((uint32_t)tmp_lane_401724_0_1_1 != (uint32_t)0U) && (uint8_t)((uint32_t)tmp_lane_401731_0_1_1 != (uint32_t)0U)) {
+           │   │   │   rax_8 = 2;
+0x00401763 │   │   │   return (uint32_t)rax_8;
+           │   │   } else {
+           │   │   }
+           │   │   {
+0x0040174a │   │   │   if ((uint8_t)((uint32_t)tmp_lane_401724_0_1_1 == (uint32_t)0U) && (uint8_t)((uint32_t)tmp_lane_401731_0_1_1 == (uint32_t)0U)) {
+           │   │   │   │   rax_8 = 0;
+0x00401763 │   │   │   │   return (uint32_t)rax_8;
+           │   │   │   } else {
+           │   │   │   }
+           │   │   │   {
+           │   │   │   │   rax_8 = 1;
+           │   │   │   }
+           │   │   }
+           │   │   {
+0x00401763 │   │   │   return (uint32_t)rax_8;
+           │   │   }
+           │   }
+           }
+
+EOF
+RUN
