@@ -166,9 +166,8 @@ impl r2engine::native::Program for Decided {
     }
 }
 
-/// Built with and without each closed decision, fnv1a32's loop and a table dispatch state the same
-/// loop, induction and switch certificates, and the decision's premises rest on the result fact
-/// alone (D592's witness).
+/// With and without each closed decision, fnv1a32's loop and a table dispatch state equal loop and
+/// switch certificates, and the decision's premises rest on the result alone (D592's witness).
 #[test]
 fn a_closed_result_moves_no_loop_or_switch_certificate() {
     use r2abi::{CLibrary, ConventionId, Kernel, LibraryRows};
