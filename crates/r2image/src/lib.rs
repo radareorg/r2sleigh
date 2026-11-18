@@ -848,11 +848,11 @@ impl Image {
                 section: symbol.section.index().map(|index| index.0),
                 origin: match dynamic {
                     true => SymbolOrigin {
-                        dynamic: Some(symbol.index),
+                        dynamic: u32::try_from(symbol.index).ok(),
                         ..SymbolOrigin::default()
                     },
                     false => SymbolOrigin {
-                        table: Some(symbol.index),
+                        table: u32::try_from(symbol.index).ok(),
                         ..SymbolOrigin::default()
                     },
                 },
@@ -908,7 +908,7 @@ impl Image {
                 }
                 read.section = symbol.section_index().and_then(outer);
                 read.origin = SymbolOrigin {
-                    minidebug: Some(symbol.index().0),
+                    minidebug: u32::try_from(symbol.index().0).ok(),
                     ..SymbolOrigin::default()
                 };
                 Some(read)
@@ -928,7 +928,7 @@ impl Image {
             import: true,
             binding: Binding::Unstated,
             origin: SymbolOrigin {
-                directory: Some(import.nth),
+                directory: u32::try_from(import.nth).ok(),
                 ..SymbolOrigin::default()
             },
             library: Some(Arc::clone(&import.library)),
@@ -942,7 +942,7 @@ impl Image {
             defined: true,
             binding: Binding::Global,
             origin: SymbolOrigin {
-                directory: Some(export.nth),
+                directory: u32::try_from(export.nth).ok(),
                 ..SymbolOrigin::default()
             },
             library: export.library.clone(),
