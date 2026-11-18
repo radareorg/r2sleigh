@@ -1184,37 +1184,93 @@ pub(crate) fn hands_a_function(
     })
 }
 
-/// The functions a walked body hands to a parameter a declaration calls a function.
+/// The functions a walked body hands to a parameter a declaration calls a function: each constant
+/// its own lift states reaching such a parameter's register at the call (D590). `O((B + E) x k)`.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(name_decides_fact, reason = "table lookup by C identifier")
+)]
 pub(crate) fn handed(
     target: &NativeTarget<'_>,
     program: &dyn Program,
-    body: crate::body::Body,
+    body: &crate::body::Body,
 ) -> Vec<u64> {
     let entry = body.entry;
-    let native = match machine(target) {
-        Ok(machine) => Native {
-            target,
-            program,
-            machine,
-            control: program.control().ssa_execution_control(),
-        },
+    let machine = match machine(target) {
+        Ok(machine) => machine,
         Err(error) => {
             r2il::refusal_evidence!("handed-function", "{entry:#x}: {error}");
             return Vec::new();
         }
     };
-    let walked = native.walked(body);
-    // What reaches a call's argument is the body's: read off the convention's seal, as a table.
-    match native.convention_seal(&walked, &Callees::default(), Restatement::default(), &[]) {
-        Ok(seal) => native.handed_functions(&seal, &walked),
-        Err(error) => {
-            r2il::refusal_evidence!(
-                "handed-function",
-                "{entry:#x}: preparing to read its arguments failed: {error:?}"
+    // Each code parameter's register at each call to an import declared to take one.
+    let mut seeds = Vec::new();
+    let mut named = Vec::new();
+    for (at, block) in body.blocks.iter().enumerate() {
+        for transfer in &block.transfers {
+            let call = matches!(
+                transfer.kind,
+                r2source::AdvisoryCallTransfer::Call | r2source::AdvisoryCallTransfer::CallSlot
             );
-            Vec::new()
+            // A row applies to an import only, never to a body by its name.
+            let callee = (program.import_at(transfer.target)).filter(|_| call);
+            let Some(declared) = callee.and_then(|name| Declared::import(target, name.text()))
+            else {
+                continue;
+            };
+            let registers = |placement: &Placement<'_>| placement.registers(declared);
+            let placed = placing_imports(target, Some(&machine), registers).unwrap_or_default();
+            let parameters = declared.prototype.parameters.iter().zip(&placed);
+            for (index, (parameter, storage)) in parameters.enumerate() {
+                let code = parameter.code_returns(declared.graph).is_some();
+                let (true, Some(storage)) = (code, storage) else {
+                    continue;
+                };
+                let instruction = block.lifted.instruction_of(transfer.op);
+                seeds.push(r2ssa::reaching_constant::Seed {
+                    block: at,
+                    op: transfer.op,
+                    storage: *storage,
+                });
+                named.push((instruction, declared.prototype.name.as_str(), index));
+            }
         }
     }
+    if seeds.is_empty() {
+        return Vec::new();
+    }
+    let start = body
+        .blocks
+        .iter()
+        .position(|block| block.lifted.addr == entry);
+    let edges = (body.blocks.iter().enumerate())
+        .flat_map(|(at, block)| (block.successors.iter()).map(move |(_, address)| (at, *address)));
+    let flow =
+        r2ssa::reaching_constant::Flow::new(&body.blocks, start.unwrap_or(usize::MAX), edges);
+    // A call writes what its convention does not keep, as the seal's call boundary reads it.
+    let call = Some(&*target.call);
+    let writes = |storage| {
+        target.arch.call_effect_on(call, storage)
+            == r2source::convention::CallRegisterEffect::Clobbered
+    };
+    let answers = r2ssa::reaching_constant::reaching_constants(&flow, &writes, &seeds);
+    let mut found = Vec::new();
+    for ((instruction, name, index), answer) in named.iter().zip(answers) {
+        let r2ssa::reaching_constant::Reaching::Constant(address) = answer else {
+            continue;
+        };
+        if address != 0 {
+            let instruction = instruction.unwrap_or(entry);
+            r2il::refusal_evidence!(
+                "handed-function",
+                "{instruction:#x}: {name} argument {index} is {address:#x}"
+            );
+            found.push(address);
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// Whether control comes back from the import at `address`, as its own declaration says, or from a
@@ -3199,82 +3255,6 @@ impl Native<'_> {
             .collect();
         (objects, graph)
     }
-
-    /// What one call operation calls, as the walk's transfer names it: a direct call its
-    /// target, a call through a sealed import slot that import (`CallSlot`, audit W8).
-    #[cfg_attr(
-        dylint_lib = "r2sleigh_lints",
-        allow(name_decides_fact, reason = "table lookup by C identifier")
-    )]
-    fn called_name(
-        &self,
-        sites: &[NativeCall],
-        op: &r2ssa::SSAOp<r2ssa::ValueId>,
-    ) -> Option<(u64, String)> {
-        let instruction = op.call()?.instruction?;
-        let site = sites.iter().find(|site| site.instruction == instruction)?;
-        // A row applies to an import only, never to a body by its name.
-        Some((
-            instruction,
-            self.program.import_at(site.target)?.text().to_owned(),
-        ))
-    }
-
-    /// Addresses this body hands to a parameter a declaration calls a function.
-    ///
-    /// `entry0` never calls `main`. It puts `main` in an argument register and
-    /// calls `__libc_start_main`, whose prototype spells that parameter
-    /// `func`, so the address is a function on the declaration's authority.
-    /// Nothing here guesses: a constant is believed only where a declared type
-    /// says that slot holds a function, and the caller checks it decodes in
-    /// the instruction set the pointer names.
-    fn handed_functions(&self, seal: &r2ssa::TrustedSeal, walked: &Walked) -> Vec<u64> {
-        let sites = call_sites(&walked.body, self.program);
-        let mut found = Vec::new();
-        let graph = seal.graph();
-        for block in &graph.blocks {
-            for &inst in graph.op_insts(block.id) {
-                let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
-                    continue;
-                };
-                let Some((instruction, callee)) = self.called_name(&sites, op) else {
-                    continue;
-                };
-                let Some(declared) = Declared::import(self.target, &callee) else {
-                    continue;
-                };
-                let prototype = declared.prototype;
-                // The convention places each parameter: by class, or by position where shared.
-                let registers = |placement: &Placement<'_>| placement.registers(declared);
-                let placed = placing_imports(self.target, Some(&self.machine), registers);
-                let placed = placed.unwrap_or_default();
-                for (index, (parameter, storage)) in
-                    prototype.parameters.iter().zip(&placed).enumerate()
-                {
-                    let code = parameter.code_returns(declared.graph).is_some();
-                    let (true, Some(storage)) = (code, storage) else {
-                        continue;
-                    };
-                    let Some(address) = (seal.value_reaching(id, *storage))
-                        .and_then(|value| seal.folded_value(value))
-                    else {
-                        continue;
-                    };
-                    if address != 0 {
-                        r2il::refusal_evidence!(
-                            "handed-function",
-                            "{instruction:#x}: {} argument {index} is {address:#x}",
-                            prototype.name
-                        );
-                        found.push(address);
-                    }
-                }
-            }
-        }
-        found.sort_unstable();
-        found.dedup();
-        found
-    }
 }
 
 /// The supervisor calls of a walked body whose number its convention seal folds to a constant a
@@ -4187,7 +4167,7 @@ mod tests {
             premises: accepted_premises(),
         };
         let walked = walk(&target, &HandsAfterADouble, BASE).expect("walks");
-        let handed = handed(&target, &HandsAfterADouble, walked.root.body.clone());
+        let handed = handed(&target, &HandsAfterADouble, &walked.root.body);
         assert_eq!(handed, [0x1020]);
     }
 }

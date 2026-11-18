@@ -140,3 +140,23 @@ As built:
   (`closed-world: unwind flow unread (D598)`): no lane pass reads a call made in a pad.
 - A pad's edge back into the normal flow (a `catch` that returns) lands inside a normal block,
   which is not split: `afb` lists no edge there. Splitting it is D598's, with the pad's entry state.
+
+## Handed reader as built (D590)
+
+Discovery believes a constant a body hands to an import's code parameter (`__libc_start_main`'s
+`main`, `__cxa_throw`'s destructor, `atexit`, `qsort`, `signal`). The read sealed each such body
+against its convention, about 28.4 G of 0pack's 52.6 G `aa` and 18.5 G of pumasim's 61.3 G, to
+fold one register per site.
+
+`r2ssa::reaching_constant` reads the same constant off the walk's own lift: reaching definitions
+over the walked blocks, demanded from each (call, register) seed, then each reaching definition
+folded with `r2il::eval`. A call writes what `Arch::call_effect_on` under the calls' convention
+does not keep; a load, a partial write, the entry value and two definitions meeting answer
+`NotConstant` with that witness. Two definitions of one constant still meet: the seal places a
+phi there and folds it to nothing, so the reader answers as the seal does. `O((B + E) x k)` for
+`k` demanded storages; no SSA, promotion, prep facts or fold table.
+
+Step 0 (`designs/round15/d590-sites.md`): 1,909 sites on the pinned ELF corpus, 1,288 a constant
+in the call's block, 1 across a block edge, 1 through arithmetic on constants, 0 through a
+promoted slot, a load or a non-constant. The differential compared the reader with the seal at
+every (site, parameter) before the seal's call was deleted.

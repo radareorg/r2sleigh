@@ -2108,6 +2108,25 @@ impl SsaArtifact {
             .flatten()
     }
 
+    /// The seal's constant for `storage` before the first call of the block at `block`: the
+    /// oracle the lift-grade reader is tested against (D590).
+    #[cfg(test)]
+    pub(crate) fn folded_before_first_call(
+        &self,
+        block: u64,
+        storage: r2source::CanonicalStorageId,
+    ) -> Option<u64> {
+        let graph = self.sealed.graph();
+        let insts = graph.op_insts(graph.block_id_for_addr(block)?);
+        let call = insts
+            .iter()
+            .find(|inst| graph.op(**inst).is_some_and(SSAOp::is_call))?;
+        let op = graph.op_for_inst(*call)?;
+        let value =
+            crate::semantic::value_reaching(&self.sealed, &self.machine_context, op, storage);
+        self.folded_value(value?)
+    }
+
     /// The constant a value computes to from the graph alone, without what
     /// preparation admitted; one lookup into the table folded at the seal.
     pub(crate) fn bare_folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
