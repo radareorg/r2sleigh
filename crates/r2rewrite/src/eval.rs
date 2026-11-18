@@ -223,6 +223,14 @@ pub fn eval(
                 }
             }
         }
+        TermKind::Rotate { value, count } => {
+            let v = eval(arena, value, leaf);
+            let w = u128::from(width);
+            match eval(arena, count, leaf) % w {
+                0 => v,
+                k => (v << k | v >> (w - k)) & m,
+            }
+        }
         TermKind::Compare {
             op,
             interpretation,

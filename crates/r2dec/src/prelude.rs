@@ -232,6 +232,9 @@ pub enum Helper {
     FloatToBits { bits: u32 },
     /// `LZCOUNT` of an unsigned integer of `bits`: 8, 16, 32 or 64.
     LeadingZeros { bits: u32 },
+    /// An unsigned integer of `bits` (8, 16, 32 or 64) rotated left by a count `0 < k < bits`,
+    /// which rule `shift.rotate` states (ROADMAP D473).
+    RotateLeft { bits: u32 },
     /// A construct the rendering could not prove: it traps if executed.
     Residual(ResidualType),
     /// The identity over an unproven result's carrier of `bits`: the value a return leaves there,
@@ -277,6 +280,11 @@ impl Helper {
         matches!(bits, 8 | 16 | 32 | 64).then_some(Self::LeadingZeros { bits })
     }
 
+    /// The left rotation of an integer of `bits`.
+    pub fn rotate_left(bits: u32) -> Option<Self> {
+        matches!(bits, 8 | 16 | 32 | 64).then_some(Self::RotateLeft { bits })
+    }
+
     /// An atomic helper, where a GCC and Clang builtin states the operation at that width: no
     /// builtin takes a maximum or a minimum, and 128 bits needs a library.
     pub fn atomic(op: AtomicOp, bits: u32, order: AtomicOrder) -> Option<Self> {
@@ -298,6 +306,7 @@ impl Helper {
             Self::FloatFromBits { bits } => format!("r2sleigh_float_from_bits_{bits}"),
             Self::FloatToBits { bits } => format!("r2sleigh_float_to_bits_{bits}"),
             Self::LeadingZeros { bits } => format!("r2sleigh_lzcount_{bits}"),
+            Self::RotateLeft { bits } => format!("r2sleigh_rotl{bits}"),
             Self::Residual(ty) => format!("r2sleigh_residual_{}", ty.tag()),
             Self::Carrier { bits } => format!("r2sleigh_carrier_u{bits}"),
             Self::Load(ty) => format!("r2sleigh_load_{}", ty.tag()),
@@ -360,6 +369,13 @@ impl Helper {
                  \x20   return x == 0 ? {bits}u : (uint32_t)__builtin_clzll(x) - {}u;\n\
                  }}\n",
                 64 - bits
+            ),
+            // Exact for `0 < k < bits`, the only counts the rule states.
+            Self::RotateLeft { bits } => format!(
+                "static inline uint{bits}_t {name}(uint{bits}_t x, uint32_t k)\n\
+                 {{\n\
+                 \x20   return (uint{bits}_t)(x << k) | (uint{bits}_t)(x >> ({bits}u - k));\n\
+                 }}\n"
             ),
             Self::Carrier { bits } => format!(
                 "static inline uint{bits}_t {name}(uint{bits}_t x)\n\
@@ -992,6 +1008,7 @@ pub(crate) mod tests {
         }
         for bits in [8, 16, 32, 64] {
             helpers.insert(Helper::leading_zeros(bits).expect("integer width"));
+            helpers.insert(Helper::rotate_left(bits).expect("integer width"));
         }
         for ty in [
             ResidualType::Void,
@@ -1049,6 +1066,10 @@ int main(void)
     CHECK(r2sleigh_lzcount_16(0) == 16 && r2sleigh_lzcount_16(0x00ff) == 8);
     CHECK(r2sleigh_lzcount_32(0) == 32 && r2sleigh_lzcount_32(1) == 31 && r2sleigh_lzcount_32(0x80000000u) == 0);
     CHECK(r2sleigh_lzcount_64(0) == 64 && r2sleigh_lzcount_64(1) == 63 && r2sleigh_lzcount_64(~(uint64_t)0) == 0);
+    CHECK(r2sleigh_rotl8(0x81, 1) == 0x03 && r2sleigh_rotl8(0x81, 7) == 0xc0);
+    CHECK(r2sleigh_rotl16(0x8001, 4) == 0x0018 && r2sleigh_rotl16(0x1234, 8) == 0x3412);
+    CHECK(r2sleigh_rotl32(0x80000001u, 13) == 0x00003000u && r2sleigh_rotl32(0x12345678u, 31) == 0x091a2b3cu);
+    CHECK(r2sleigh_rotl64(0x8000000000000001ull, 1) == 3 && r2sleigh_rotl64(1, 63) == 0x8000000000000000ull);
     return 0;
 }
 "#;

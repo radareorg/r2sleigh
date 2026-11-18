@@ -3308,14 +3308,16 @@ pub(crate) fn supervisor_halts(
         "{entry:#x}: sealed for its supervisor calls"
     );
     let graph = seal.graph();
-    let enters = |op: &r2ssa::SSAOp<_>| matches!(op, r2ssa::SSAOp::CallOther { userop, .. } if spec.system_calls.contains(userop));
     let mut halts = BTreeMap::new();
     for block in &graph.blocks {
         for &inst in graph.op_insts(block.id) {
             let (Some(op), Some(id)) = (graph.op(inst), graph.op_for_inst(inst)) else {
                 continue;
             };
-            let Some(instruction) = graph.instruction_for_inst(inst).filter(|_| enters(op)) else {
+            let Some(instruction) = graph
+                .instruction_for_inst(inst)
+                .filter(|_| seal.enters_system_call(op))
+            else {
                 continue;
             };
             let value = seal

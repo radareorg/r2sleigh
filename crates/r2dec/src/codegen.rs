@@ -907,6 +907,9 @@ impl<'c> CodeGenerator<'c> {
                     self.token(CRole::Keyword, "case");
                     self.output.push(' ');
                     self.emit_expr(&case.value, 0);
+                    // A chained case's line stands for its test's branch (D474).
+                    let test = case.test.as_ref().map(CExpr::observation_ids);
+                    self.note_observations(&test.unwrap_or_default());
                     self.output.push_str(":\n");
                     self.indent_level += 1;
                     self.emit_stmt_sequence(&case.body);
@@ -1418,6 +1421,7 @@ fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
                 .map(|case| crate::ast::SwitchCase {
                     value: case.value,
                     body: prepare_stmt_sequence_for_emission(case.body),
+                    test: case.test,
                 })
                 .collect(),
             default: default.map(prepare_stmt_sequence_for_emission),

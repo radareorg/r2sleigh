@@ -535,9 +535,14 @@ impl Walker<'_> {
             }
             // A do-while nobody observed cannot say which block its test is.
             CStmt::DoWhile { body, .. } => self.walk_do_while(&[], loop_test(stmt), body, open),
-            CStmt::Switch { cases, default, .. } => {
-                self.walk_switch(open, cases, default.as_deref())
-            }
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => match cases.iter().any(|case| case.test.is_some()) {
+                true => self.walk_chained_switch(open, expr, cases, default.as_deref()),
+                false => self.walk_switch(open, cases, default.as_deref()),
+            },
             // A call the prototype declares `noreturn`, or a transfer the caller says traps, ends the text here.
             CStmt::Expr(_) | CStmt::Gap(_) if (self.role)(stmt) == StatementRole::Ends => {
                 for (id, _) in open {
@@ -897,6 +902,78 @@ impl Walker<'_> {
         exits
     }
 
+    /// Whether `addr` ends in a two-way branch, as a chained case's test block does.
+    fn branches(&self, addr: u64) -> bool {
+        let block = self.cfg.get_block(addr);
+        block.is_some_and(|block| {
+            matches!(block.terminator, BlockTerminator::ConditionalBranch { .. })
+        })
+    }
+
+    /// A switch an equality chain was written as (ROADMAP D474): case i's test block is entered as
+    /// its `if` was, the case on the test's equal edge and the next test or the default on the other.
+    fn walk_chained_switch(
+        &mut self,
+        mut open: Vec<OpenEnd>,
+        expr: &CExpr,
+        cases: &[crate::ast::SwitchCase],
+        default: Option<&[CStmt]>,
+    ) -> Vec<OpenEnd> {
+        self.frames.push(Frame::Switch { breaks: Vec::new() });
+        let (mut carry, mut values) = (Vec::new(), BTreeSet::new());
+        for case in cases {
+            let Some(test) = &case.test else {
+                self.violations.push(Violation::SwitchValue {
+                    block: open
+                        .first()
+                        .map_or(0, |(id, _)| self.occurrences[*id].block),
+                });
+                continue;
+            };
+            let ids = test.observation_ids();
+            self.met.extend(ids.iter());
+            let blocks = (ids.iter().filter(|id| !(self.edge_copy)(**id)))
+                .filter_map(|id| (self.block_of)(*id))
+                .collect::<Vec<_>>();
+            let block = blocks.iter().copied().find(|addr| self.branches(*addr));
+            let Some(block) = block.or_else(|| blocks.first().copied()) else {
+                self.violations.push(Violation::UnownedControl {
+                    kind: "switch",
+                    open: 0,
+                });
+                continue;
+            };
+            let entered = self.enter_block(std::mem::take(&mut open), block);
+            let Some(owner) = self.single_owner(&entered, "switch") else {
+                continue;
+            };
+            let Some((equal, other)) = chained_equality(test.unobserved(), expr, &case.value)
+                .filter(|(value, _, _)| values.insert(*value))
+                .map(|(_, equal, other)| (equal, other))
+            else {
+                self.violations.push(Violation::SwitchValue { block });
+                open = vec![(owner, EdgeLabel::False)];
+                continue;
+            };
+            let mut entering = vec![(owner, equal)];
+            entering.append(&mut carry);
+            carry = self.walk_seq(&case.body, entering);
+            open = vec![(owner, other)];
+        }
+        match default {
+            Some(body) => {
+                open.append(&mut carry);
+                carry = self.walk_seq(body, open);
+            }
+            None => carry.append(&mut open),
+        }
+        let Some(Frame::Switch { breaks }) = self.frames.pop() else {
+            unreachable!("the switch frame pushed above is still on top");
+        };
+        carry.extend(breaks);
+        carry
+    }
+
     fn walk_switch(
         &mut self,
         open: Vec<OpenEnd>,
@@ -944,6 +1021,31 @@ impl Walker<'_> {
         carry.extend(breaks);
         carry
     }
+}
+
+/// A chained case's test as `scrutinee == value` or `!=`, under the lowering's boolean cast: the
+/// literal, the edge label on which the two are equal, and the other label.
+fn chained_equality(
+    test: &CExpr,
+    scrutinee: &CExpr,
+    value: &CExpr,
+) -> Option<(u64, EdgeLabel, EdgeLabel)> {
+    let test = match test.unobserved() {
+        CExpr::Cast { expr, .. } => expr.unobserved(),
+        other => other,
+    };
+    let CExpr::Binary { op, left, right } = test else {
+        return None;
+    };
+    let (equal, other) = match op {
+        crate::ast::BinaryOp::Eq => (EdgeLabel::True, EdgeLabel::False),
+        crate::ast::BinaryOp::Ne => (EdgeLabel::False, EdgeLabel::True),
+        _ => return None,
+    };
+    let same =
+        left.clone_without_render_observations() == scrutinee.clone_without_render_observations();
+    let (written, bits, _) = super::chain::case_literal(left, right)?;
+    (same && written == *value.unobserved()).then_some((bits, equal, other))
 }
 
 /// The test of a `while` or `do-while`, which a `for` of the lowering does not state as one.
@@ -1648,6 +1750,62 @@ mod tests {
         assert!(!again.ok(), "{again}");
     }
 
+    /// D474: a switch written for an equality chain is entered as the chain's `if`s were, and a
+    /// case whose value is not its test's literal is a violation.
+    #[test]
+    fn a_chained_switch_case_holds_its_tests_literal() {
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x40, 0x20)),
+                (0x20, cond_branch(0x50, 0x30)),
+                (0x30, cond_branch(0x60, 0x70)),
+                (0x40, branch(0x80)),
+                (0x50, branch(0x80)),
+                (0x60, branch(0x80)),
+                (0x70, branch(0x80)),
+                (0x80, BlockTerminator::Return),
+            ],
+        );
+        let x = crate::symbol::SymbolTable::new().declare_or_reuse("x");
+        let word = |expr: CExpr| CExpr::cast(crate::ast::CType::uint(32), expr);
+        let chained = |values: [u64; 3]| {
+            let case = |(block, test, value): (u64, u64, u64), arm: u64| SwitchCase {
+                value: CExpr::UIntLit(value),
+                body: vec![at(arm, expr()), CStmt::Break],
+                test: Some(CExpr::observe_all(
+                    [test_render_observation_id(u32::try_from(block).unwrap())],
+                    CExpr::Binary {
+                        op: crate::ast::BinaryOp::Eq,
+                        left: Box::new(word(CExpr::Var(x))),
+                        right: Box::new(word(CExpr::UIntLit(test))),
+                    },
+                )),
+            };
+            CStmt::Block(vec![
+                CStmt::Switch {
+                    expr: word(CExpr::Var(x)),
+                    cases: vec![
+                        case((0x10, 1, values[0]), 0x40),
+                        case((0x20, 2, values[1]), 0x50),
+                        case((0x30, 3, values[2]), 0x60),
+                    ],
+                    default: Some(vec![at(0x70, expr())]),
+                },
+                at(0x80, CStmt::Return(None)),
+            ])
+        };
+        let certificate = run(chained([1, 2, 3]), &cfg, 0x10, &[]);
+        assert!(certificate.ok(), "{certificate}");
+        let wrong = run(chained([1, 5, 3]), &cfg, 0x10, &[]);
+        assert!(
+            wrong
+                .violations
+                .contains(&Violation::SwitchValue { block: 0x20 }),
+            "{wrong}"
+        );
+    }
+
     #[test]
     fn a_do_while_tests_at_its_last_block_and_branches_back_to_its_entry() {
         let cfg = cfg(
@@ -1717,6 +1875,7 @@ mod tests {
         let case = |value: i64, body: Vec<CStmt>| SwitchCase {
             value: CExpr::IntLit(value),
             body,
+            test: None,
         };
         let body = CStmt::Block(vec![
             at(
@@ -1762,6 +1921,7 @@ mod tests {
                     cases: vec![SwitchCase {
                         value: CExpr::IntLit(1),
                         body: vec![at(0x20, expr()), CStmt::Break],
+                        test: None,
                     }],
                     default: Some(vec![at(0x30, expr())]),
                 },

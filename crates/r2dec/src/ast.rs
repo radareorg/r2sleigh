@@ -888,6 +888,9 @@ impl CStmt {
             } => {
                 expr.visit_types_mut(f);
                 for case in cases {
+                    case.test
+                        .iter_mut()
+                        .for_each(|test| test.visit_types_mut(f));
                     case.body
                         .iter_mut()
                         .for_each(|stmt| stmt.visit_types_mut(f));
@@ -967,6 +970,7 @@ impl CStmt {
                 f(expr);
                 for case in cases {
                     f(&case.value);
+                    case.test.iter().for_each(&mut *f);
                     case.body.iter().for_each(|stmt| stmt.visit_exprs(f));
                 }
                 if let Some(default) = default {
@@ -1042,6 +1046,7 @@ impl CStmt {
                 f(expr);
                 for case in cases {
                     f(&mut case.value);
+                    case.test.iter_mut().for_each(&mut *f);
                     case.body
                         .iter_mut()
                         .for_each(|stmt| stmt.visit_exprs_mut(f));
@@ -1118,6 +1123,7 @@ impl CStmt {
             } => {
                 expr.visit_types(f);
                 for case in cases {
+                    case.test.iter().for_each(|test| test.visit_types(f));
                     case.body.iter().for_each(|stmt| stmt.visit_types(f));
                 }
                 if let Some(default) = default {
@@ -1767,6 +1773,10 @@ pub struct SwitchCase {
     pub value: CExpr,
     /// Case body.
     pub body: Vec<CStmt>,
+    /// The equality test a chained switch case was written as, carrying its block's markers: the
+    /// control certificate reads it, nothing prints it (ROADMAP D474). `None` for a table switch.
+    #[serde(skip)]
+    pub test: Option<CExpr>,
 }
 
 impl CStmt {

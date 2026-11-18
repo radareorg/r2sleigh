@@ -507,6 +507,11 @@ impl TrustedSeal {
         self.sealed.graph()
     }
 
+    /// Whether `op` is the system-call instruction, as [`SSAFunction::enters_system_call`] states.
+    pub fn enters_system_call<V>(&self, op: &SSAOp<V>) -> bool {
+        self.sealed.function().enters_system_call(op)
+    }
+
     /// Where each dispatch reads its table: the values the artifact's facts would solve from it.
     pub fn dispatch_table_reads(&self) -> Vec<crate::indirect::DispatchTableRead> {
         let sealed = &self.sealed;
@@ -3370,6 +3375,8 @@ pub struct SSAFunction {
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
     /// The user operations that enter the supervisor, as the lift names them.
     supervisor_calls: BTreeSet<u32>,
+    /// The supervisor calls that are the platform's system-call instruction, as the lift names them.
+    system_calls: BTreeSet<u32>,
     /// What each direct callee proves it leaves as found, less its result: a call to it passes those (D212).
     callee_passes: Arc<CalleePreservedCarriers>,
     /// The frame's one escape walk, run before promotion (D290); none reads as the whole frame.
@@ -3850,6 +3857,7 @@ impl Clone for SSAFunction {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
+            system_calls: self.system_calls.clone(),
             callee_passes: Arc::clone(&self.callee_passes),
             frame_points: self.frame_points.clone(),
             promoted_slots: self.promoted_slots.clone(),
@@ -4539,6 +4547,12 @@ impl SSAFunction {
     /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
     pub fn enters_supervisor<V>(&self, op: &SSAOp<V>) -> bool {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
+    }
+
+    /// Whether this user operation is the system-call instruction, whose number a syscall table
+    /// names; `hvc` and `smc` enter the supervisor and are not one.
+    pub fn enters_system_call<V>(&self, op: &SSAOp<V>) -> bool {
+        matches!(op, SSAOp::CallOther { userop, .. } if self.system_calls.contains(userop))
     }
 
     /// The memory operations slot promotion rewrote into copies, by where they were lifted:

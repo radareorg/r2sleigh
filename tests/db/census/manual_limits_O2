@@ -208,7 +208,7 @@ r2sleigh_word_u64 _sparse_switch(int32_t arg0, int32_t arg1, r2sleigh_word_u32 a
     uint32_t tmp_100000600_5_1;
     uint32_t tmp_100000600_9_1;
 
-    /* r2dec proof: 1 construct is marked below; 58 source obligations: 56 rendered, 0 elided, 0 refused, 2 residual; 17 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: 1 construct is marked below; 58 source obligations: 56 rendered, 0 elided, 0 refused, 2 residual; 15 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)2U)) {
             if ((uint8_t)((uint32_t)((uint32_t)arg0 + (uint32_t)7U) == (uint32_t)0U)) {
@@ -220,23 +220,19 @@ r2sleigh_word_u64 _sparse_switch(int32_t arg0, int32_t arg1, r2sleigh_word_u32 a
                 }
             }
         } else {
-            if ((uint8_t)((uint32_t)arg0 == (uint32_t)3U)) {
+            switch ((uint32_t)arg0) {
+            case 3U:
                 return (uint64_t)(uint32_t)((uint32_t)arg2 + (uint32_t)((uint32_t)((uint32_t)arg1 * (uint32_t)2U) + (uint32_t)arg1));
-            } else {
-                if ((uint8_t)((uint32_t)arg0 == (uint32_t)42U)) {
-                    return (uint64_t)(uint32_t)((uint32_t)((uint32_t)arg2 ^ (uint32_t)arg1) + (uint32_t)42U);
+            case 42U:
+                return (uint64_t)(uint32_t)((uint32_t)((uint32_t)arg2 ^ (uint32_t)arg1) + (uint32_t)42U);
+            case 0x3e8U:
+                if ((uint8_t)((uint32_t)arg2 == (uint32_t)0U)) {
+                    return (uint64_t)0xffffffffU;
                 } else {
-                    if ((uint8_t)((uint32_t)arg0 != (uint32_t)0x3e8U)) {
-                    } else {
-                        if ((uint8_t)((uint32_t)arg2 == (uint32_t)0U)) {
-                            return (uint64_t)0xffffffffU;
-                        } else {
-                            tmp_100000600_4_1 = (uint8_t)((uint32_t)arg2 == (uint32_t)0U);
-                            tmp_100000600_5_1 = tmp_100000600_4_1 ? (uint32_t)1U : (uint32_t)arg2;
-                            tmp_100000600_9_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)tmp_100000600_5_1 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)tmp_100000600_5_1);
-                            return (uint64_t)(uint32_t)(tmp_100000600_4_1 ? (uint32_t)0U : (uint32_t)tmp_100000600_9_1);
-                        }
-                    }
+                    tmp_100000600_4_1 = (uint8_t)((uint32_t)arg2 == (uint32_t)0U);
+                    tmp_100000600_5_1 = tmp_100000600_4_1 ? (uint32_t)1U : (uint32_t)arg2;
+                    tmp_100000600_9_1 = (uint32_t)arg1 == (uint32_t)0x80000000U && (uint32_t)tmp_100000600_5_1 == (uint32_t)0xffffffffU ? r2sleigh_residual_u32(1) : (uint32_t)((int32_t)arg1 / (int32_t)tmp_100000600_5_1);
+                    return (uint64_t)(uint32_t)(tmp_100000600_4_1 ? (uint32_t)0U : (uint32_t)tmp_100000600_9_1);
                 }
             }
         }
