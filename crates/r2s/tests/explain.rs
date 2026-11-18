@@ -1,4 +1,4 @@
-//! `aoj` and `pdfj` carry each note `pdf` prints as typed fields (D582, doc/adr-display.md).
+//! `pdfj` carries each note `pdf` prints as typed fields (D582, doc/adr-display.md).
 
 #![cfg(feature = "sleigh")]
 
@@ -83,17 +83,4 @@ fn every_pdfj_note_is_the_pdf_note_with_its_standing_as_fields() {
         .flat_map(|(_, notes)| notes)
         .filter(|(mark, _)| mark == "!");
     assert_eq!(refused.count(), 2, "{notes:?}");
-}
-
-#[test]
-fn every_aoj_note_is_the_pdf_note_of_its_line() {
-    let rows: Value = serde_json::from_str(&piped("aoj 6 @ 0x08000040")).expect("aoj is JSON");
-    let notes = (rows.as_array().expect("rows").iter())
-        .map(|row| {
-            let address = row["addr"].as_u64().expect("an address");
-            let notes = row["notes"].as_array().expect("every row states its notes");
-            (address, notes.iter().map(checked).collect::<Vec<_>>())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(notes, listed());
 }

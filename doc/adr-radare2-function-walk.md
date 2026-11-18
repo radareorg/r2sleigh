@@ -166,4 +166,7 @@ Step 0 (`designs/round15/d590-sites.md`) classed 1,909 sites on the sealed graph
 through a promoted slot; that graph had already turned literal-pool loads into copies, so the
 witness is the differential, the reader against the seal at every (site, parameter) before the
 seal's call was deleted. Its first round found 81 sites the reader missed (60 self-cancelling
-zeros, 20 read-only literal loads, 1 lane), which the reader now reads as the seal does.
+zeros, 20 read-only literal loads, 1 lane), which the reader now reads as the seal does; its
+second round, on the reader as built, compared 2,035 sites in 1,087 bodies over 309 files and found
+0 different. `aa; afl` is byte-identical on those files and the 36 committed binaries. Cost: 0pack
+`aa` 54.2 G to 27.1 G, pumasim 63.4 G to 44.2 G; cold 0pack `pdd @ 0x62ecf0` -26.5%.

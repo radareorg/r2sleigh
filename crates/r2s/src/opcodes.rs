@@ -9,7 +9,7 @@ use r2engine::query::{Completion, Instruction, Line, Listing, Register, Stop};
 /// `ao [n]`: each instruction's facts, one `key: value` line each.
 pub(crate) fn text(session: &mut Session, argument: &str) -> Result<String, String> {
     let mut out = String::new();
-    for one in read(session, argument)? {
+    for one in read(session, argument, true)? {
         out.push_str(&format!("address: {:#x}\n", one.address));
         out.push_str(&format!("opcode: {}\n", one.opcode));
         out.push_str(&format!("disasm: {}\n", one.disasm));
@@ -68,7 +68,8 @@ fn listed(key: &str, names: &[String]) -> String {
 
 /// `aoj [n]`: the same facts, one object per instruction.
 pub(crate) fn json(session: &mut Session, argument: &str) -> Result<String, String> {
-    let rows = read(session, argument)?
+    // No notes: they read the holder's analysis, and `aoj` stays instruction-cheap (D582's stop).
+    let rows = read(session, argument, false)?
         .into_iter()
         .map(|one| {
             let mut row = serde_json::json!({
@@ -89,7 +90,6 @@ pub(crate) fn json(session: &mut Session, argument: &str) -> Result<String, Stri
             if let Some(il) = one.il {
                 row["il"] = il.into();
             }
-            row["notes"] = serde_json::to_value(&one.notes).unwrap_or_default();
             row
         })
         .collect::<Vec<_>>();
@@ -152,8 +152,8 @@ struct Spelled {
     notes: Vec<NoteJson>,
 }
 
-/// `n` instructions from the seek, radare2's default of one.
-fn read(session: &mut Session, argument: &str) -> Result<Vec<Spelled>, String> {
+/// `n` instructions from the seek, radare2's default of one; with `notes`, each line's `pdf` notes.
+fn read(session: &mut Session, argument: &str, notes: bool) -> Result<Vec<Spelled>, String> {
     let count = parse_count(argument, 1)?;
     let answer = session.program.instructions(Listing {
         start: session.addr,
@@ -165,7 +165,10 @@ fn read(session: &mut Session, argument: &str) -> Result<Vec<Spelled>, String> {
         return Err(format!("nothing mapped at {at:#x}"));
     }
     let names = session.program.names();
-    let held = holder_lines(session, session.addr);
+    let held = match notes {
+        true => holder_lines(session, session.addr),
+        false => Vec::new(),
+    };
     let next = crate::listing::next_calls(&held);
     let mut spelled_all = Vec::new();
     for one in &answer.value {
@@ -174,7 +177,10 @@ fn read(session: &mut Session, argument: &str) -> Result<Vec<Spelled>, String> {
             Ok(at) => (&held[at], next[at]),
             Err(_) => (&one.line, None),
         };
-        let notes = noted(session, line, next_call);
+        let notes = match notes {
+            true => noted(session, line, next_call),
+            false => Vec::new(),
+        };
         spelled_all.push(Spelled {
             notes,
             ..spelled(one, &names)

@@ -263,12 +263,13 @@ tests whether a setter's call is the next call line.
   note still carries the body's own premises (a decided canary's `ub-free`,
   `frame-isolation`): bash `main`'s 80 call notes keep `*` for those.
 - D582: `Mark::reads_as` is the one speller of what a cell says: the `pd?`
-  legend, `ao`'s `notes:` block and the JSON `mark`. `ao` and `aoj` read the
+  legend, `ao`'s `notes:` block and the JSON `mark`. `ao` reads the
   notes `pdf` prints on the line from the listing of the first function
   holding it (`functions_holding`), so `ao` pays for that function's
-  analysis; outside every function they are the instruction's own. `aoj` rows
-  and the new `pdfj` carry each note as `NoteJson` (kind by one exhaustive
-  match, mark, basis, grade, premises, refusal, citation); a refusal states no
-  basis. Visual `z` cycles reader, proof (`e asm.proof=true`) and none (the
+  analysis; outside every function they are the instruction's own. The new
+  `pdfj` carries each note as `NoteJson` (kind by one exhaustive match, mark,
+  basis, grade, premises, refusal, citation); a refusal states no basis.
+  `aoj` carries no notes: reading them made D490's `aoj` sample time out on
+  vim and gzdoom.arm_64.1 (stop fact; the row stays open for it). Visual `z` cycles reader, proof (`e asm.proof=true`) and none (the
   text after the first ` ; ` cut in the held lines). Plain and colour print the
   same bytes; the exit paints the cells with D569's proof roles.
