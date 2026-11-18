@@ -61,6 +61,8 @@ pub struct JoinedLane {
     pub dead: bool,
     /// The bytes every read narrower than the lane takes, where they agree; `Some(None)` where two disagree.
     pub width: Option<Option<u32>>,
+    /// Some reading call may also lose the lane where no walk follows: `bytes` need not be every read (D610).
+    pub unbounded: bool,
 }
 
 impl JoinedLane {
@@ -70,6 +72,7 @@ impl JoinedLane {
         self.unknown |= other.unknown;
         self.cycle |= other.cycle;
         self.dead &= other.dead;
+        self.unbounded |= other.unbounded;
         self.bytes = ByteMask(self.bytes.0 | other.bytes.0);
         self.width = match (self.width, other.width) {
             (None, width) | (width, None) => width,
@@ -261,6 +264,8 @@ pub struct Direct {
     unread: bool,
     /// Each lane a call returns on into its caller, which that caller's own calls decide.
     returned: Box<[Returned]>,
+    /// Each lane a call returns on beside a read, which decides it: asked only for its bound (D610).
+    read_returned: Box<[Returned]>,
 }
 
 /// The returned lanes kept for their callers, decided from the direct calls alone so the forwarder
@@ -269,6 +274,7 @@ fn forwarded_lanes(
     lanes: &mut [JoinedLane; LANES],
     returned: BTreeSet<Returned>,
     float_second: Option<usize>,
+    read_returned: &mut BTreeSet<Returned>,
 ) -> Vec<Returned> {
     let open = lanes
         .iter()
@@ -279,7 +285,12 @@ fn forwarded_lanes(
     let second = float_second.filter(|_| grouped);
     let kept = returned.into_iter().filter(|returned| {
         let past = returned.at >= 3 && Some(returned.at) != second;
-        let decided = lanes[returned.at].read || (open && past);
+        // A read lane is decided: its returner is asked only for the read's bound (D610).
+        if lanes[returned.at].read {
+            read_returned.insert(*returned);
+            return false;
+        }
+        let decided = open && past;
         if decided {
             join(
                 &mut lanes[returned.at],
@@ -331,6 +342,7 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
     let mut returned = BTreeSet::new();
+    let mut read_returned = BTreeSet::new();
     let view = View::new(db, true);
     // A caller under another convention states its sites' fates in its lanes: none is read (D385).
     let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
@@ -359,7 +371,8 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
                 continue;
             }
             calls = calls.saturating_add(1);
-            join_site(&mut lanes, caller, &site.boundary, &mut returned);
+            let returners = (&mut returned, &mut read_returned);
+            join_site(&mut lanes, caller, &site.boundary, returners);
         }
     }
     // A body that leaves for `callee` by a branch returns what `callee` returns: each held lane is
@@ -378,7 +391,8 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     }
     let loader_calls = loader_reads(db.inputs().source.container(), callee, &mut lanes);
     let slot_read = slot_reads(db, callee, &mut lanes);
-    let returned = forwarded_lanes(&mut lanes, returned, float_second).into();
+    let returned = forwarded_lanes(&mut lanes, returned, float_second, &mut read_returned);
+    let (returned, read_returned) = (returned.into(), read_returned.into_iter().collect());
     r2il::refusal_evidence!(
         "call-boundary",
         "{callee:#x}: {calls} calls, unread callers {unread}, lanes {lanes:?}"
@@ -390,6 +404,7 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         slot_read,
         unread,
         returned,
+        read_returned,
     })
 }
 
@@ -413,7 +428,12 @@ fn slot_reads<S: Source + 'static>(
     };
     let read = ByteMask((1u128 << bytes) - 1);
     let lane = &mut lanes[usize::from(LaneId::INTEGER.0)];
-    join(lane, Some(Forwarded::Fate(LaneFate::Read(read))));
+    let fate = LaneFate::Read {
+        bytes: read,
+        returned: ByteMask(0),
+        lost: false,
+    };
+    join(lane, Some(Forwarded::Fate(fate)));
     true
 }
 
@@ -429,9 +449,14 @@ fn loader_reads(container: &super::Container, callee: u64, lanes: &mut [JoinedLa
         calls = calls.saturating_add(1);
         if let r2abi::ResultRead::Integer { bytes } = call.reads_result {
             let read = ByteMask((1u128 << bytes) - 1);
+            let fate = LaneFate::Read {
+                bytes: read,
+                returned: ByteMask(0),
+                lost: false,
+            };
             join(
                 &mut lanes[usize::from(LaneId::INTEGER.0)],
-                Some(Forwarded::Fate(LaneFate::Read(read))),
+                Some(Forwarded::Fate(fate)),
             );
         }
     }
@@ -443,12 +468,19 @@ fn join_site(
     lanes: &mut [JoinedLane; LANES],
     caller: u64,
     site: &SiteBoundary,
-    returned: &mut BTreeSet<Returned>,
+    (returned, read_returned): (&mut BTreeSet<Returned>, &mut BTreeSet<Returned>),
 ) {
     for (at, (joined, fate)) in lanes.iter_mut().zip(site.fates).enumerate() {
         match fate {
             Some(LaneFate::Returned(bytes)) => {
                 returned.insert(Returned { caller, at, bytes });
+            }
+            // A path beside the read returns these bytes: the caller's callers bound them (D610).
+            Some(LaneFate::Read {
+                returned: bytes, ..
+            }) if bytes.0 != 0 => {
+                read_returned.insert(Returned { caller, at, bytes });
+                join(joined, fate.map(Forwarded::Fate));
             }
             fate => join(joined, fate.map(Forwarded::Fate)),
         }
@@ -854,6 +886,7 @@ const BOTTOM: [JoinedLane; LANES] = [JoinedLane {
     cycle: false,
     dead: false,
     width: None,
+    unbounded: false,
 }; LANES];
 
 /// One component of the forwarder graph: its members ascending, and each one's calls joined.
@@ -958,6 +991,78 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for EveryWayIn {
     }
 }
 
+/// Every byte of `callee`'s lane `at` any reader takes, where every read is known (D610): a walk of the
+/// callers it is returned to, each mask growing at most 128 times, `O((V + E) × 128)`, cycles included.
+fn every_read<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    at: usize,
+) -> Option<ByteMask> {
+    // Each function reached, with the bytes of `callee`'s lane its own result may carry.
+    let mut reach = BTreeMap::from([(callee, u128::MAX)]);
+    let mut work = vec![callee];
+    let mut every = 0u128;
+    while let Some(function) = work.pop() {
+        let carried = reach[&function];
+        let found = db.get::<ComponentForwarding>(&function).ok()?;
+        let forwarding = found.as_ref().as_ref()?;
+        let lane = forwarding.lanes[at];
+        if lane.unknown || lane.cycle || lane.unbounded || !reads_known(db, function, forwarding) {
+            r2il::refusal_evidence!("every-read", "{callee:#x} through {function:#x}: {lane:?}");
+            return None;
+        }
+        every |= lane.bytes.0 & carried;
+        let direct = db.get::<DirectSites>(&function).ok()?;
+        let direct = direct.as_ref().as_ref()?;
+        let returners = direct.returned.iter().chain(direct.read_returned.iter());
+        for returned in returners.filter(|returned| returned.at == at) {
+            let bytes = carried & returned.bytes.0;
+            let held = reach.entry(returned.caller).or_insert(0);
+            if *held | bytes != *held {
+                *held |= bytes;
+                work.push(returned.caller);
+            }
+        }
+    }
+    Some(ByteMask(every))
+}
+
+/// Whether the reads joined for `callee` are every read (D610): its calls are every way in, or each
+/// other way in is a take into cited slots whose type states the read (S30, D227).
+fn reads_known<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    forwarding: &Forwarding,
+) -> bool {
+    let slotted = || {
+        let proof = db.get::<super::slots::DeclaredSlot>(&callee).ok();
+        proof.is_some_and(|proof| proof.is_some())
+            && super::reads::calls_claimed(db, callee, forwarding.calls)
+    };
+    !forwarding.unread && (super::reads::only_called(db, callee, forwarding.calls) || slotted())
+}
+
+/// An integer read stated with the widest read's extent, where every read of the lane is known.
+fn bounded<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    entry: u64,
+    result: SourceClosedResult,
+) -> SourceClosedResult {
+    if !matches!(
+        result,
+        SourceClosedResult::Read(SourceReadLanes::Integer { .. })
+    ) {
+        return result;
+    }
+    let every = every_read(db, entry, usize::from(LaneId::INTEGER.0));
+    // One past the highest byte any read takes: a read reaches up from the lowest (`Live::fate`).
+    let extent = every.map(|every| u128::BITS - every.0.leading_zeros());
+    let widest = extent.and_then(|extent| u8::try_from(extent).ok());
+    SourceClosedResult::Read(SourceReadLanes::Integer {
+        widest: widest.filter(|bytes| *bytes > 0),
+    })
+}
+
 /// Whether `forwarding`'s calls are every way into `callee`, and each of `forwarders`' are on its
 /// lane; a cycle of asks is an error, which answers false. The all-lane ask passes every forwarder.
 fn ways_in<S: Source + 'static>(
@@ -1043,10 +1148,11 @@ fn join(lane: &mut JoinedLane, fate: Option<Forwarded>) {
     let Some(fate) = fate else { return };
     match fate {
         Forwarded::Fate(LaneFate::Dead) | Forwarded::DeadIfEveryWayIn => {}
-        Forwarded::Fate(LaneFate::Read(bytes)) => {
+        Forwarded::Fate(LaneFate::Read { bytes, lost, .. }) => {
             // A read of the whole register states no width.
             let width = bytes.low_run().filter(|width| *width < 16);
             read(lane, bytes, width.map(Some));
+            lane.unbounded |= lost;
         }
         Forwarded::Read(bytes, width) => read(lane, bytes, width),
         Forwarded::Fate(LaneFate::Returned(_) | LaneFate::Unknown) => {
@@ -1094,6 +1200,7 @@ impl BoundaryResult {
             true => None,
             false => decided_result(supply, forwarding, &mut every_way_in),
         };
+        let result = result.map(|result| bounded(db, entry, result));
         let every = asked == Some(true);
         // The integer lane's own `Dead` needs no other lane dead (D440), and its ways in are its own
         // forwarders' (D444); a read decides it.
@@ -1232,7 +1339,9 @@ fn decided_result(
                 return Some(SourceClosedResult::Read(SourceReadLanes::Pair));
             }
             if integer.read {
-                return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
+                return Some(SourceClosedResult::Read(SourceReadLanes::Integer {
+                    widest: None,
+                }));
             }
             if all_dead(ways) {
                 return Some(SourceClosedResult::Unread);
@@ -1246,7 +1355,9 @@ fn decided_result(
                 return Some(SourceClosedResult::Read(SourceReadLanes::Pair));
             }
             if integer_read && (!carriers.float || !float.read) {
-                return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
+                return Some(SourceClosedResult::Read(SourceReadLanes::Integer {
+                    widest: None,
+                }));
             }
             if carriers.float && float.read && !integer_read {
                 let bytes = float
@@ -2125,7 +2236,7 @@ mod tests {
         lanes[1].read = true;
         lanes[1].dead = false;
         let both = BTreeSet::from([returned(3), returned(4)]);
-        let kept = forwarded_lanes(&mut lanes, both.clone(), Some(3));
+        let kept = forwarded_lanes(&mut lanes, both.clone(), Some(3), &mut BTreeSet::new());
         assert_eq!(kept, vec![returned(3)]);
         assert!(lanes[3].dead && !lanes[3].unknown, "{:?}", lanes[3]);
         assert!(lanes[4].unknown && !lanes[4].dead, "{:?}", lanes[4]);
@@ -2133,7 +2244,8 @@ mod tests {
         let mut lanes = [held; LANES];
         lanes[0].unknown = true;
         lanes[0].dead = false;
-        assert!(forwarded_lanes(&mut lanes, both, Some(3)).is_empty());
+        let none = forwarded_lanes(&mut lanes, both, Some(3), &mut BTreeSet::new());
+        assert!(none.is_empty());
         for at in [3, 4] {
             assert!(lanes[at].unknown && !lanes[at].dead, "{:?}", lanes[at]);
         }

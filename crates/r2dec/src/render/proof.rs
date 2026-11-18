@@ -271,8 +271,13 @@ fn closed_world(
         Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
             Some("; a call returns the result on through a cycle")
         }
-        // A value no body proves, decided only by its reading calls.
+        // A value no body proves, decided only by its reading calls, or one whose width they leave open.
         None if func.ret_type != crate::ast::CType::Void => Some("; a call reads the result"),
+        Some(Some(
+            r2types::UnprovenCause::WidthUnbounded
+            | r2types::UnprovenCause::WidthBetween
+            | r2types::UnprovenCause::PointerWide,
+        )) => Some("; a call reads the result"),
         _ if integer_lane => None,
         _ => Some("; no call reads the result"),
     };

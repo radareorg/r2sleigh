@@ -70,7 +70,7 @@ NAME=0x100000420
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x100000420
 EXPECT=<<EOF
-r2sleigh_word_u64 _table_dispatch(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
+r2sleigh_result_u64 _table_dispatch(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t x8_4;
     uint32_t stack_m76_1;
@@ -78,7 +78,7 @@ r2sleigh_word_u64 _table_dispatch(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1
     uint64_t stack_m72_3;
     _Alignas(16) uint8_t frame[64];
 
-    /* r2dec proof: 3 constructs are marked below; 60 source obligations: 30 rendered, 11 elided, 0 refused, 19 residual; 12 statements rendered; 1 never assigned, read as residuals (X0_2); the parameters are a floor: at least 2 (a register past them reaches an indirect call); an indirect call writes no frame slot this function did not expose (assuming frame-isolation); a call reads the result (assuming closed-world) */
+    /* r2dec proof: 3 constructs are marked below; 60 source obligations: 30 rendered, 11 elided, 0 refused, 19 residual; 12 statements rendered; 1 never assigned, read as residuals (X0_2); the parameters are a floor: at least 2 (a register past them reaches an indirect call); an indirect call writes no frame slot this function did not expose (assuming frame-isolation); a call reads the result (assuming closed-world); the result is unproven (WidthUnbounded): 1 unproven-return carried */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
@@ -99,7 +99,7 @@ r2sleigh_word_u64 _table_dispatch(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1
             }
         }
         {
-            return (uint64_t)stack_m72_1;
+            return r2sleigh_carrier_u64((uint64_t)stack_m72_1);
         }
     }
 }
@@ -113,16 +113,16 @@ NAME=0x1000004b8
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x1000004b8
 EXPECT=<<EOF
-r2sleigh_word_u64 _main(void)
+r2sleigh_result_u64 _main(void)
 {
-    r2sleigh_word_u64 _table_dispatch(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_result_u64 _table_dispatch(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t x0_2;
 
-    /* r2dec proof: no individual construct is marked; 20 source obligations: 9 rendered, 11 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 20 source obligations: 9 rendered, 11 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthUnbounded): 1 unproven-return carried */
     {
         x0_2 = _table_dispatch(3, 5);
-        return (uint64_t)x0_2;
+        return r2sleigh_carrier_u64((uint64_t)x0_2);
     }
 }
 

@@ -1348,7 +1348,9 @@ fn a_lane_forwarded_through_a_caller_whose_result_is_read_is_decided_per_lane() 
     open.analyse_program().expect("it surveys");
     let mid = open.rendered(BASE + 0x10).expect("it renders");
     let mid = mid.response.output.into_text();
-    assert!(mid.starts_with("r2sleigh_word_u64 mid("), "{mid}");
+    // x0 is read and written whole: a pointer's width, its kind unproven (D610).
+    assert!(mid.starts_with("r2sleigh_result_u64 mid("), "{mid}");
+    assert!(mid.contains("unproven (PointerWide)"), "{mid}");
     let text = open.rendered(F).expect("it renders");
     let text = text.response.output.into_text();
     assert!(text.starts_with("void f("), "{text}");
@@ -1530,7 +1532,9 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         &[0xe8, 0xeb, 0xff, 0xff, 0xff, 0x48, 0x89, 0x07, 0xc3],
     );
     let text = analysed(read);
-    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
+    // The call reads all of RAX and `f` writes EAX: a `long` and an `int` compile alike (D610).
+    assert!(text.starts_with("r2sleigh_result_u32 f(void)"), "{text}");
+    assert!(text.contains("unproven (WidthBetween)"), "{text}");
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
@@ -1562,7 +1566,9 @@ fn dyld_reads_the_integer_lane_of_the_main_a_mach_o_names() {
         .expect("it renders");
     let cold = cold.response.output.into_text();
     let text = analysed(program(true));
-    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
+    // Its exported symbol is a way in another image may take: no read bounds the width (D610).
+    assert!(text.starts_with("r2sleigh_result_u32 f(void)"), "{text}");
+    assert!(text.contains("unproven (WidthUnbounded)"), "{text}");
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
@@ -2037,11 +2043,12 @@ fn a_main_a_wrapper_branches_to_returns_the_int_the_slot_reads() {
     open.analyse_program().expect("it surveys");
     let rendered = open.rendered(BASE + 0x40).expect("it renders");
     let text = rendered.response.output.into_text();
-    // A word, no residual: the decision is `Read(Integer)` (cold, the result is unproven).
+    // No residual: the decision is `Read(Integer)`; `main` hands back `helper`'s whole x0 (D610).
     assert!(
-        text.starts_with("r2sleigh_word_u64 fcn_1040(void)"),
+        text.starts_with("r2sleigh_result_u64 fcn_1040(void)"),
         "{text}"
     );
+    assert!(text.contains("unproven (WidthBetween)"), "{text}");
     assert!(
         text.contains("reads the result (assuming closed-world, ub-free)"),
         "{text}"
@@ -2111,7 +2118,8 @@ fn slotted_cycle_rendered(start: &[u8]) -> Vec<String> {
 #[test]
 fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
     for text in slotted_cycle_rendered(STARTS_HANDLER) {
-        assert!(text.starts_with("r2sleigh_word_u"), "{text}");
+        // Each tail hands back the next member's whole RAX: the width is unproven (D610).
+        assert!(text.starts_with("r2sleigh_result_u"), "{text}");
         assert!(
             text.contains("a call reads the result (assuming closed-world, ub-free)"),
             "{text}"
