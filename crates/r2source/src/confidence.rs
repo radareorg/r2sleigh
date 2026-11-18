@@ -31,6 +31,20 @@ pub enum Grade {
     Assumed,
 }
 
+impl Grade {
+    /// The grade as answers spell it.
+    pub const fn spelled(self) -> &'static str {
+        match self {
+            Self::Stated => "stated",
+            Self::Proven => "proven",
+            Self::Bounded => "bounded",
+            Self::Declared => "declared",
+            Self::Read => "read",
+            Self::Assumed => "assumed",
+        }
+    }
+}
+
 /// What a derived fact is read from, strongest first.
 ///
 /// Ordered by how much is being claimed, so a consumer may take everything at
@@ -466,6 +480,21 @@ impl Mark {
             Self::Bound => '~',
             Self::Premise => '*',
             Self::Holds => ' ',
+        }
+    }
+
+    /// What a reader takes the cell to say, as the legend, `ao` and the JSON spell it
+    /// (doc/adr-display.md, "Visual grammar").
+    pub const fn reads_as(self) -> &'static str {
+        match self {
+            Self::Holds => "holds",
+            Self::Premise => "holds if the premise holds",
+            Self::Bound => "holds as the bound the text spells",
+            Self::Declared => "holds if the declaration is right",
+            Self::Read => "a width or a use, no type",
+            Self::Assumed => "the ABI default, no evidence",
+            Self::Unknown => "asked, no answer, no reason",
+            Self::Refused => "refused; the reason follows",
         }
     }
 

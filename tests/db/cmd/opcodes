@@ -55,7 +55,7 @@ NAME=x86-64: a register written before it is read is not read
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aoj 2 @ 0x401348
 EXPECT=<<EOF
-[{"addr":4199240,"bytes":"0fb617","disasm":"movzx edx, byte [rdi]","il":["uniq:0x0[1] = LOAD [ram]RDI","EDX = ZEXT(uniq:0x0[1])","RDX = ZEXT(EDX)"],"mnemonic":"movzx","opcode":"movzx edx, byte [rdi]","reads":["rdi"],"size":3,"writes":["rdx"]},{"addr":4199243,"bytes":"4883c701","disasm":"add rdi, 0x1","il":["CF = CARRY(RDI, 0x1:8)","OF = SCARRY(RDI, 0x1:8)","uniq:0x0[8] = RDI & 0xf:8","uniq:0x8[8] = 0x1:8 & 0xf:8","uniq:0x10[8] = uniq:0x0[8] + uniq:0x8[8]","AF = 0xf:8 < uniq:0x10[8]","RDI = RDI + 0x1:8","SF = RDI s< 0x0:8","ZF = RDI == 0x0:8","uniq:0x18[8] = RDI & 0xff:8","uniq:0x20[1] = POPCOUNT(uniq:0x18[8])","uniq:0x21[1] = uniq:0x20[1] & 0x1:1","PF = uniq:0x21[1] == 0x0:1"],"mnemonic":"add","opcode":"add rdi, 0x1","reads":["rdi"],"size":4,"writes":["cf","of","af","rdi","sf","zf","pf"]}]
+[{"addr":4199240,"bytes":"0fb617","disasm":"movzx edx, byte [rdi]","il":["uniq:0x0[1] = LOAD [ram]RDI","EDX = ZEXT(uniq:0x0[1])","RDX = ZEXT(EDX)"],"mnemonic":"movzx","notes":[{"basis":"solved","citation":null,"grade":"bounded","kind":"trips","mark":"~","premises":[],"refusal":null,"text":"trips rsi@entry"},{"basis":"certified","citation":null,"grade":"proven","kind":"loop","mark":" ","premises":[],"refusal":null,"text":"loop: latches 0x401348, exits 0x40135c"},{"basis":"certified","citation":null,"grade":"proven","kind":"induction","mark":" ","premises":[],"refusal":null,"text":"induction rdi = rdi@entry, +0x1 per trip"}],"opcode":"movzx edx, byte [rdi]","reads":["rdi"],"size":3,"writes":["rdx"]},{"addr":4199243,"bytes":"4883c701","disasm":"add rdi, 0x1","il":["CF = CARRY(RDI, 0x1:8)","OF = SCARRY(RDI, 0x1:8)","uniq:0x0[8] = RDI & 0xf:8","uniq:0x8[8] = 0x1:8 & 0xf:8","uniq:0x10[8] = uniq:0x0[8] + uniq:0x8[8]","AF = 0xf:8 < uniq:0x10[8]","RDI = RDI + 0x1:8","SF = RDI s< 0x0:8","ZF = RDI == 0x0:8","uniq:0x18[8] = RDI & 0xff:8","uniq:0x20[1] = POPCOUNT(uniq:0x18[8])","uniq:0x21[1] = uniq:0x20[1] & 0x1:1","PF = uniq:0x21[1] == 0x0:1"],"mnemonic":"add","notes":[],"opcode":"add rdi, 0x1","reads":["rdi"],"size":4,"writes":["cf","of","af","rdi","sf","zf","pf"]}]
 EOF
 RUN
 
@@ -101,6 +101,11 @@ il:
     1: reg:0x5008[8] = COPY 0x0:8
     2: reg:0x5010[8] = COPY 0x0:8
     3: reg:0x5018[8] = COPY 0x0:8
+notes:
+    a1
+    basis: certified
+    grade: proven
+    premises: none
 address: 0x101050c
 opcode: fmov d1, 0x4000000000000000
 disasm: fmov d1, 0x4000000000000000
@@ -139,7 +144,7 @@ il:
     3: STORE [ram]mult_addr = r4
     4: mult_addr = mult_addr - 0x4:4
     5: sp = mult_addr + 0x4:4
-[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x0[4] = LOAD [ram]r12","uniq:0x4[4] = uniq:0x0[4] & 0x1:4","TB = uniq:0x4[4] != 0x0:4","pc = uniq:0x0[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","tb","pc"]}]
+[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x0[4] = LOAD [ram]r12","uniq:0x4[4] = uniq:0x0[4] & 0x1:4","TB = uniq:0x4[4] != 0x0:4","pc = uniq:0x0[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","notes":[{"basis":null,"citation":null,"grade":null,"kind":"call","mark":"!","premises":[],"refusal":{"kind":"call-boundary","reason":"the import has no declaration to state its arguments"},"text":"args of reloc.foo: the import has no declaration to state its arguments"},{"basis":"folded","citation":null,"grade":"proven","kind":"bounds","mark":" ","premises":[],"refusal":null,"text":"defines r12 = 0x30294"},{"basis":"decoded","citation":null,"grade":"proven","kind":"bounds","mark":" ","premises":[],"refusal":null,"text":"defines pc in [0x0, 0xfffffffe]"}],"opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","tb","pc"]}]
 EOF
 RUN
 
@@ -197,7 +202,7 @@ aoj 1 @ 0x401330
 EOF
 EXPECT=<<EOF
 2 bytes at 0x401330
-[{"addr":4199216,"bytes":"ff","disasm":"invalid","mnemonic":"invalid","opcode":"invalid","refused":"the bytes are not an instruction","size":1}]
+[{"addr":4199216,"bytes":"ff","disasm":"invalid","mnemonic":"invalid","notes":[],"opcode":"invalid","refused":"the bytes are not an instruction","size":1}]
 EOF
 RUN
 
@@ -218,5 +223,79 @@ EXPECT_ERR=<<EOF
 r2s: bad count 'many'
 EOF
 EXPECT=<<EOF
+EOF
+RUN
+
+# D582: `ao` ends with each note `pdf` prints on the line, in full; `aoj` and `pdfj` carry the
+# same as typed fields; `pd?` ends with the mark legend.
+
+NAME=ao: a refused call states its reason, no basis
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=ao @ 0x08000040
+EXPECT=<<EOF
+address: 0x8000040
+opcode: call 0x8001000
+disasm: call 0x8001000
+mnemonic: call
+bytes: e8bb0f0000
+size: 5
+reads: rsp
+writes: rsp
+il:
+    0: RSP = RSP - 0x8:8
+    1: STORE [ram]RSP = 0x8000045:8
+    2: CALL ram:0x8001000[8]
+notes:
+  ! args of sym.imp.ext: the import has no declaration to state its arguments
+    refused: the import has no declaration to state its arguments
+EOF
+RUN
+
+NAME=ao: a call to a function of the image, its mapping resting on nothing
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=ao @ 0x08000045
+EXPECT=<<EOF
+address: 0x8000045
+opcode: call 0x800005f
+disasm: call sym.g
+mnemonic: call
+bytes: e815000000
+size: 5
+reads: rsp
+writes: rsp
+il:
+    0: RSP = RSP - 0x8:8
+    1: STORE [ram]RSP = 0x800004a:8
+    2: CALL ram:0x800005f[8]
+notes:
+    ()
+    basis: certified
+    grade: proven
+    premises: none
+EOF
+RUN
+
+NAME=pdfj: the listing's lines with their notes as fields
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=pdfj @ 0x08000040
+EXPECT=<<EOF
+{"addr":134217792,"lines":[{"addr":134217792,"bytes":"e8bb0f0000","disasm":"call 0x8001000","notes":[{"basis":null,"citation":null,"grade":null,"kind":"call","mark":"!","premises":[],"refusal":{"kind":"call-boundary","reason":"the import has no declaration to state its arguments"},"text":"args of sym.imp.ext: the import has no declaration to state its arguments"}]},{"addr":134217797,"bytes":"e815000000","disasm":"call sym.g","notes":[{"basis":"certified","citation":null,"grade":"proven","kind":"call","mark":" ","premises":[],"refusal":null,"text":"()"}]},{"addr":134217802,"bytes":"488d3d17000000","disasm":"lea rdi, [0x8000068]","notes":[{"basis":"decoded","citation":null,"grade":"proven","kind":"text","mark":" ","premises":[],"refusal":null,"text":"\"*\""}]},{"addr":134217809,"bytes":"488b05b00f0000","disasm":"mov rax, qword [0x8001008]","notes":[]},{"addr":134217816,"bytes":"8b053a050000","disasm":"mov eax, dword [obj.counter]","notes":[{"basis":"decoded","citation":null,"grade":"proven","kind":"holds","mark":" ","premises":[],"refusal":null,"text":"[0x8000598:4]=0x0 in file"}]},{"addr":134217822,"bytes":"c3","disasm":"ret","notes":[{"basis":null,"citation":null,"grade":null,"kind":"returns","mark":"!","premises":[],"refusal":{"kind":"result-unproven","reason":"Written"},"text":"result unproven (rax, Written)"}]}],"name":"sym.f"}
+EOF
+RUN
+
+NAME=pd?: the usage ends with the eight marks a note can carry
+FILE=crates/r2image/tests/data/relocated.elf
+CMDS=pd?
+EXPECT=<<EOF
+Usage: pd [n]  disassemble
+marks after ';':
+(space)  holds
+*  holds if the premise holds
+~  holds as the bound the text spells
+^  holds if the declaration is right
+.  a width or a use, no type
+_  the ABI default, no evidence
+?  asked, no answer, no reason
+!  refused; the reason follows
 EOF
 RUN

@@ -264,6 +264,34 @@ pub struct App {
     pub(crate) running: usize,
     pub(crate) running_what: String,
     pub(crate) ticks: usize,
+    /// What the text after a line's `;` shows, cycled by `z` (D582).
+    pub(crate) notes: Notes,
+}
+
+/// The note layer after each `;`: the reader's words, the proof's basis beside them, or none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Notes {
+    Reader,
+    Proof,
+    None,
+}
+
+impl Notes {
+    const fn next(self) -> Self {
+        match self {
+            Self::Reader => Self::Proof,
+            Self::Proof => Self::None,
+            Self::None => Self::Reader,
+        }
+    }
+}
+
+/// `text` with every note after its first ` ; ` cut, and the roles that painted them.
+fn unnoted(line: &mut ListedLine) {
+    if let Some(at) = line.text.find(" ; ") {
+        line.text.truncate(at);
+        line.roles.retain(|(range, _)| range.end <= at);
+    }
 }
 
 impl Default for App {
@@ -300,6 +328,7 @@ impl App {
             running: 0,
             running_what: String::new(),
             ticks: 0,
+            notes: Notes::Reader,
         };
         app.resize(80, 24);
         app
@@ -650,7 +679,10 @@ impl App {
 
     fn install(&mut self, key: Key, value: Fetched) {
         match (key, value) {
-            (Key::Lines { .. }, Fetched::Lines(window)) => {
+            (Key::Lines { .. }, Fetched::Lines(mut window)) => {
+                if self.notes == Notes::None {
+                    window.lines.iter_mut().for_each(unnoted);
+                }
                 self.lines.held = Some(HeldLines { key, window });
                 self.lines.stale = false;
                 if let Some(held) = &self.lines.held {
@@ -795,6 +827,13 @@ impl App {
                     self.pending_lines = 0;
                     self.land = true;
                 }
+            }
+            // The note layer: the shell spells the proof's words, and the state cuts them all.
+            KeyCode::Char('z') => {
+                self.notes = self.notes.next();
+                let proof = self.notes == Notes::Proof;
+                let command = format!("e asm.proof={proof}");
+                self.ask(effects, "notes", Request::Run(command));
             }
             KeyCode::Char('x') => {
                 self.filter.clear();

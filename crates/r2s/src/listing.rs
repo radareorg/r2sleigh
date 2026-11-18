@@ -284,7 +284,7 @@ fn claimed_address(line: &r2engine::query::Line, number: r2engine::NumberSpan) -
 
 /// Each line's next call line in the listing, in one pass from the end: a setter of that call names
 /// no address.
-fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
+pub(crate) fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
     let mut next = None;
     let mut out = vec![None; lines.len()];
     for (at, line) in lines.iter().enumerate().rev() {
@@ -302,9 +302,37 @@ fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
     out
 }
 
+/// One note of a line as `pdf` spells it, and the annotation it spells: none for the callee's
+/// `noreturn` beside its call. `ao`, `aoj` and `pdfj` read the same notes (D582).
+pub(crate) struct Note<'l> {
+    pub(crate) mark: r2engine::query::Mark,
+    pub(crate) confidence: &'l r2engine::query::Confidence,
+    pub(crate) standing: r2engine::query::Standing,
+    pub(crate) text: String,
+    pub(crate) annotation: Option<&'l r2engine::query::Annotation>,
+}
+
 /// Each note on the line as `; M text`, weakest first; `asm.proof` adds the basis (doc/adr-display.md).
 /// A held value is stated beside the read, never substituted: the word holds it now, a load may not.
 fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>) -> String {
+    let spelled = notes(session, line, next_call).into_iter().map(|note| {
+        // A refusal or an unknown stands on no basis, so none is printed.
+        let standing = note.standing == r2engine::query::Standing::Fact;
+        let basis = match session.proof && standing {
+            true => format!(" ({})", note.confidence),
+            false => String::new(),
+        };
+        format!(" ; {} {}{basis}", note.mark.cell(), note.text)
+    });
+    spelled.collect()
+}
+
+/// The line's notes as a reader reads them, weakest first.
+pub(crate) fn notes<'l>(
+    session: &Session,
+    line: &'l r2engine::query::Line,
+    next_call: Option<u64>,
+) -> Vec<Note<'l>> {
     use r2engine::query::{AnnotationKind, Mark, Standing};
     let indirect = line
         .annotations
@@ -326,7 +354,13 @@ fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>)
             _ => note(session, line.address, &annotation.kind, next_call),
         };
         let standing = annotation.kind.standing();
-        notes.extend(said.map(|said| (annotation.mark(), &annotation.confidence, standing, said)));
+        notes.extend(said.map(|text| Note {
+            mark: annotation.mark(),
+            confidence: &annotation.confidence,
+            standing,
+            text,
+            annotation: Some(annotation),
+        }));
         // The callee's own `Never`, a fact of its own beside what the call hands on.
         if let AnnotationKind::Call {
             noreturn: Some(ref never),
@@ -334,24 +368,17 @@ fn held(session: &Session, line: &r2engine::query::Line, next_call: Option<u64>)
         } = annotation.kind
         {
             let confidence = &never.confidence;
-            notes.push((
-                confidence.mark(),
+            notes.push(Note {
+                mark: confidence.mark(),
                 confidence,
-                Standing::Fact,
-                "noreturn".into(),
-            ));
+                standing: Standing::Fact,
+                text: "noreturn".into(),
+                annotation: None,
+            });
         }
     }
-    notes.sort_by(|a, b| Mark::weakest_first((a.0, a.1), (b.0, b.1)));
-    let spelled = notes.into_iter().map(|(mark, confidence, standing, said)| {
-        // A refusal or an unknown stands on no basis, so none is printed.
-        let basis = match session.proof && standing == Standing::Fact {
-            true => format!(" ({confidence})"),
-            false => String::new(),
-        };
-        format!(" ; {} {said}{basis}", mark.cell())
-    });
-    spelled.collect()
+    notes.sort_by(|a, b| Mark::weakest_first((a.mark, a.confidence), (b.mark, b.confidence)));
+    notes
 }
 
 /// What the program calls the address a word holds, after a space, or nothing where it calls it nothing.
