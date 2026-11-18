@@ -640,7 +640,7 @@ fn lazy_stubs(
         && instructions < STUB_INSTRUCTIONS
     {
         let fetched = crate::stated::code(&container.loader_writes, pc, window, endian);
-        let mut fetch = fetched.bytes.clone();
+        let mut fetch = fetched.bytes;
         fetch.resize(DECODE_WINDOW, 0);
         let Some(lifted) = decoder
             .lift(&fetch, pc)

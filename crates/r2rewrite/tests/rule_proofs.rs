@@ -236,7 +236,7 @@ fn every_rule_is_a_proven_equivalence() {
                 for hypothesis in encoder.hypotheses() {
                     solver.assert(hypothesis.clone());
                 }
-                solver.assert(lhs.eq(rhs.clone()).not());
+                solver.assert(lhs.eq(rhs).not());
                 let verdict = solver.check();
                 if verdict != SatResult::Unsat {
                     let mut witness = String::new();
