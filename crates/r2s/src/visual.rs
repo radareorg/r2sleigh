@@ -18,7 +18,11 @@ pub(crate) fn open(session: &mut Session) -> Result<String, String> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err("visual mode needs a terminal on stdin and stdout".to_owned());
     }
-    r2s_tui::run(&mut Visual { session }).map_err(|error| format!("visual mode: {error}"))?;
+    // `z` starts at the reader's notes and leaves `asm.proof` as the session had it.
+    let proof = std::mem::replace(&mut session.proof, false);
+    let ran = r2s_tui::run(&mut Visual { session });
+    session.proof = proof;
+    ran.map_err(|error| format!("visual mode: {error}"))?;
     Ok(String::new())
 }
 

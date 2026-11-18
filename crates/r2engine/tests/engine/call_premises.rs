@@ -115,18 +115,18 @@ const FNV1A32_O2: &[u8] = &[
     0xc3, // ret
 ];
 
-/// `fnv1a32` alone, its result decided by the closed world or by nothing.
-struct Decided(Option<r2source::SourceClosedDecision>);
+/// One function at `BASE`, its result decided by the closed world or by nothing.
+struct Decided(&'static [u8], Option<r2source::SourceClosedDecision>);
 
 impl r2engine::body::Program for Decided {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
-        let slice = FNV1A32_O2.get(offset..)?;
+        let slice = self.0.get(offset..)?;
         (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
     }
 
     fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
-        let end = BASE + FNV1A32_O2.len() as u64;
+        let end = BASE + self.0.len() as u64;
         (BASE..end)
             .contains(&vaddr)
             .then_some(r2engine::body::Region {
@@ -154,7 +154,7 @@ impl r2engine::native::Program for Decided {
     }
 
     fn name_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
-        (vaddr == BASE).then(|| r2abi::SymbolName::new("fnv1a32"))
+        (vaddr == BASE).then(|| r2abi::SymbolName::new("f"))
     }
 
     fn import_at(&self, _vaddr: u64) -> Option<r2abi::SymbolName> {
@@ -162,15 +162,17 @@ impl r2engine::native::Program for Decided {
     }
 
     fn closed_result(&self, entry: u64) -> Option<r2source::SourceClosedDecision> {
-        self.0.filter(|_| entry == BASE)
+        self.1.filter(|_| entry == BASE)
     }
 }
 
-/// Built with and without a closed result, `fnv1a32` states the same loop, induction and switch
-/// certificates, and its closed premises rest on the result fact alone (D592's witness).
+/// Built with and without each closed decision, fnv1a32's loop and a table dispatch state the same
+/// loop, induction and switch certificates, and the decision's premises rest on the result fact
+/// alone (D592's witness).
 #[test]
-fn a_closed_result_moves_no_loop_certificate() {
+fn a_closed_result_moves_no_loop_or_switch_certificate() {
     use r2abi::{CLibrary, ConventionId, Kernel, LibraryRows};
+    use r2source::{SourceClosedDecision, SourceClosedResult, SourceReadLanes, SourceSlotOrigin};
     let embedded = r2engine::machine::Machine::new(
         r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine"),
     );
@@ -200,23 +202,52 @@ fn a_closed_result_moves_no_loop_certificate() {
         data_model: None,
         premises: r2engine::native::accepted_premises(),
     };
-    let read = r2source::SourceReadLanes::Integer { widest: Some(4) };
-    let decision = r2source::SourceClosedDecision {
-        result: Some(r2source::SourceClosedResult::Read(read)),
-        integer_unread: false,
-        through_slot: false,
+    let decision = |result, integer_unread, through_slot| SourceClosedDecision {
+        result,
+        integer_unread,
+        through_slot,
     };
-    let built = |closed| {
-        let program = Decided(closed);
-        let prepared = r2engine::native::analysed(&target, &program, BASE).expect("prepares");
-        prepared.artifact().shared_artifact()
-    };
-    let (open, closed) = (built(None), built(Some(decision)));
-    let (open_facts, closed_facts) = (open.certificates(), closed.certificates());
-    assert!(!closed_facts.loops.is_empty(), "the loop is certified");
-    assert_eq!(open_facts.loops, closed_facts.loops);
-    assert_eq!(open_facts.switches, closed_facts.switches);
-    let function = closed.function();
-    assert!(function.result_premises().contains(&Premise::ClosedWorld));
-    assert!(!function.premises().contains(&Premise::ClosedWorld));
+    let read = SourceClosedResult::Read(SourceReadLanes::Integer { widest: Some(4) });
+    let slot = SourceClosedResult::DeclaredVoid(SourceSlotOrigin {
+        import: 0x2000,
+        parameter: 0,
+    });
+    let decisions = [
+        decision(Some(read), false, false),
+        decision(Some(SourceClosedResult::Void), false, false),
+        decision(Some(SourceClosedResult::Unread), false, false),
+        decision(None, true, false),
+        decision(Some(slot), false, true),
+    ];
+    for (code, certified) in [(FNV1A32_O2, "loop"), (common::TABLE_SWITCH, "switch")] {
+        let built = |closed| {
+            let program = Decided(code, closed);
+            let prepared = r2engine::native::analysed(&target, &program, BASE).expect("prepares");
+            prepared.artifact().shared_artifact()
+        };
+        let open = built(None);
+        let facts = open.certificates();
+        let held = match certified {
+            "loop" => !facts.loops.is_empty(),
+            _ => !facts.switches.is_empty(),
+        };
+        assert!(held, "the {certified} is certified");
+        for decided in decisions {
+            let closed = built(Some(decided));
+            let closed_facts = closed.certificates();
+            assert_eq!(facts.loops, closed_facts.loops, "{decided:?}");
+            assert_eq!(facts.switches, closed_facts.switches, "{decided:?}");
+            let function = closed.function();
+            let premises = decided
+                .premises()
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(function.result_premises(), &premises, "{decided:?}");
+            assert!(
+                !function.premises().contains(&Premise::ClosedWorld),
+                "{decided:?}"
+            );
+        }
+    }
 }

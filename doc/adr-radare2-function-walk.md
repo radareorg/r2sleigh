@@ -162,7 +162,8 @@ folded with `r2il::eval`. It reads what the seal reads and nothing else:
 
 `O((B + E) x k)` for `k` demanded storages; no SSA, promotion, prep facts or fold table.
 
-Step 0 (`designs/round15/d590-sites.md`): 1,909 sites on the pinned ELF corpus, 1,288 a constant
-in the call's block, 1 across a block edge, 1 through arithmetic on constants, 0 through a
-promoted slot, a load or a non-constant. The differential compared the reader with the seal at
-every (site, parameter) before the seal's call was deleted.
+Step 0 (`designs/round15/d590-sites.md`) classed 1,909 sites on the sealed graph and found none
+through a promoted slot; that graph had already turned literal-pool loads into copies, so the
+witness is the differential, the reader against the seal at every (site, parameter) before the
+seal's call was deleted. Its first round found 81 sites the reader missed (60 self-cancelling
+zeros, 20 read-only literal loads, 1 lane), which the reader now reads as the seal does.
