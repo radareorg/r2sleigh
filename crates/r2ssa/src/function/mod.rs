@@ -902,12 +902,6 @@ impl TrustedConstruction {
         &self.constructed.machine_context
     }
 
-    /// Whether a restatement of the callees can keep this build: its interface was recovered and
-    /// no pass over it exhausted.
-    pub const fn restatable(&self) -> bool {
-        self.constructed.reuse.is_some()
-    }
-
     /// The construction sealed, its facts not yet collected.
     pub fn seal<C: SsaWorkControl + ?Sized>(
         self,

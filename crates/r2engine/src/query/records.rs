@@ -391,8 +391,11 @@ pub enum AnnotationKind {
     },
     /// How many times this header runs when control leaves through the loop's one exit.
     Trips(Trips),
-    /// This line returns the value in this storage.
-    Returns { storage: r2ssa::CanonicalStorageId },
+    /// This line returns the function's result in this storage, standing as `afi` states it (D584).
+    Returns {
+        storage: Option<r2ssa::CanonicalStorageId>,
+        standing: super::ResultStanding,
+    },
 }
 
 /// One argument a call hands on.

@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::fates::World;
 use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
@@ -572,7 +571,15 @@ impl<S: Source + 'static> OpenProgram<S> {
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
         let lifted = walking.0.as_ref().map_err(Clone::clone)?.lifted();
         let body = WalkedBody::new(entry, &lifted, target.arch);
-        let proved = Proved::new(prepared);
+        // The `ret` notes read the sealed fact `afi` reads; a refused seal states none (D584).
+        let sealed = match self.sealing(entry) {
+            super::analysis::Sealing::Sealed(sealed) => Some(sealed.0),
+            _ => None,
+        };
+        let result = sealed
+            .as_ref()
+            .and_then(|sealed| sealed.facts().return_type());
+        let proved = Proved::new(prepared, result);
         let answered = Answered {
             body: Some(&body),
             ..self.answered(Some(&proved))
@@ -643,13 +650,10 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok((listing, shape))
     }
 
-    /// Survey the program, and from then on read each function's callers where its own body
-    /// leaves its result open (doc/adr-resolved-bodies.md, "Caller reads"): radare2's `aa`.
+    /// Survey the program once, radare2's `aa`: later answers are faster, never different (D573).
     pub fn analyse_program(&mut self) -> Result<(), String> {
         self.start_request();
-        self.surveyed()?;
-        self.callers = World::Closed;
-        Ok(())
+        self.surveyed().map(|_| ())
     }
 
     /// Every function the program has, from what the container states and

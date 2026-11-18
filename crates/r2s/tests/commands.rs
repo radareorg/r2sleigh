@@ -131,19 +131,14 @@ fn every_discovered_address_says_why_it_is_believed() {
     assert!(rows.len() >= defined, "{}", run.out);
 }
 
-/// The stripped `rv` binary's `fcn_12ef` writes RAX and XMM0, and its one caller reads XMM0: a
-/// fresh `pdd` reads the body alone, which leaves the result open; after `aa`, the call decides it.
+/// The stripped `rv` binary's `fcn_12ef` writes RAX and XMM0, and its one caller reads XMM0: the
+/// call decides the result in a fresh `pdd` as after `aa`, which prints nothing (D573).
 #[test]
-fn aa_reads_each_functions_callers() {
+fn every_request_reads_each_functions_callers() {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g_stripped");
     let alone = on(fixture.clone(), "pdd @ 0x12ef");
     assert!(alone.ok, "{}", alone.out);
-    assert!(
-        alone.out.contains("return r2sleigh_residual_"),
-        "{}",
-        alone.out
-    );
     let analysed = on(fixture.clone(), "aa; pdd @ 0x12ef");
     assert!(analysed.ok, "{}", analysed.out);
     assert!(
@@ -156,6 +151,7 @@ fn aa_reads_each_functions_callers() {
         "{}",
         analysed.out
     );
+    assert_eq!(alone.out, analysed.out);
     assert_eq!(on(fixture, "aa").out, "");
 }
 
@@ -876,7 +872,7 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
 fn pdd_writes_from_the_sealed_facts() {
     let staged = r2s(&format!("pdd @ {FNV1A32}"));
     for line in [
-        "return r2sleigh_carrier_u32((uint32_t)0x811c9dc5U);",
+        "return (uint32_t)0x811c9dc5U;",
         "r2sleigh_load_u8((void*)rdi_1)",
         "* (uint64_t)0x1000193U",
     ] {

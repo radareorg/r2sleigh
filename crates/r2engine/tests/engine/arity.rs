@@ -85,10 +85,9 @@ fn under_aa_a_floor_its_callee_owns_is_resolved_bottom_up() {
     assert!(!text.contains(", 7)"), "{text}");
 }
 
-/// Without `aa`, `f`'s arity is a floor of none and `caller` writes two slots: the call is a gap
-/// that names `f` and its floor, never `f(5, 7)` and never an unsupported instruction (audit M3).
+/// Cold, `f` is resolved against `g` as under `aa` (D573): `f(5)`, never `f(5, 7)` nor a gap.
 #[test]
-fn a_call_past_a_floor_is_a_gap_naming_its_callee_and_floor() {
+fn a_cold_call_reads_its_callee_resolved_against_its_owner() {
     let text = OpenProgram::of(Literal::of_code(
         HANDED_ON_ONE,
         &[
@@ -102,14 +101,9 @@ fn a_call_past_a_floor_is_a_gap_naming_its_callee_and_floor() {
     .response
     .output
     .into_text();
-    assert!(
-        text.contains(
-            "(render::values): call to f: its arity is only at least 0 (a floor), and this call writes 2 */"
-        ),
-        "{text}"
-    );
+    assert!(text.contains("= (uint64_t)f(5);"), "{text}");
+    assert!(!text.contains(", 7)"), "{text}");
     assert!(!text.contains("UnsupportedInstruction"), "{text}");
-    assert!(!text.contains("f(5"), "{text}");
 }
 
 /// `HANDED_ON_ONE` with `tail`: `mov edi, 5; mov esi, 7; jmp f` in place of `caller`.
@@ -127,10 +121,9 @@ const TAIL_PAST_A_FLOOR: &[u8] = &[
     0xe9, 0xd1, 0xff, 0xff, 0xff, // 102a jmp 0x1000
 ];
 
-/// A tail jump past `f`'s floor leaves a gap naming `f` (audit M3), not a bare
-/// `TailTransferNotRendered`.
+/// A tail jump to `f`, resolved against `g` (D573), hands `f` its one slot: `return f(5)`.
 #[test]
-fn a_tail_jump_past_a_floor_is_a_gap_naming_its_callee() {
+fn a_tail_jump_to_a_resolved_callee_hands_on_its_slots() {
     let text = OpenProgram::of(Literal::of_code(
         TAIL_PAST_A_FLOOR,
         &[
@@ -144,10 +137,8 @@ fn a_tail_jump_past_a_floor_is_a_gap_naming_its_callee() {
     .response
     .output
     .into_text();
-    assert!(
-        text.contains("TailTransferNotRendered at 0x1020 (render::control): call to f:"),
-        "{text}"
-    );
+    assert!(text.contains("f(5));"), "{text}");
+    assert!(!text.contains("TailTransferNotRendered"), "{text}");
 }
 
 /// `caller`: `mov edi, 5; mov esi, 7; call [rip + 0x10]; ret`, the slot at 0x1020 the loader binds
@@ -845,12 +836,21 @@ fn a_call_through_memory_is_a_floor_handed_to_no_callee() {
     assert_eq!(cause, handed_to(SourceUnprovenCall::Indirect));
 }
 
-/// `call 0x1000; ret`: the callee is the function itself, which states no arity yet.
+/// `call 0x1000; ret`: the callee is the function itself, so its arity is the cycle's least
+/// fixpoint, exactly none (doc/adr-resolved-bodies.md, "Arity").
 #[test]
-fn a_call_to_a_callee_nothing_states_is_a_floor_handed_to_it() {
+fn a_call_to_itself_is_exact_at_the_least_fixpoint() {
     const CODE: &[u8] = &[0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3];
-    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 6)]));
-    assert_eq!(cause, handed_to(SourceUnprovenCall::Unstated(BASE)));
+    let mut open = OpenProgram::of(Literal::of_code(CODE, &[("f", BASE, 6)]));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("an interface");
+    assert!(
+        interface.arity().is_exact(),
+        "{:?}",
+        interface.arity_floor()
+    );
+    assert_eq!(interface.arity().floor(), 0);
 }
 
 /// `f`: `call g; ret`; `g`: `mov eax, [rsp + 8]; ret`, a floor of its own (D37's

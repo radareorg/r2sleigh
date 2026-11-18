@@ -468,7 +468,7 @@ fn a_walked_callee_that_writes_the_result_register_first_reads_no_bits_above_a_n
     // mov rax, rdi; call rax; ret
     let text = read_by_a_walked_callee(&[0x48, 0x89, 0xf8, 0xff, 0xd0, 0xc3]);
     assert!(!text.contains("<< 32"), "{text}");
-    assert!(text.contains("narrow((uint32_t)arg0);"), "{text}");
+    assert!(text.contains("narrow(arg0);"), "{text}");
 }
 
 /// `g` copies RAX before it writes it, so its register effect takes every byte: the call reads
@@ -538,7 +538,7 @@ fn a_tail_to_a_void_callee_names_its_exit() {
     let text = rendered.expect("it renders").response.output.into_text();
     assert!(!text.contains("<< 32"), "{text}");
     assert!(
-        text.contains("rax_1 = (uint64_t)narrow((uint32_t)arg0);"),
+        text.contains("rax_1 = (uint64_t)(uint32_t)narrow((uint64_t)arg0);"),
         "{text}"
     );
 }
@@ -554,7 +554,7 @@ fn a_tail_to_a_variadic_callee_names_its_exit() {
     assert!(text.contains("call to printf: variadic"), "{text}");
     assert!(!text.contains("<< 32"), "{text}");
     assert!(
-        text.contains("rax_1 = (uint64_t)narrow((uint32_t)arg0);"),
+        text.contains("rax_1 = (uint64_t)(uint32_t)narrow(arg0);"),
         "{text}"
     );
 }

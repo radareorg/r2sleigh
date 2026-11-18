@@ -80,20 +80,29 @@ read decides the call's result, a float at the read's width; r2types types it
 there (`call_result_type`). Both or neither leave the call without a contract.
 The cost is one scan of the call's block, O(ops after the call).
 
-After `aa`, the function's own rendering asks every call in the program: the
-walked bodies whose trace calls it (`Survey`, inverted once, O(call edges)),
-each lifted without preparation. Every reading call agreeing on one register
-decides it; none, or calls that disagree, leave it unproven. Only the
-rendered root is prepared again with that evidence (`SourceResultReads`); a
-callee read for its caller never asks.
+Every request asks every call in the program: the walked bodies whose trace
+calls it (`Survey`, inverted once, O(call edges)), each lifted without
+preparation. Every reading call agreeing on one register decides it; none, or
+calls that disagree, leave it unproven. Only the rendered root is prepared
+again with that evidence (`SourceResultReads`); a callee read for its caller
+never asks.
 
-Reading callers surveys the whole program, so a fresh open reads the body
-alone and its open result stays a residual. On pumasim, `pdd @ 0x4baf30`
-takes 4.6 s alone and 10.3 s with the survey (contabo, 2026-10-13). `aa`
-surveys once and sets `Callers::Read`, which every analysis, sealing and
-rendering key carries, so a session's answers never depend on which command
-first ran the survey. Census, certification, the coverage sweep and
-equivalence run `aa` first.
+One world (D573, round 14 ruling): the answer to `pdd`, `pdf`, `afi`, `afv`,
+`afb` and `pddj` is a function of the bytes and the request. The analysis key
+is `(entry, thumb)`; no session flag enters it, and `aa` computes the survey
+alone, so later answers are faster, never different. The closed answer names
+`Premise::ClosedWorld` on its proof line. `World::Open` survives only as the
+supply stage inside one closed answer (an alone read, an import's
+`CallBoundary`, D317). The open-world resolution (`Demand::Result` and the
+build search of doc/adr-callee-builds.md) had no reader left and is deleted.
+A cold request pays the survey and the caller closure `aa; X` pays (Mac,
+718a898b2): 0pack `pdd @ 0x62ecf0` 13.05 G to about 102 G, pumasim
+`pdd @ 0x23fdf0` 18.7 G to about 143.8 G, bash `pdf @ 0x1e1d0` 5.19 G to
+about 57.9 G. Each request asks the survey first, outside any analysis frame,
+as `aa` asks it: asked from inside the first analysis, the same answer cost
+bash `pdf @ 0x1e1d0` 0.44% more instructions and 6% more peak RSS than
+`aa; pdf` (Mac). D586 attributes the closure. `scripts/history_gate.py`
+holds the invariant.
 
 The evidence is as strong as the body's own writes: a compiler reads a
 clobbered register after a call only as the callee's result. A caller that

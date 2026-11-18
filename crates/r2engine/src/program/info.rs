@@ -52,8 +52,7 @@ pub struct UnprovenResult {
 impl UnprovenResult {
     /// The cause as the proof line spells it.
     pub fn cause_name(self) -> &'static str {
-        self.cause
-            .map_or("no return reached", r2types::UnprovenCause::name)
+        crate::query::ResultStanding::cause_name(self.cause)
     }
 }
 

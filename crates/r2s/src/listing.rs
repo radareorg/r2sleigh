@@ -396,13 +396,29 @@ fn note(session: &Session, at: u64, kind: &r2engine::query::AnnotationKind) -> O
         r2engine::query::AnnotationKind::Trips(ref trips) => {
             Some(format!("trips {}", counted(session, at, trips)?))
         }
-        r2engine::query::AnnotationKind::Returns { storage } => session
-            .program
-            .spell_storage(at, storage)
-            .map(|name| format!("returns {name}")),
+        r2engine::query::AnnotationKind::Returns {
+            storage,
+            ref standing,
+        } => resulted(session.program.spell_storage(at, storage?)?, standing),
         // A case or default is a label above the line, not a note beside it.
         _ => None,
     }
+}
+
+/// The result as `afi` states it: decided, unproven with its cause, or refused (D584).
+fn resulted(name: String, standing: &r2engine::query::ResultStanding) -> Option<String> {
+    use r2engine::query::ResultStanding;
+    Some(match standing {
+        ResultStanding::Decided(_) => format!("returns {name}"),
+        ResultStanding::Unproven(cause) => {
+            let cause = ResultStanding::cause_name(*cause);
+            format!("result unproven ({name}, {cause})")
+        }
+        ResultStanding::Refused(refusal) => {
+            let refusal = ResultStanding::refusal_name(*refusal);
+            format!("result refused ({name}, {refusal})")
+        }
+    })
 }
 
 /// A dispatch, in radare2's words where the table it reads is known.

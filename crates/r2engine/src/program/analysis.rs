@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{ProgramInputs, Source, View};
-use crate::native::{Built, CalleeRead, NativeRefusal, Prepared, Stated, Unreadable};
+use crate::native::{CalleeRead, NativeRefusal, Prepared, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
 use crate::{EngineDecompileResponse, EngineSession, SealedFunctionAnalysis};
 
@@ -23,9 +23,8 @@ impl<T> PartialEq for Shared<T> {
     }
 }
 
-/// One function's analysis, sealing and rendering: its entry, whether it is Thumb, and whether
-/// it reads its callers.
-pub(super) type Key = (u64, bool, super::World);
+/// One function's analysis, sealing and rendering: its entry and whether it is Thumb.
+pub(super) type Key = (u64, bool);
 
 /// One function's walk and preparation, by its key; the most recent only.
 pub(super) struct Analysed;
@@ -48,7 +47,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
     /// (doc/adr-memory-model.md, "Retention").
     const RETENTION: Retention = Retention::Newest;
 
-    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb, callers): &Key) -> Analysis {
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &Key) -> Analysis {
         let view = View::new(db, true);
         let target = match target(&view, entry, thumb) {
             Ok(target) => target,
@@ -62,7 +61,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
             Err(refusal) => return Analysis(Err(refusal)),
         };
         let analysed = crate::isolation::isolated(|| {
-            crate::native::analysed_from(&target, &view, (entry, walk), callers)
+            crate::native::analysed_from(&target, &view, (entry, walk))
         });
         Analysis(
             analysed
@@ -387,58 +386,6 @@ pub(super) fn callee_read<S: Source + 'static>(
             crate::native::callee_read(&target, &view, address, walked, stated)
         }
         _ => unread(Unreadable::NotPrepared),
-    }
-}
-
-/// One callee built alone on its walk, or why it has no build: `callee_read`'s first step
-/// (doc/adr-callee-builds.md).
-pub(super) fn callee_built<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    (address, thumb): (u64, bool),
-) -> Result<Built, Unreadable> {
-    let view = View::new(db, true);
-    let target = view
-        .machine_in(thumb)
-        .map(|machine| view.target_of(machine, address));
-    let walked = db
-        .get::<Walked>(&(address, thumb))
-        .expect("a walk asks for no callee");
-    match (target, walked.resolved()) {
-        (_, Err(refusal)) if refusal.stopped() => Err(Unreadable::Stopped),
-        (_, Err(_)) => Err(Unreadable::NotWalked),
-        (Some(Ok(target)), Ok(walked)) => {
-            crate::native::callee_built(&target, &view, address, walked)
-        }
-        _ => Err(Unreadable::NotPrepared),
-    }
-}
-
-/// A built callee resolved against its owners: `callee_read` against them, from its build.
-pub(super) fn built_read<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    (address, thumb): (u64, bool),
-    built: Built,
-    owners: &[(u64, Arc<CalleeRead>)],
-) -> (CalleeRead, bool) {
-    let view = View::new(db, true);
-    let target = view
-        .machine_in(thumb)
-        .map(|machine| view.target_of(machine, address));
-    let walked = db
-        .get::<Walked>(&(address, thumb))
-        .expect("a walk asks for no callee");
-    match (target, walked.resolved()) {
-        (Some(Ok(target)), Ok(walked)) => {
-            let built = crate::native::built_read(&target, &view, walked, built, owners);
-            (built.read, built.again)
-        }
-        _ => {
-            let unread = CalleeRead {
-                interface: None,
-                facts: Err(Unreadable::NotPrepared),
-            };
-            (unread, false)
-        }
     }
 }
 

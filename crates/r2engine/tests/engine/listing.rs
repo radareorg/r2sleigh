@@ -634,7 +634,12 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         slot: ArgumentSlot::Register(rdi),
         value: Some(HANDED),
     };
-    let returns = AnnotationKind::Returns { storage: rax };
+    // No call reads `hands`' written result: the `ret` note is `afi`'s unproven result (D584).
+    let standing = r2engine::query::ResultStanding::Unproven(Some(r2types::UnprovenCause::Written));
+    let returns = AnnotationKind::Returns {
+        storage: Some(rax),
+        standing,
+    };
     assert_eq!(
         certified(&hands),
         [
@@ -653,7 +658,7 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
                 },
                 Basis::Certified,
             ),
-            (call + 5, returns.clone(), Basis::Certified),
+            (call + 5, returns, Basis::Convention),
         ]
     );
     let ident = program
@@ -661,7 +666,13 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         .expect("it lists")
         .lines
         .value;
-    assert_eq!(certified(&ident), [(BASE + 3, returns, Basis::Certified)]);
+    // `hands` reads none of `ident`'s result: unproven, `Unread`.
+    let unread = r2engine::query::ResultStanding::Unproven(Some(r2types::UnprovenCause::Unread));
+    let returns = AnnotationKind::Returns {
+        storage: Some(rax),
+        standing: unread,
+    };
+    assert_eq!(certified(&ident), [(BASE + 3, returns, Basis::Convention)]);
 }
 
 #[test]
@@ -973,7 +984,7 @@ fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
     assert!(refused.contains(&defect), "{refused}");
     // The same defect refused the analysis first, and that is said too.
     assert!(refused.contains("the analysis panicked at "), "{refused}");
-    // The next function is untouched by it.
+    // The next function is untouched by it: the survey refuses that one body's walk (D587).
     let one = program.function_listing(ONE).expect("the session goes on");
     assert!(one.refused.is_none());
     assert_eq!(one.lines.value.first().map(|line| line.address), Some(ONE));
