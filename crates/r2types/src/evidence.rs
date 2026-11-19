@@ -132,8 +132,8 @@ fn handed_dereferenced(
                 _ => None,
             };
             let widths = match (stated, position) {
-                (Some(stated), Some(position)) => match stated.get(&position) {
-                    Some(widths) => *widths,
+                (Some(stated), Some(position)) => match stated.at(position) {
+                    Some(widths) => widths,
                     None => continue,
                 },
                 _ => r2ssa::AccessWidths::OPEN_ONLY,

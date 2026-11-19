@@ -281,6 +281,29 @@ impl AccessWidths {
     }
 }
 
+/// Each integer argument position's access widths, a copy held per callee; a position past the
+/// eighth states nothing and reads as open (D610).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ArgumentWidths([AccessWidths; ArgumentWidths::POSITIONS]);
+
+impl ArgumentWidths {
+    pub const POSITIONS: usize = 8;
+
+    fn join(&mut self, position: usize, widths: AccessWidths) {
+        if let Some(held) = self.0.get_mut(position) {
+            *held = held.join(widths);
+        }
+    }
+
+    /// The widths at `position`, none where nothing is accessed through it.
+    pub fn at(&self, position: usize) -> Option<AccessWidths> {
+        match self.0.get(position) {
+            Some(widths) => (*widths != AccessWidths::default()).then_some(*widths),
+            None => Some(AccessWidths::OPEN_ONLY),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SummaryMemoryLocation {
     pub region: SummaryMemoryRegion,
@@ -1220,13 +1243,16 @@ impl PreparedCalleeSummary {
 
     /// Each accessed argument's access widths, opened where an access this body does not state
     /// may reach it (D610). `O(arguments)`.
-    pub fn argument_access_widths(&self) -> BTreeMap<usize, AccessWidths> {
+    pub fn argument_access_widths(&self) -> ArgumentWidths {
         let open = self.local.widths_open | self.local.handed_on;
-        let mut widths = self.local.dereferenced_args.clone();
-        for index in (0..u64::BITS as usize).filter(|index| dependence::names_formal(open, *index))
+        let mut widths = ArgumentWidths::default();
+        for (index, accessed) in &self.local.dereferenced_args {
+            widths.join(*index, *accessed);
+        }
+        for index in
+            (0..ArgumentWidths::POSITIONS).filter(|index| dependence::names_formal(open, *index))
         {
-            let held = widths.entry(index).or_default();
-            *held = held.join(AccessWidths::OPEN_ONLY);
+            widths.join(index, AccessWidths::OPEN_ONLY);
         }
         widths
     }
@@ -2175,18 +2201,15 @@ fn collect_local_summary_facts_with_obligation_authority(
     out.unplaced_reach |= dependence.exposed_formals();
     out.widths_open |= dependence.exposed_formals();
     out.handed_on = dependence.passed_to_calls();
-    // An access that names no argument region at a stated place could touch
-    // any formal's object its address is computed from.
+    // An access that names no argument region at a stated place could touch any formal's object
+    // its address is computed from; at no argument region, its width is no argument's (D610).
     let unplaced = |location: &SummaryMemoryLocation, addr: &SSAVar| match location.region {
-        SummaryMemoryRegion::Unknown => bits_of_var(addr),
-        SummaryMemoryRegion::Arg { .. } if location.range.is_none() => bits_of_var(addr),
-        _ => 0,
-    };
-    // An access at no argument region whose address a formal computes is one at a width no
-    // argument states, and a formal stored to memory is accessed wherever it is read back (D610).
-    let unstated = |location: &SummaryMemoryLocation, addr: &SSAVar| match location.region {
-        SummaryMemoryRegion::Unknown => bits_of_var(addr),
-        _ => 0,
+        SummaryMemoryRegion::Unknown => {
+            let bits = bits_of_var(addr);
+            (bits, bits)
+        }
+        SummaryMemoryRegion::Arg { .. } if location.range.is_none() => (bits_of_var(addr), 0),
+        _ => (0, 0),
     };
 
     if source_requires_unknown_effects {
@@ -2254,8 +2277,9 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, dst.size);
-                    out.unplaced_reach |= unplaced(&location, addr);
-                    out.widths_open |= unstated(&location, addr);
+                    let (reach, unstated) = unplaced(&location, addr);
+                    out.unplaced_reach |= reach;
+                    out.widths_open |= unstated;
                     mark_location_access(&mut out, location, dst.size, (true, false));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2281,8 +2305,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                         space,
                         access.dst.size,
                     );
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(access.stored());
-                    out.widths_open |= unstated(&location, addr) | bits_of_var(access.stored());
+                    let ((reach, unstated), stored) =
+                        (unplaced(&location, addr), bits_of_var(access.stored()));
+                    out.unplaced_reach |= reach | stored;
+                    out.widths_open |= unstated | stored;
                     mark_location_access(&mut out, location, access.dst.size, (true, true));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2311,8 +2337,9 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
-                    out.widths_open |= unstated(&location, addr) | bits_of_var(val);
+                    let ((reach, unstated), stored) = (unplaced(&location, addr), bits_of_var(val));
+                    out.unplaced_reach |= reach | stored;
+                    out.widths_open |= unstated | stored;
                     mark_location_access(&mut out, location, val.size, (true, true));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
@@ -2351,8 +2378,9 @@ fn collect_local_summary_facts_with_obligation_authority(
                     // A formal's pointer stored where this function does not
                     // own the memory has escaped: whatever reads it later can
                     // reach its object.
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
-                    out.widths_open |= unstated(&location, addr) | bits_of_var(val);
+                    let ((reach, unstated), stored) = (unplaced(&location, addr), bits_of_var(val));
+                    out.unplaced_reach |= reach | stored;
+                    out.widths_open |= unstated | stored;
                     mark_location_access(&mut out, location, val.size, (false, true));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Write,

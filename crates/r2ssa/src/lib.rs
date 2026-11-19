@@ -135,7 +135,7 @@ pub use integrity::{
     validate_ssa_function,
 };
 pub use interproc::{
-    AccessWidths, ArgumentReach, CallArgObservation, FunctionSemanticLinkage,
+    AccessWidths, ArgumentReach, ArgumentWidths, CallArgObservation, FunctionSemanticLinkage,
     FunctionSemanticSummary, InterprocFunctionId, InterprocFunctionInput,
     InterprocSummaryDiagnostics, InterprocSummarySet, PreparedCalleeSummary,
     PreparedInterprocFunctionInput, PreparedInterprocSummaryError, PreparedInterprocSummarySet,

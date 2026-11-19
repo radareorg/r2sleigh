@@ -1836,7 +1836,7 @@ struct Callees {
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
     /// The widths each callee's body accesses at through each argument it is handed (D610).
-    dereferenced: BTreeMap<u64, BTreeMap<usize, r2ssa::AccessWidths>>,
+    dereferenced: BTreeMap<u64, r2ssa::ArgumentWidths>,
     /// What each stated callee may write of its caller's stack; one absent may write any (D377).
     writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
     /// What each walked callee may read of the result registers; one absent reads any (D372).

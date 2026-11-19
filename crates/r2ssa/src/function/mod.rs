@@ -4228,7 +4228,7 @@ pub struct CalleeEvidence {
     /// How far each callee reaches through each pointer it is handed.
     pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     /// The widths each callee's own body loads or stores at through each argument it is handed (D610).
-    pub dereferenced: BTreeMap<u64, BTreeMap<usize, crate::AccessWidths>>,
+    pub dereferenced: BTreeMap<u64, crate::ArgumentWidths>,
     /// What each stated callee may write of its caller's stack; a callee absent writes any (D377).
     pub writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The low bytes each walked callee may read of each result register; one absent reads any (D372).
