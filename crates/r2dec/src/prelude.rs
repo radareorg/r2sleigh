@@ -713,7 +713,9 @@ pub(crate) fn typedefs_within(ty: &CType, out: &mut std::collections::BTreeSet<S
 pub(crate) fn result_typedef(ty: &CType) -> Option<String> {
     match ty {
         CType::Typedef { name, ty }
-            if name.starts_with(RESULT_TYPEDEF) || name.starts_with(r2types::UNSTATED_WORD) =>
+            if name.starts_with(RESULT_TYPEDEF)
+                || name.starts_with(r2types::UNSTATED_WORD)
+                || name.starts_with(r2types::UNPROVEN_PARAMETER) =>
         {
             match ty.as_ref() {
                 CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),

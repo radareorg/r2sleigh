@@ -118,7 +118,7 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
 /// `ty`, the unstated word as its integer (D265).
 pub(super) fn word_free(ty: &CType) -> &CType {
     match ty {
-        CType::Typedef { ty: inner, .. } if r2types::is_unstated_word(ty) => inner,
+        CType::Typedef { ty: inner, .. } if r2types::is_width_only(ty) => inner,
         ty => ty,
     }
 }

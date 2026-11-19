@@ -82,6 +82,7 @@ type Clauses<'a> = (
     ((bool, bool), &'a [Disputed]),
     usize,
     &'a [String],
+    &'a [(usize, r2types::PointerRefusal)],
 );
 
 /// The frame-isolation clause, where an indirect call's promotion rests on it (D471).
@@ -114,9 +115,7 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting): Clauses<
-        '_,
-    >,
+    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting, parameters): Clauses<'_>,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
     landing_pads: u32,
@@ -226,6 +225,7 @@ pub(crate) fn note_unproven_constructs(
     if let Some(cause) = unproven {
         note_unproven(&mut detail, func, cause);
     }
+    note_unproven_parameters(&mut detail, parameters);
     note_disputed(&mut detail, disputed);
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
     // A tag two graphs state as different kinds has no one declaration: its pointers are words.
@@ -305,6 +305,13 @@ fn note_disputed(detail: &mut String, disputed: &[Disputed]) {
             detail,
             "; the declared result is kept against the body: {found} the {lane} result register"
         );
+    }
+}
+
+/// A parameter spelled at its carrier names why no type is proven (D610).
+fn note_unproven_parameters(detail: &mut String, parameters: &[(usize, r2types::PointerRefusal)]) {
+    for (index, cause) in parameters {
+        let _ = write!(detail, "; parameter {index} is unproven ({})", cause.name());
     }
 }
 

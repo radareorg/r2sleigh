@@ -43,8 +43,9 @@ fn a_call_to_a_body_that_hands_on_its_argument_passes_it() {
         .response
         .output
         .into_text();
+    // `g` reads a dword through the slot, so it is a pointer to one (D610).
     assert!(
-        text.contains("f(5)") || text.contains("f((uint64_t)5U)"),
+        text.contains("f((r2sleigh_word_u32*)(uint64_t)5U)"),
         "{text}"
     );
     assert!(!text.contains("f()"), "{text}");

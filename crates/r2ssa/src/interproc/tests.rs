@@ -66,8 +66,10 @@ fn empty_local_summary(direct_callees: BTreeSet<u64>) -> LocalSummaryFacts {
         return_observations: Vec::new(),
         call_observations: BTreeMap::new(),
         call_carriers_converged: true,
-        dereferenced_args: BTreeSet::new(),
+        dereferenced_args: BTreeMap::new(),
         unplaced_reach: 0,
+        widths_open: 0,
+        handed_on: 0,
     }
 }
 

@@ -78,8 +78,9 @@ fn under_aa_a_floor_its_callee_owns_is_resolved_bottom_up() {
         .response
         .output
         .into_text();
+    // `g` reads a dword through the slot, so it is a pointer to one (D610).
     assert!(
-        text.contains("f(5)") || text.contains("f((uint64_t)5U)"),
+        text.contains("f((r2sleigh_word_u32*)(uint64_t)5U)"),
         "{text}"
     );
     assert!(!text.contains(", 7)"), "{text}");
@@ -101,7 +102,10 @@ fn a_cold_call_reads_its_callee_resolved_against_its_owner() {
     .response
     .output
     .into_text();
-    assert!(text.contains("= (uint64_t)f(5);"), "{text}");
+    assert!(
+        text.contains("= (uint64_t)f((r2sleigh_word_u32*)(uint64_t)5U);"),
+        "{text}"
+    );
     assert!(!text.contains(", 7)"), "{text}");
     assert!(!text.contains("UnsupportedInstruction"), "{text}");
 }
@@ -137,7 +141,10 @@ fn a_tail_jump_to_a_resolved_callee_hands_on_its_slots() {
     .response
     .output
     .into_text();
-    assert!(text.contains("f(5));"), "{text}");
+    assert!(
+        text.contains("f((r2sleigh_word_u32*)(uint64_t)5U));"),
+        "{text}"
+    );
     assert!(!text.contains("TailTransferNotRendered"), "{text}");
 }
 
