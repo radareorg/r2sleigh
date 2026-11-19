@@ -2000,7 +2000,7 @@ struct Callees {
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
     /// The widths each callee's body accesses at through each argument it is handed (D610).
-    dereferenced: BTreeMap<u64, BTreeMap<usize, r2ssa::AccessWidths>>,
+    dereferenced: r2ssa::CalleeWidths,
     /// What each stated callee may write of its caller's stack; one absent may write any (D377).
     writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
     /// What each walked callee may read of the result registers; one absent reads any (D372).
@@ -2026,7 +2026,7 @@ impl Callees {
             mapping_premises: self.mapped.clone(),
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
-            dereferenced: self.dereferenced.clone(),
+            dereferenced: Arc::clone(&self.dereferenced),
             writes: self.writes.clone(),
             lane_reads: self.lane_reads.clone(),
             library,
@@ -2066,7 +2066,8 @@ impl Callees {
         // arguments is described, and a callee with no entry is one nothing
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
-        (self.dereferenced).insert(address, facts.summary().argument_access_widths());
+        std::sync::Arc::make_mut(&mut self.dereferenced)
+            .insert(address, facts.summary().argument_access_widths());
     }
 }
 

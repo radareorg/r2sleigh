@@ -2222,10 +2222,10 @@ binaries = ["go-cdetect"]
 corpus = "elf"
 function = '^(0x00401000|0x0042d700|0x00458aa0|0x00458b40|0x0047a880) '
 lacking = "r2"
-r2s = '^(arg r2sleigh_word_u64 arg0 @ rax|arg r2sleigh_word_u64 arg1 @ rbx|arg r2sleigh_word_u64\* arg0 @ rax|arg void\* arg1 @ rbx)$'
+r2s = '^(arg r2sleigh_word_u64 arg0 @ rax|arg r2sleigh_word_u64 arg1 @ rbx|arg r2sleigh_word_u64\* arg0 @ rax|arg void\* arg1 @ rbx|arg r2sleigh_unproven_u64 arg0 @ rax)$'
 verdict = "r2s-right"
 upstream = "afv applies the amd64 SysV registers to Go ABIInternal functions (Go 1.17+: integer arguments in rax, rbx, rcx, rdi, rsi, r8..r11)"
-reason = "class F: go-cdetect 0x47a880 syscall.Getenv(key string) spills its string's pointer and length from rax and rbx (`mov qword [rsp+0x60], rax`, `mov [rsp+0x68], rbx`); r2s states rax, rbx under Go ABIInternal, radare2 lists neither; go-cdetect 0x458aa0 reflect.mapiternext saves rax across morestack (0x458ac3) and hands it to runtime.mapiternext (sampled since D506)"
+reason = "class F: go-cdetect 0x47a880 syscall.Getenv(key string) spills its string's pointer and length from rax and rbx (`mov qword [rsp+0x60], rax`, `mov [rsp+0x68], rbx`); r2s states rax, rbx under Go ABIInternal, radare2 lists neither; go-cdetect 0x458aa0 reflect.mapiternext saves rax across morestack (0x458ac3) and hands it to runtime.mapiternext (sampled since D506); since D610 its type is `r2sleigh_unproven_u64`, the callee accessing through it at widths that do not agree"
 
 [[judged]]
 command = "afv"
