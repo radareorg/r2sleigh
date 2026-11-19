@@ -1,8 +1,9 @@
 # ADR: display
 
 Status: D580, D579, D583, D581 and D567 built in round 14 ("Round 14 as
-built"); D569 built in round 15 ("Round 15 as built: listing"); D565, D566,
-D568, D574 and D582 proposed (ROADMAP).
+built"); D569, D565 and D568 built and D566 built in part in round 15
+("Round 15 as built: listing", open parts D619 to D622); D574 and D582
+proposed (ROADMAP).
 
 ## Problem
 
@@ -192,7 +193,7 @@ tests whether a setter's call is the next call line.
 | Callee noreturn | r2engine | `Call { noreturn: Option<Fact<bool>> }` from the callee's `Never` |
 | Arity floor, result, widths | r2types through r2engine's frame answer | `Fact`, floor, `UnprovenCause` |
 | Block edges, gaps, span | r2engine block index | D565 edges |
-| Xrefs and coverage | r2engine reference index | the `axt` answer and the unresolved count |
+| Xrefs and coverage | r2engine reference index (`axt`); the survey's caller rows (`pdf` header, D566) | the `axt` answer and its unresolved count; `Header { calls, tails, unresolved }` |
 | Names, demangled | r2engine `names.rs` | D574 |
 | `pdd` rails, statement addresses | r2dec | D568 |
 | Theme | r2s-tui `theme.rs` | D569 |
@@ -306,7 +307,9 @@ tests whether a setter's call is the next call line.
   premise moves to the result fact with D592), the `.` unstated-sign width
   line, the `?` kind of gap (bytes no body holds needs a range query on
   `Holders`), and the floor's causes in the header (they stay on `pdd`'s proof
-  line, whose speller is r2dec's).
+  line, whose speller is r2dec's). Cost left open: `afb`, `agf` and `VV` go
+  through `listed_body` and pay for the header's `FunctionInfo` read and
+  survey lookup they discard.
 - D568: r2dec's `Emission` states `depths` (one byte per definition line, the
   indentation `emit_indent` writes), `proof_line` (the line of
   `/* r2dec proof: ... */`), `indent` (the bytes one level takes) and

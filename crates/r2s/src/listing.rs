@@ -1079,6 +1079,34 @@ mod tests {
         assert_eq!(signed(i64::MIN), "-0x8000000000000000");
     }
 
+    /// On an 80-column terminal every `pdf` line fits, a cut line ends in `..`, and colour adds
+    /// only escapes (D565).
+    #[test]
+    fn a_terminal_listing_is_cut_to_its_width_and_painted_over_the_cut() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/coverage/pinned/hashes_gcc_x64_O2"
+        );
+        let mut session = crate::session::Session::open(path).expect("the fixture opens");
+        session.columns = Some(80);
+        let plain = super::disassemble_function(&mut session, "0x401330").expect("it lists");
+        session.color = 1;
+        let painted = super::disassemble_function(&mut session, "0x401330").expect("it lists");
+        let mut stripped = String::new();
+        let mut rest = painted.as_str();
+        while let Some((before, after)) = rest.split_once('\x1b') {
+            stripped.push_str(before);
+            rest = after.split_once('m').map_or("", |(_, after)| after);
+        }
+        stripped.push_str(rest);
+        assert_eq!(stripped, plain);
+        assert!(
+            plain.lines().all(|line| line.chars().count() <= 80),
+            "{plain}"
+        );
+        assert!(plain.lines().any(|line| line.ends_with("..")), "{plain}");
+    }
+
     #[test]
     fn a_listing_cut_short_by_unmapped_bytes_says_where() {
         use r2engine::query::Completion;

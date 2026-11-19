@@ -119,3 +119,27 @@ fn the_laid_out_pdd_strips_back_to_the_plain_one() {
         }
     }
 }
+
+/// `text` with every SGR sequence (`ESC [ ... m`) removed.
+fn unpainted(text: &str) -> String {
+    let mut parts = text.split('\x1b');
+    let first = parts.next().unwrap_or_default().to_owned();
+    parts.fold(first, |mut out, part| {
+        out.push_str(part.split_once('m').map_or("", |(_, rest)| rest));
+        out
+    })
+}
+
+/// Painted at any depth, the laid out text is the plain laid out text with escapes added.
+#[test]
+fn the_painted_layout_is_the_plain_layout() {
+    let plain = piped("e asm.rails=true; e asm.pdd.addr=true; pdd @ sym.fnv1a32");
+    for depth in 1..=3 {
+        let script = format!(
+            "e scr.color={depth}; e asm.rails=true; e asm.pdd.addr=true; pdd @ sym.fnv1a32"
+        );
+        let painted = piped(&script);
+        assert!(painted.contains("\x1b["), "scr.color={depth}");
+        assert_eq!(unpainted(&painted), plain, "scr.color={depth}");
+    }
+}
