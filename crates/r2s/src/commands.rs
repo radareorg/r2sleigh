@@ -258,6 +258,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(crate::listing::disassemble_function)
     ),
     verb!(
+        ["pdfj"],
+        Address,
+        Public,
+        "a function's listing as JSON, each line with its notes",
+        Some(crate::opcodes::function_json)
+    ),
+    verb!(
         ["pdd"],
         Address,
         Public,
@@ -436,11 +443,21 @@ fn help() -> String {
     out
 }
 
-/// `verb?`: one verb's usage, and the other names it answers to.
+/// `verb?`: one verb's usage, and the other names it answers to; `pd?` ends with the mark legend.
 fn usage(verb: &Verb) -> String {
     let mut out = format!("Usage: {}  {}", verb.usage(), verb.summary);
     if verb.names.len() > 1 {
         out.push_str(&format!("\naliases: {}", verb.names[1..].join(" ")));
+    }
+    if verb.names[0] == "pd" {
+        out.push_str("\nmarks after ';':");
+        for mark in r2engine::query::Mark::ALL.into_iter().rev() {
+            let cell = match mark.cell() {
+                ' ' => "(space)".to_owned(),
+                cell => cell.to_string(),
+            };
+            out.push_str(&format!("\n{cell}  {}", mark.reads_as()));
+        }
     }
     out
 }

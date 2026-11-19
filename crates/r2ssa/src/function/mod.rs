@@ -591,6 +591,8 @@ struct Constructed {
     arch: crate::Arch,
     /// What the recovered result's closed-world decision takes for granted.
     closed_premises: &'static [r2source::Premise],
+    /// What each direct callee's parameter list rests on (D592).
+    callee_premises: Arc<BTreeMap<u64, r2source::Premises>>,
     exits: AssumedExits,
     /// The build recovery read, where it recovered the interface: what a restatement reuses.
     reuse: Option<Reuse>,
@@ -841,6 +843,7 @@ impl Constructed {
             source_block_count,
             arch,
             closed_premises,
+            callee_premises,
             exits,
             reuse,
             kept: _,
@@ -854,8 +857,9 @@ impl Constructed {
             }
         }
         let mut function = function.with_assumed_exits(&exits);
+        function.set_callee_premises(callee_premises);
         for premise in closed_premises {
-            function = function.assuming(*premise);
+            function = function.assuming_result(*premise);
         }
         control.poll()?;
         let entry_bytes = r2il::allocation::live_bytes();
@@ -2108,6 +2112,25 @@ impl SsaArtifact {
             .flatten()
     }
 
+    /// The seal's constant for `storage` before the first call of the block at `block`: the
+    /// oracle the lift-grade reader is tested against (D590).
+    #[cfg(test)]
+    pub(crate) fn folded_before_first_call(
+        &self,
+        block: u64,
+        storage: r2source::CanonicalStorageId,
+    ) -> Option<u64> {
+        let graph = self.sealed.graph();
+        let insts = graph.op_insts(graph.block_id_for_addr(block)?);
+        let call = insts
+            .iter()
+            .find(|inst| graph.op(**inst).is_some_and(SSAOp::is_call))?;
+        let op = graph.op_for_inst(*call)?;
+        let value =
+            crate::semantic::value_reaching(&self.sealed, &self.machine_context, op, storage);
+        self.folded_value(value?)
+    }
+
     /// The constant a value computes to from the graph alone, without what
     /// preparation admitted; one lookup into the table folded at the seal.
     pub(crate) fn bare_folded_value(&self, value_id: crate::graph::ValueId) -> Option<u64> {
@@ -2795,6 +2818,7 @@ impl TrustedSsaArtifact {
     ) -> Result<Constructed, SsaPrepareError> {
         let CalleeEvidence {
             interfaces: callee_interfaces,
+            mapping_premises,
             preserved: callee_preserved_carriers,
             reach: callee_argument_reach,
             writes: callee_writes,
@@ -3218,6 +3242,7 @@ impl TrustedSsaArtifact {
         Ok(Constructed {
             function,
             closed_premises,
+            callee_premises: Arc::new(mapping_premises.clone()),
             exits: exits.clone(),
             reuse: reuse.map(|(key, provisional, walk)| Reuse {
                 key,
@@ -3404,6 +3429,10 @@ pub struct SSAFunction {
     decided_dead_edges: BTreeSet<(u64, u64)>,
     /// The premises a rewrite of this function relied on, whatever later became of what it rewrote.
     premises: BTreeSet<r2source::Premise>,
+    /// What its own result's closed-world decision takes for granted: the result's, not the body's (D592).
+    result_premises: BTreeSet<r2source::Premise>,
+    /// What each direct callee's parameter list rests on, by entry; one absent rests on the closed world (D592).
+    callee_premises: Arc<BTreeMap<u64, r2source::Premises>>,
     /// The calls its walk ended at on a model's word that the callee never returns.
     assumed_exits: AssumedExits,
     /// The architectural stack pointer, as the machine roles name it.
@@ -3869,6 +3898,8 @@ impl Clone for SSAFunction {
             decided_dead_blocks: self.decided_dead_blocks.clone(),
             decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
+            result_premises: self.result_premises.clone(),
+            callee_premises: Arc::clone(&self.callee_premises),
             assumed_exits: self.assumed_exits.clone(),
             stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
@@ -4220,6 +4251,9 @@ pub type CalleeImports = BTreeMap<u64, crate::call_reads::ImportCall>;
 pub struct CalleeEvidence {
     /// The interface each callee's own body proved.
     pub interfaces: BTreeMap<u64, SourceFunctionInterface>,
+    /// What each interface's parameter list rests on: empty only where the callee's alone read
+    /// states that list exactly (D592); a callee absent rests on the closed world.
+    pub mapping_premises: BTreeMap<u64, r2source::Premises>,
     /// The registers each callee's body proves it leaves alone.
     pub preserved: CalleePreservedCarriers,
     /// How far each callee reaches through each pointer it is handed.
@@ -4656,6 +4690,37 @@ impl SSAFunction {
     /// or its walk ended at a call a model says never returns.
     pub fn premises(&self) -> &BTreeSet<r2source::Premise> {
         &self.premises
+    }
+
+    /// What its own result's closed-world decision takes for granted; no fact of the body rests on it.
+    pub fn result_premises(&self) -> &BTreeSet<r2source::Premise> {
+        &self.result_premises
+    }
+
+    /// Every premise the function and its result rest on: what a whole rendering states.
+    pub fn premises_with_result(&self) -> BTreeSet<r2source::Premise> {
+        (self.premises.iter().chain(&self.result_premises))
+            .copied()
+            .collect()
+    }
+
+    /// Record a premise its result's decision relied on.
+    pub(crate) fn record_result_premise(&mut self, premise: r2source::Premise) {
+        self.result_premises.insert(premise);
+    }
+
+    /// What a call to the direct callee at `target` maps its arguments on; the closed world where
+    /// no read states it (D592).
+    pub fn callee_premises(&self, target: u64) -> r2source::Premises {
+        let closed = || [r2source::Premise::ClosedWorld].into_iter().collect();
+        self.callee_premises
+            .get(&target)
+            .copied()
+            .unwrap_or_else(closed)
+    }
+
+    pub(crate) fn set_callee_premises(&mut self, premises: Arc<BTreeMap<u64, r2source::Premises>>) {
+        self.callee_premises = premises;
     }
 
     /// The calls its walk ended at on a model's word that the callee never returns.

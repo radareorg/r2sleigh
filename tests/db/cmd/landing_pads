@@ -65,8 +65,8 @@ EXPECT=<<EOF
             0x0000132a      8b55d4         mov edx, dword [rbp - 0x2c]
             0x0000132d      8d1c10         lea ebx, [rax + rdx]
             0x00001330      488d45d8       lea rax, [rbp - 0x28]
-            0x00001334      4889c7         mov rdi, rax ; * a1
-            0x00001337      e80effffff     call sym._ZN5GuardD1Ev ; * (rdi)
+            0x00001334      4889c7         mov rdi, rax ;   a1
+            0x00001337      e80effffff     call sym._ZN5GuardD1Ev ;   (rdi)
             0x0000133c      89d8           mov eax, ebx
             0x0000133e      488b55e8       mov rdx, qword [rbp - 0x18]
             0x00001342      64482b1425..   sub rdx, qword fs:[0x28]

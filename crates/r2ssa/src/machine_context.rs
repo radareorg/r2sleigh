@@ -1702,23 +1702,8 @@ impl SourceMachineContext {
     /// What a `size`-byte load at `address` reads, where the capture holds those bytes read-only
     /// and they fit a constant: one search, in the memory's byte order.
     pub fn read_only_bits(&self, address: u64, size: u32) -> Option<u64> {
-        let (start, bytes) = self.read_only.range(..=address).next_back()?;
-        let from = usize::try_from(address - start).ok()?;
-        let window = bytes.get(from..from.checked_add(usize::try_from(size).ok()?)?)?;
-        if window.len() > 8 {
-            return None;
-        }
-        let ordered = window.iter().copied();
-        let bits = match self.memory_model.default_endianness() {
-            MachineMemoryEndianness::Little => ordered
-                .rev()
-                .fold(0u64, |bits, byte| (bits << 8) | u64::from(byte)),
-            MachineMemoryEndianness::Big => {
-                ordered.fold(0u64, |bits, byte| (bits << 8) | u64::from(byte))
-            }
-            _ => return None,
-        };
-        Some(bits)
+        let endian = self.memory_model.default_endianness();
+        crate::read_only::bits_in(&self.read_only, address, size, endian)
     }
 
     pub(crate) fn bind_source_string_literals(&mut self, literals: &[(u64, String)]) {

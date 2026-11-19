@@ -11,7 +11,7 @@ use r2ssa::{
 use super::records::{AnnotationKind, Answered, ArgumentSlot, CallArgument, Operand, Trips};
 use super::result::ResultStanding;
 use crate::native::Prepared;
-use r2source::confidence::{Basis, Confidence, Fact, NeverProof, Premise};
+use r2source::confidence::{Basis, Confidence, Fact, NeverProof};
 
 /// A prepared function, with every claim its certificates anchor at an instruction, by the line it is on.
 pub struct Proved<'a> {
@@ -205,10 +205,14 @@ impl Anchored {
         };
         let graph = artifact.graph();
         let decided = matches!(standing, ResultStanding::Decided(_));
-        // A decided result's note stands as `afi`'s row does; any other is a refusal on the convention.
+        // A decided result's note stands as `afi`'s row does; any other is a refusal on the
+        // convention, resting on what the result's closed decision does (D592).
         let support = match &standing {
             ResultStanding::Decided(confidence) => confidence.clone(),
-            _ => Confidence::of(Basis::Convention),
+            _ => Confidence {
+                basis: Basis::Convention,
+                premises: (artifact.function().result_premises().iter().copied()).collect(),
+            },
         };
         let convention = artifact.machine_context().return_value_carrier();
         for certificate in &artifact.certificates().returns {
@@ -255,12 +259,16 @@ fn handed(artifact: &SsaArtifact, call: &CallsiteCertificate) -> (Vec<CallArgume
 }
 
 /// What a call's argument mapping rests on past `rung`: an import's arity is its name-found
-/// declaration's; any other callee's holds under the closed world, stated per call by none (D592).
+/// declaration's; any other callee's what the site's certificate states (D592).
 fn mapped(call: &CallsiteCertificate) -> impl Fn(Basis) -> Confidence {
     let imported = call.callee_linkage == r2source::AdvisoryCalleeLinkage::Imported;
+    let premises = call.premises;
     move |rung| match imported {
         true => Confidence::of(rung.max(Basis::Declared)),
-        false => Confidence::of(rung).assuming(Premise::ClosedWorld),
+        false => Confidence {
+            basis: rung,
+            premises,
+        },
     }
 }
 

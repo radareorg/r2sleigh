@@ -332,6 +332,9 @@ pub struct CallsiteCertificate {
     /// Who the site calls, as the source's symbol or relocation said; import
     /// policy rests on this and never on the shape of a name.
     pub callee_linkage: r2source::AdvisoryCalleeLinkage,
+    /// What the argument mapping rests on: an import's arity is its declaration's and states none;
+    /// a direct callee's is its read's (D592); any other call's the closed world.
+    pub premises: r2source::Premises,
     pub argument_values: Vec<ValueId>,
     /// Whether the callee takes a variadic tail, as radare2's prototype for it
     /// says. Not a machine fact: nothing in the call instruction distinguishes
@@ -1250,6 +1253,11 @@ pub(crate) fn collect_prepared_function_certificates(
                     fallthrough: fact.fallthrough,
                     transfer: fact.transfer,
                     callee_linkage: fact.callee_linkage,
+                    premises: match (fact.callee_linkage, fact.direct_target) {
+                        (r2source::AdvisoryCalleeLinkage::Imported, _) => r2source::Premises::new(),
+                        (_, Some(target)) => function.callee_premises(target),
+                        (_, None) => [r2source::Premise::ClosedWorld].into_iter().collect(),
+                    },
                     argument_values,
                     variadic,
                     fixed_argument_count,

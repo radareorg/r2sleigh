@@ -38,8 +38,8 @@ mod json;
 mod library;
 use json::*;
 pub use json::{
-    RenderProofJson, RenderRefusalJson, RenderedFunctionJson, RenderedLineJson, RenderedLinkJson,
-    RenderedResidualJson, RenderedVariableJson,
+    NoteJson, NoteRefusalJson, RenderProofJson, RenderRefusalJson, RenderedFunctionJson,
+    RenderedLineJson, RenderedLinkJson, RenderedResidualJson, RenderedVariableJson,
 };
 /// The allocation counters the shell's counting allocator feeds and its report reads.
 pub use r2il::allocation;
@@ -1871,7 +1871,7 @@ impl EngineSession {
         let premises = sealed
             .trusted_ssa
             .as_ref()
-            .map(|ssa| ssa.artifact().function().premises().clone())
+            .map(|ssa| ssa.artifact().function().premises_with_result())
             .unwrap_or_default();
         EngineDecompileResponse {
             output,

@@ -575,6 +575,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         fallthrough: None,
         transfer: r2ssa::CallSiteTransfer::TailCall,
         callee_linkage: r2source::AdvisoryCalleeLinkage::Unknown,
+        premises: [r2source::Premise::ClosedWorld].into_iter().collect(),
         argument_values: Vec::new(),
         variadic: false,
         fixed_argument_count: Some(0),

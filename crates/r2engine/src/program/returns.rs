@@ -380,14 +380,14 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         let target = self.target(walk.thumb);
         let callees = walk.trace.calls().iter().chain(walk.trace.tail_calls());
         let loads = walk.trace.loads();
-        // Preparing costs far more than walking, so only a body that calls something declared to take a function is lifted and prepared.
+        // Lifting costs more than walking, so only a body that calls something declared to take a function is lifted and read.
         if !crate::native::hands_a_function(target, &self.program, callees.copied(), loads) {
             return Vec::new();
         }
         let Ok(body) = self.lifted(walk.entry, walk.thumb, returns) else {
             return Vec::new();
         };
-        crate::native::handed(target, &self.program, body)
+        crate::native::handed(target, &self.program, &body)
             .into_iter()
             .map(|pointer| match self.thumb.is_some() {
                 // A handed pointer states its instruction set in its low bit, as `bx` reads it.

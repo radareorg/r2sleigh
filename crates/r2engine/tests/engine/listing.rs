@@ -652,12 +652,12 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         storage: Some(rax),
         standing,
     };
-    let closed = Confidence::of(Basis::Certified).assuming(Premise::ClosedWorld);
+    // `ident`'s alone read states its one parameter exactly, so the mapping rests on nothing (D592).
+    let closed = Confidence::of(Basis::Certified);
     assert_eq!(
         certified(&hands),
         [
             // The lea's own lift folds the address, so the def-use certifies the one value the call is handed.
-            // A callee of the image takes its arity in the closed world (D592 states it per call).
             (
                 HANDS,
                 AnnotationKind::ArgumentOf { call, index: 0 },

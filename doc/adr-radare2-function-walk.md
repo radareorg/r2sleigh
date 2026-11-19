@@ -140,3 +140,33 @@ As built:
   (`closed-world: unwind flow unread (D598)`): no lane pass reads a call made in a pad.
 - A pad's edge back into the normal flow (a `catch` that returns) lands inside a normal block,
   which is not split: `afb` lists no edge there. Splitting it is D598's, with the pad's entry state.
+
+## Handed reader as built (D590)
+
+Discovery believes a constant a body hands to an import's code parameter (`__libc_start_main`'s
+`main`, `__cxa_throw`'s destructor, `atexit`, `qsort`, `signal`). The read sealed each such body
+against its convention, about 28.4 G of 0pack's 52.6 G `aa` and 18.5 G of pumasim's 61.3 G, to
+fold one register per site.
+
+`r2ssa::reaching_constant` reads the same constant off the walk's own lift: reaching definitions
+over the walked blocks, demanded from each (call, register) seed, then each reaching definition
+folded with `r2il::eval`. It reads what the seal reads and nothing else:
+
+- a call writes what `Arch::call_effect_on` under the calls' convention does not keep;
+- a load at a literal address reads the read-only word a capture of the body holds
+  (`Native::read_only`, `read_only::bits_in`, the seal's `fold_loads`), any other load nothing;
+- a wider write read narrower is its lane (`mov ecx, 1; mov r8d, ecx`);
+- an operand the result ignores by `r2il::eval::independence` need not fold (`xor r8d, r8d`);
+- two definitions meeting answer `NotConstant`, even of one constant: the seal places a phi there
+  and folds it to nothing.
+
+`O((B + E) x k)` for `k` demanded storages; no SSA, promotion, prep facts or fold table.
+
+Step 0 (`designs/round15/d590-sites.md`) classed 1,909 sites on the sealed graph and found none
+through a promoted slot; that graph had already turned literal-pool loads into copies, so the
+witness is the differential, the reader against the seal at every (site, parameter) before the
+seal's call was deleted. Its first round found 81 sites the reader missed (60 self-cancelling
+zeros, 20 read-only literal loads, 1 lane), which the reader now reads as the seal does; its
+second round, on the reader as built, compared 2,035 sites in 1,087 bodies over 309 files and found
+0 different. `aa; afl` is byte-identical on those files and the 36 committed binaries. Cost: 0pack
+`aa` 54.2 G to 27.1 G, pumasim 63.4 G to 44.2 G; cold 0pack `pdd @ 0x62ecf0` -26.5%.

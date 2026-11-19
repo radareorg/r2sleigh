@@ -80,7 +80,7 @@ EXPECT=<<EOF
             0x00401339      4801fe         add rsi, rdi
             0x0040133c      b8c59d1c81     mov eax, 0x811c9dc5
             0x00401341      0f1f800000..   nop dword [rax]
-            0x00401348      0fb617         movzx edx, byte [rdi] ; ~ trips rsi@entry ; * loop: latches 0x401348, exits 0x40135c ; * induction rdi = rdi@entry, +0x1 per trip
+            0x00401348      0fb617         movzx edx, byte [rdi] ; ~ trips rsi@entry ;   loop: latches 0x401348, exits 0x40135c ;   induction rdi = rdi@entry, +0x1 per trip
             0x0040134b      4883c701       add rdi, 0x1
             0x0040134f      31d0           xor eax, edx
             0x00401351      69c093010001   imul eax, eax, 0x1000193
@@ -95,11 +95,11 @@ EXPECT=<<EOF
             0x00401539      4801fe         add rsi, rdi
             0x0040153c      b8ffffffff     mov eax, 0xffffffff
             0x00401541      0f1f800000..   nop dword [rax]
-            0x00401548      0fb617         movzx edx, byte [rdi] ; ~ trips rsi@entry ; * loop: latches 0x40156d, exits 0x401576 ; * induction rdi = rdi@entry, +0x1 per trip
+            0x00401548      0fb617         movzx edx, byte [rdi] ; ~ trips rsi@entry ;   loop: latches 0x40156d, exits 0x401576 ;   induction rdi = rdi@entry, +0x1 per trip
             0x0040154b      31d0           xor eax, edx
             0x0040154d      ba08000000     mov edx, 0x8
             0x00401552      660f1f440000   nop word [rax + rax]
-            0x00401558      89c1           mov ecx, eax ; * loop: latches 0x401558, exits 0x40156d
+            0x00401558      89c1           mov ecx, eax ;   loop: latches 0x401558, exits 0x40156d
             0x0040155a      83e001         and eax, 0x1 ;   defines rax in [0x0, 0x1]
             0x0040155d      f7d8           neg eax
             0x0040155f      d1e9           shr ecx, 0x1 ;   defines rcx in [0x0, 0x7fffffff]
@@ -140,7 +140,7 @@ EXPECT=<<EOF
             0x004018fc      4c39d7         cmp rdi, r10
             0x004018ff      7479           je 0x40197a
             0x00401901      0f1f800000..   nop dword [rax]
-            0x00401908      4c8b0f         mov r9, qword [rdi] ; * loop: latches 0x401908, exits 0x40197a ; * induction rdi = rdi@entry, +0x8 per trip
+            0x00401908      4c8b0f         mov r9, qword [rdi] ;   loop: latches 0x401908, exits 0x40197a ;   induction rdi = rdi@entry, +0x8 per trip
             0x0040190b      4c01d8         add rax, r11
             0x0040190e      49c1c30d       rol r11, 0xd
             0x00401912      4883c708       add rdi, 0x8
