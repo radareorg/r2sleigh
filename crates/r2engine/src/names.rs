@@ -201,7 +201,7 @@ impl Name {
     /// The name as a listing shows it: the demangled spelling where `demangle` holds and
     /// there is one (`asm.demangle`), else [`Name::spelled`]. O(length).
     pub fn shown(&self, demangle: bool) -> Cow<'_, str> {
-        match self.demangled().filter(|_| demangle) {
+        match demangle.then(|| self.demangled()).flatten() {
             Some(demangled) => Cow::Owned(demangled),
             None => Cow::Owned(self.spelled()),
         }

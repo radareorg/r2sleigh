@@ -44,10 +44,13 @@ pub struct Mangled {
 
 impl Mangled {
     /// The name as GNU `c++filt` prints it (`DMGL_PARAMS | DMGL_ANSI | DMGL_VERBOSE`), or `None`
-    /// where a production in it is one this does not spell, so the name stays mangled. O(length).
+    /// where a production is one this does not spell or it passes [`EXPANSION`]. O(length).
     pub fn spelled(&self) -> Option<String> {
         let shown = self.shown.as_ref()?;
-        let mut printer = Printer::default();
+        let mut printer = Printer {
+            budget: shown.budget,
+            ..Printer::default()
+        };
         printer.encoding(shown);
         for clone in &shown.clones {
             printer.out.push_str(" [clone ");
@@ -121,6 +124,7 @@ pub fn parse(name: &str) -> Option<Mangled> {
                 variadic,
             },
             clones,
+            budget: name.len().saturating_mul(EXPANSION),
         });
     (variadic || none || !parameters.is_empty()).then_some(Mangled {
         object: function.object,
@@ -256,7 +260,13 @@ struct Shown {
     this: Vec<&'static str>,
     function: FunctionNode,
     clones: Vec<String>,
+    /// The printing steps and bytes allowed: [`EXPANSION`] per byte of the mangled name.
+    budget: usize,
 }
+
+/// A substitution is shared, so a name can print exponentially more than it holds; past this many
+/// bytes per mangled byte it is refused and stays mangled (0pack's widest name prints 14.9).
+const EXPANSION: usize = 256;
 
 /// A type in both readings: as a C prototype spells it and as `c++filt` prints it.
 type Both = (Ty, Node);
@@ -1027,6 +1037,8 @@ struct Printer<'a> {
     out: String,
     pending: Vec<Pending<'a>>,
     failed: bool,
+    budget: usize,
+    steps: usize,
 }
 
 impl<'a> Printer<'a> {
@@ -1071,6 +1083,12 @@ impl<'a> Printer<'a> {
     }
 
     fn comp(&mut self, node: &'a Node, head: Option<usize>) {
+        // Every node prints through here, so steps and bytes past the budget refuse the whole name.
+        self.steps += 1;
+        if self.failed || self.steps > self.budget || self.out.len() > self.budget {
+            self.failed = true;
+            return;
+        }
         match node {
             Node::Name(text) => self.out.push_str(text),
             Node::Builtin(text) => self.out.push_str(text),
@@ -1366,6 +1384,40 @@ const fn ref_qualified(qualifier: Option<u8>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `f(A<int, int>, A<S0, S0>, A<S1, S1>, ...)`: each parameter names the one before twice.
+    fn doubling(levels: u32) -> String {
+        let seq = |k: u32| match k {
+            0 => "S_".to_owned(),
+            k => format!(
+                "S{}_",
+                std::char::from_digit(k - 1, 36)
+                    .expect("< 36")
+                    .to_ascii_uppercase()
+            ),
+        };
+        let mut name = "_Z1f1AIiiE".to_owned();
+        for level in 0..levels {
+            let previous = seq(level + 1);
+            name.push_str(&format!("S_I{previous}{previous}E"));
+        }
+        name
+    }
+
+    /// A name whose substitutions double at each level prints within the budget or not at all
+    /// (Codex on #420: 20 levels printed 35 MB from 210 bytes).
+    #[test]
+    fn a_name_that_doubles_past_the_budget_stays_mangled() {
+        let small = parse(&doubling(2)).and_then(|mangled| mangled.spelled());
+        assert_eq!(
+            small.as_deref(),
+            Some(
+                "f(A<int, int>, A<A<int, int>, A<int, int> >, A<A<A<int, int>, A<int, int> >, A<A<int, int>, A<int, int> > >)"
+            )
+        );
+        let deep = parse(&doubling(24)).expect("it parses");
+        assert_eq!(deep.spelled(), None);
+    }
 
     fn stated(name: &str) -> (Object, Vec<String>) {
         let mangled = parse(name).unwrap_or_else(|| panic!("{name}"));
