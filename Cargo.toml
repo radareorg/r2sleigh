@@ -36,8 +36,9 @@ hex = "0.4"
 # One fixed hasher: a hashed map iterates and allocates the same way every run (D338).
 rustc-hash = "2"
 object = { version = "0.40", default-features = false, features = ["read", "std"] }
-# The xz decoder `.gnu_debugdata` is read with (r2image, D572): pure Rust, MIT.
-lzma-rs = { version = "0.3.0", default-features = false }
+# The xz decoder `.gnu_debugdata` is read with (r2image, D572): pure Rust, MIT, streaming into a
+# bounded dictionary, unsafe denied.
+xz4rust = { version = "0.2.3", default-features = false, features = ["alloc", "crc64", "no_unsafe"] }
 z3 = "0.21.0"
 insta = "1"
 # The golden tests' harness (crates/r2s/tests/golden.rs) and its diffs.

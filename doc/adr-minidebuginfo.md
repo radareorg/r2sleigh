@@ -42,17 +42,20 @@ dynamic table lacks, copies them with `objcopy --only-keep-debug` and
   read refuses the whole source. The refusal is `MiniDebugRefusal` (kind and
   reason) on the `Image`, printed by `i` as `minidebug refused: <reason>`.
   Nothing is truncated and no partial symbol list is kept.
-- Decoder: `lzma-rs` 0.3.0 (pure Rust, MIT, `forbid(unsafe_code)`; it pulls
-  `byteorder` and `crc`): xz with the LZMA2 filter and CRC32 or CRC64 checks;
-  a SHA-256 check or a BCJ filter is its error, so a refusal. ls-toybox's
+- Decoder: `xz4rust` 0.2.3 (pure Rust port of xz-embedded, MIT, no
+  dependencies; features `alloc`, `crc64`, `no_unsafe`, so the crate denies
+  `unsafe`): xz with the LZMA2 filter and CRC32 or CRC64 checks; a SHA-256
+  check or a BCJ or delta filter is its error, so a refusal. ls-toybox's
   stream is LZMA2 with a 32 KiB dictionary and CRC32; fedora_32_bin_ls's
   LZMA2, 8 MiB and CRC64. No C library.
-- The budget holds while decoding: lzma-rs decodes a block whole into memory
-  before any size check, so every LZMA2 chunk header is walked first (no
-  decoding, O(compressed / 64 KiB)). lzma-rs decodes a chunk to exactly its
-  stated size, so chunks stating more or less than the index refuse the
-  stream before it allocates; decoding then holds at most twice the stated
-  size (its block buffer and ours).
+- Why not `lzma-rs`, the decoder first named: it decodes a block whole into
+  memory before any size check (`decode/xz.rs:226-246`) and never requires a
+  chunk's packed bytes consumed (`decode/lzma2.rs:178-183`), so bytes left in
+  a chunk read as further chunks no walk sees, and no budget holds while it
+  decodes. `xz4rust` streams: its dictionary is at most the 64 MiB budget, its
+  output arrives 64 KiB at a time and the first byte past the stated size
+  refuses, so a decode holds at most twice the budget; it checks each chunk,
+  block size and the index as xz-embedded does.
 - Precedence: an address `.symtab` or `.dynsym` names keeps that name; every
   other defined symbol of the inner `.symtab` is added where `Image` collects
   symbols, with `SymbolOrigin::minidebug` set, read as the container states it

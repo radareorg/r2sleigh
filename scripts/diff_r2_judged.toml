@@ -127,14 +127,6 @@ verdict = "r2-right"
 reason = "66 66 66 66 66 66 2e 0f 1f 84 00 ...: the 0x66 prefixes make the operand 16 bits (objdump: nopw %cs:0x0(%rax,%rax,1)); Sleigh decodes dword; owner r2sleigh-lift (ROADMAP LS)"
 
 [[judged]]
-command = "pd"
-binaries = ["swift-main", "swift-main2"]
-r2 = '\[reloc\._[0-9A-F]{32}\.\.\.token\d\]$'
-r2s = '\[reloc\.globalinit_33_[0-9A-F]{32}_token\d\]$'
-verdict = "deliberate"
-reason = "radare2 elides the middle of a long flag name; r2s spells the symbol whole"
-
-[[judged]]
 command = ["px", "pd", "ie", "iS", "is"]
 binaries = "Lab01-03.exe"
 corpus = "pe"
@@ -1895,16 +1887,6 @@ r2 = ' entry0$'
 verdict = "r2s-right"
 upstream = "ie invents a program entry for an ELF whose e_entry is 0 (aarch64-relative-linkbase.so 0x502c8)"
 reason = "class A: objdump -f: aarch64-relative-linkbase.so `start address: 0x0`; radare2's ie prints a program entry at 0x502c8 (a `c0035fd6 ret`) and makes entry0 there, r2s states no entry"
-
-[[judged]]
-command = "afl"
-binaries = ["fedora_32_bin_ls", "vim"]
-corpus = "elf"
-lacking = "r2s"
-r2 = ' sym\.register_tm_clones$'
-r2s = '^<missing> refs=JUMP:jmp'
-verdict = "deliberate"
-reason = "class A: vim 0x55ab0 is reached only by frame_dummy's tail `jmp` and no symbol, FDE or call states it; r2s keeps a jmp target nothing else states in the jumping body, radare2 names it register_tm_clones by its crtstuff heuristic"
 
 [[judged]]
 command = "afl"
