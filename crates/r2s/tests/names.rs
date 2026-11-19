@@ -114,3 +114,18 @@ fn an_unnamed_function_has_one_spelling_and_it_seeks() {
     let (ran, out) = on(STRIPPED, true, "s fcn.401330; s");
     assert!(!ran && !out.contains("0x401330"), "{out}");
 }
+
+/// `pdfj` keeps the flag spelling in its text and name, as `aflj` and `ao` do, while `pdf` and its
+/// header show the demangled name (the round 15 exit wiring).
+#[test]
+fn pdfj_keeps_the_flag_spelling_where_pdf_demangles() {
+    let (ran, json) = shell(true, "pdfj @ sym._Z7guardedi");
+    assert!(ran, "{json}");
+    assert!(json.contains("\"disasm\":\"call sym._Z5riskyi\""), "{json}");
+    assert!(json.contains("\"name\":\"sym._Z7guardedi\""), "{json}");
+    assert!(!json.contains("risky(int)"), "{json}");
+    let (ran, listing) = shell(true, "pdf @ sym._Z7guardedi");
+    assert!(ran, "{listing}");
+    assert!(listing.contains(": guarded(int) ("), "{listing}");
+    assert!(listing.contains("call risky(int)"), "{listing}");
+}

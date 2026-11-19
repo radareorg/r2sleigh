@@ -113,7 +113,8 @@ pub(crate) fn function_json(session: &mut Session, argument: &str) -> Result<Str
             serde_json::json!({
                 "addr": line.address,
                 "bytes": hex(&line.bytes),
-                "disasm": crate::listing::spelled(line, &names, session.demangle),
+                // JSON keeps the flag spelling, as `aflj` and `ao` do (D574).
+                "disasm": crate::listing::spelled(line, &names, false),
                 "notes": noted(session, line, next),
             })
         })
