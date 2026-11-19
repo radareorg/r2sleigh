@@ -512,7 +512,7 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
-    callee_dereferenced: BTreeMap<u64, crate::ArgumentWidths>,
+    callee_dereferenced: crate::CalleeWidths,
     /// What each stated callee may write of its caller's stack, by entry (D377).
     callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The low bytes each walked callee may read of each result register, by entry (D372).
@@ -933,7 +933,7 @@ impl SourceMachineContext {
             member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
-            callee_dereferenced: BTreeMap::new(),
+            callee_dereferenced: crate::CalleeWidths::default(),
             callee_writes: BTreeMap::new(),
             callee_lane_reads: BTreeMap::new(),
             callee_imports: BTreeMap::new(),
@@ -1279,10 +1279,7 @@ impl SourceMachineContext {
         self.callee_argument_reach = callee_argument_reach;
     }
 
-    pub(crate) fn set_callee_dereferenced(
-        &mut self,
-        dereferenced: BTreeMap<u64, crate::ArgumentWidths>,
-    ) {
+    pub(crate) fn set_callee_dereferenced(&mut self, dereferenced: crate::CalleeWidths) {
         self.callee_dereferenced = dereferenced;
     }
 

@@ -104,31 +104,44 @@ impl Identity {
     }
 }
 
+/// The integer argument registers the site numbers, and its callee's access widths where read.
+fn site_of<'a>(
+    source: &'a r2ssa::SsaArtifact,
+    certificate: &r2ssa::CallsiteCertificate,
+) -> (
+    &'a [r2ssa::CanonicalStorageId],
+    Option<&'a r2ssa::ArgumentWidths>,
+) {
+    let (graph, context) = (source.graph(), source.machine_context());
+    let Some(target) = certificate.direct_target else {
+        return (&[], None);
+    };
+    let instruction = graph.instruction_for_inst(certificate.at);
+    let registers = context.site_integer_arguments(instruction, Some(target));
+    (registers, context.callee_dereferenced(target))
+}
+
 /// The widths each parameter entry value is accessed at by the callees it is handed whole, at the
 /// position the site's convention numbers it (D610). O(arguments).
 fn handed_dereferenced(
     source: &r2ssa::SsaArtifact,
     identities: &r2ssa::dense::IdVec<r2ssa::ValueId, Option<r2ssa::ValueId>>,
 ) -> IdMap<r2ssa::ValueId, r2ssa::AccessWidths> {
-    let (graph, context) = (source.graph(), source.machine_context());
-    let mut handed = IdMap::<r2ssa::ValueId, r2ssa::AccessWidths>::new(graph.values.len());
+    let mut handed = IdMap::<r2ssa::ValueId, r2ssa::AccessWidths>::new(source.graph().values.len());
     for certificate in source.certificates().callsites.values() {
-        let target = certificate.direct_target;
-        let instruction = graph.instruction_for_inst(certificate.at);
-        let registers =
-            target.map(|target| context.site_integer_arguments(instruction, Some(target)));
-        let stated = target.and_then(|target| context.callee_dereferenced(target));
+        // Most arguments are no entry value: the site's numbering is read only for one that is.
+        let mut site = None;
         for argument in &certificate.argument_certificates {
             let Some(entry) = identities.get(argument.value).copied().flatten() else {
                 continue;
             };
+            let (registers, stated) = *site.get_or_insert_with(|| site_of(source, certificate));
             // A callee no read body states, or a place its summary does not number, may access
             // through it at any width.
             let position = match argument.location {
-                r2ssa::CallArgumentLocation::Register { storage } => (registers
-                    .unwrap_or_default())
-                .iter()
-                .position(|slot| *slot == storage),
+                r2ssa::CallArgumentLocation::Register { storage } => {
+                    registers.iter().position(|slot| *slot == storage)
+                }
                 _ => None,
             };
             let widths = match (stated, position) {
@@ -138,13 +151,13 @@ fn handed_dereferenced(
                 },
                 _ => r2ssa::AccessWidths::OPEN_ONLY,
             };
-            r2il::refusal_evidence!(
-                "handed",
-                "{entry:?} to {target:x?} at {position:?}: {widths:?}"
-            );
+            r2il::refusal_evidence!("handed", "{entry:?} at {position:?}: {widths:?}");
             let joined = handed.get(entry).map_or(widths, |held| held.join(widths));
             handed.insert(entry, joined);
         }
+    }
+    if handed.is_empty() {
+        return handed;
     }
     // A call whose arguments are not all stated, or one no certificate states, may be handed any
     // parameter: each may then be accessed at a width nothing states.
