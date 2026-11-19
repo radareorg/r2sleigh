@@ -363,17 +363,17 @@ mod tests {
             let code = role.sgr(Depth::Ansi16).expect("painted");
             assert!(!SYNTAX.contains(&code), "{role:?} {code}");
         }
-        for role in ROLES {
-            for depth in [Depth::Ansi16, Depth::Ansi256, Depth::Truecolor] {
-                let Some(params) = role.sgr(depth) else {
-                    continue;
-                };
-                let (_, _, plain) = parsed(params);
-                assert!(
-                    !plain.contains(&2) && !plain.contains(&3),
-                    "{role:?} {params}"
-                );
-            }
+        let depths = [Depth::Ansi16, Depth::Ansi256, Depth::Truecolor];
+        let painted = ROLES
+            .into_iter()
+            .flat_map(|role| depths.map(|depth| (role, role.sgr(depth))));
+        for (role, params) in painted {
+            let Some(params) = params else { continue };
+            let (_, _, plain) = parsed(params);
+            assert!(
+                !plain.contains(&2) && !plain.contains(&3),
+                "{role:?} {params}"
+            );
         }
     }
 

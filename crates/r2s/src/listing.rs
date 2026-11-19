@@ -418,48 +418,7 @@ fn header(
     let names = session.program.names();
     let name = |address: u64| names.function(address, session.demangle);
     let header = &listing.header;
-    let mut out: Vec<(String, Roles)> = Vec::new();
-    let comment = |text: String| {
-        let roles = vec![(0..text.len(), Role::Comment)];
-        (text, roles)
-    };
-    let count = header.calls.len() + header.tails.len();
-    // radare2 folds past `asm.xrefs.fold` (5, `libr/core/cconfig.c:4203`).
-    if count > 5 {
-        out.push(comment(format!("; XREFS({count})")));
-    } else {
-        for (kind, xrefs) in [("CALL", &header.calls), ("CODE", &header.tails)] {
-            for group in xrefs.chunk_by(|a, b| a.from == b.from) {
-                let plural = if group.len() > 1 { "S" } else { "" };
-                let sites = group.iter().map(|xref| format!("{:#x}(x)", xref.site));
-                let sites = sites.collect::<Vec<_>>().join(", ");
-                let from = name(group[0].from);
-                out.push(comment(format!(
-                    "; {kind} XREF{plural} from {from} @ {sites}"
-                )));
-            }
-        }
-    }
-    // Default-deny: the list is complete only where the engine counts no unfollowed transfer.
-    let short = match header.unresolved {
-        Some(0) => None,
-        Some(count) => Some(format!(
-            "xrefs may be short: {count} indirect transfers unresolved"
-        )),
-        None => Some("xrefs may be short: indirect transfers unread".to_owned()),
-    };
-    if let Some(short) = short {
-        let mut text = "; ".to_owned();
-        let mut roles = Roles::new();
-        noted(
-            &mut text,
-            &mut roles,
-            r2engine::query::Mark::Unknown,
-            &short,
-            Some(Role::Comment),
-        );
-        out.push((text, roles));
-    }
+    let mut out = xrefs(header, &name);
     let gutter = session.gutter();
     let info = header.info.as_ref();
     let size = info.map_or_else(
@@ -506,6 +465,51 @@ fn header(
             None => text,
         })
         .collect()
+}
+
+/// The header's xref lines, folded past radare2's `asm.xrefs.fold`, then the `?` line where the
+/// engine does not count every transfer no walk followed.
+fn xrefs(header: &r2engine::program::Header, name: &dyn Fn(u64) -> String) -> Vec<(String, Roles)> {
+    let comment = |text: String| {
+        let roles = vec![(0..text.len(), Role::Comment)];
+        (text, roles)
+    };
+    let count = header.calls.len() + header.tails.len();
+    // radare2 folds past `asm.xrefs.fold` (5, `libr/core/cconfig.c:4203`).
+    let mut out = match count > 5 {
+        true => vec![comment(format!("; XREFS({count})"))],
+        false => [("CALL", &header.calls), ("CODE", &header.tails)]
+            .into_iter()
+            .flat_map(|(kind, xrefs)| {
+                xrefs
+                    .chunk_by(|a, b| a.from == b.from)
+                    .map(move |group| (kind, group))
+            })
+            .map(|(kind, group)| {
+                let plural = if group.len() > 1 { "S" } else { "" };
+                let sites = group.iter().map(|xref| format!("{:#x}(x)", xref.site));
+                let sites = sites.collect::<Vec<_>>().join(", ");
+                let from = name(group[0].from);
+                comment(format!("; {kind} XREF{plural} from {from} @ {sites}"))
+            })
+            .collect(),
+    };
+    // Default-deny: the list is complete only where the engine counts no unfollowed transfer.
+    let short = match header.unresolved {
+        Some(0) => None,
+        Some(count) => Some(format!(
+            "xrefs may be short: {count} indirect transfers unresolved"
+        )),
+        None => Some("xrefs may be short: indirect transfers unread".to_owned()),
+    };
+    if let Some(short) = short {
+        let mut text = "; ".to_owned();
+        let mut roles = Roles::new();
+        let unknown = r2engine::query::Mark::Unknown;
+        noted(&mut text, &mut roles, unknown, &short, Some(Role::Comment));
+        out.push((text, roles));
+    }
+    out
 }
 
 /// Whether the line is an indirect jump no walk followed: an unknown-kind note says so.

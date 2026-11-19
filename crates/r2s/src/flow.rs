@@ -161,88 +161,26 @@ pub(crate) fn gutters(
     unknown: &[usize],
     gutter: Gutter,
 ) -> Vec<(String, Roles)> {
-    let width = gutter.width.max(2);
-    let glyphs = gutter.glyphs();
     let (edges, unknown) = match gutter.lanes {
         true => (edges, unknown),
         false => (&[][..], &[][..]),
     };
+    let mut grid = Grid {
+        width: gutter.width.max(2),
+        glyphs: gutter.glyphs(),
+        // Cells 1..=w+1 of each row, as a glyph and the role it is painted in.
+        cells: vec![vec![(' ', None::<Role>); gutter.width.max(2) + 1]; rows],
+    };
     let lanes = plan(rows, edges, gutter.lanes());
-    // Cells 1..=w+1 of each row, as a glyph and the role it is painted in.
-    let mut cells = vec![vec![(' ', None::<Role>); width + 1]; rows];
-    let cell_of = |lane: usize| width - 1 - lane;
-    // Ends sorted by row, so each row reads its own: starts, then the rows strictly inside.
-    let mut verticals = vec![Vec::new(); rows + 1];
-    for (at, edge) in edges.iter().enumerate() {
-        let Some(lane) = lanes[at] else { continue };
-        if edge.high() > edge.low() + 1 {
-            verticals[edge.low() + 1].push((at, lane));
-            verticals[edge.high()].push((usize::MAX, lane));
-        }
-    }
-    let mut occupant = vec![None; gutter.lanes() + 1];
-    for (row, line) in cells.iter_mut().enumerate() {
-        for &(at, lane) in &verticals[row] {
-            occupant[lane] = (at != usize::MAX).then_some(at);
-        }
-        for (lane, at) in occupant.iter().enumerate() {
-            let Some(at) = *at else { continue };
-            let edge: Edge = edges[at];
-            let glyph = match edge.from < edge.to {
-                true => glyphs.down,
-                false => glyphs.up,
-            };
-            line[cell_of(lane) - 1] = (glyph, Some(edge.role()));
-        }
-    }
-    let mut heads = vec![None::<(char, Role)>; rows];
-    for (at, edge) in edges.iter().enumerate() {
-        let Some(lane) = lanes[at] else { continue };
-        let role = Some(edge.role());
-        for (row, source) in [(edge.from, true), (edge.to, false)] {
-            let corner = match (row == edge.low(), edge.from < edge.to) {
-                _ if edge.from == edge.to => '@',
-                (true, true) => glyphs.top,
-                (true, false) => glyphs.up_top,
-                (false, _) => glyphs.bottom,
-            };
-            let line = &mut cells[row];
-            line[cell_of(lane) - 1] = (corner, role);
-            let run = match source {
-                true => glyphs.from_run,
-                false => glyphs.to_run,
-            };
-            for cell in &mut line[cell_of(lane)..width - 2] {
-                if cell.0 == ' ' {
-                    *cell = (run, role);
-                }
-            }
-            // A row an edge reaches takes the `>`; one it only leaves takes the `<`.
-            let head = match source {
-                true => '<',
-                false => '>',
-            };
-            let held = &mut heads[row];
-            if held.is_none_or(|(held, _)| held == '<' && head == '>') {
-                *held = Some((head, edge.role()));
-            }
-        }
-    }
-    for (row, head) in heads.iter().enumerate() {
-        let Some((head, role)) = *head else { continue };
-        let run = match head {
-            '<' => glyphs.from_run,
-            _ => glyphs.to_run,
-        };
-        cells[row][width - 2] = (run, Some(role));
-        cells[row][width - 1] = (head, Some(role));
-    }
+    grid.verticals(edges, &lanes, gutter.lanes());
+    let heads = grid.corners(edges, &lanes);
+    grid.heads(&heads);
     let mut stub = |row: usize, glyph: char, role: Role| {
         let cell = match heads[row] {
-            None => width - 1,
-            Some(_) => width,
+            None => grid.width - 1,
+            Some(_) => grid.width,
         };
-        cells[row][cell] = (glyph, Some(role));
+        grid.cells[row][cell] = (glyph, Some(role));
     };
     for (at, edge) in edges.iter().enumerate() {
         if lanes[at].is_none() {
@@ -253,32 +191,137 @@ pub(crate) fn gutters(
     for &row in unknown {
         stub(row, '?', Role::ProofUnknown);
     }
-    cells
-        .into_iter()
-        .enumerate()
-        .map(|(row, line)| {
-            let mut text = String::new();
-            let mut roles = Roles::new();
-            let rail = match row + 1 == rows {
-                true => glyphs.rail_end,
-                false => glyphs.rail,
-            };
-            text.push(rail);
-            roles.push((0..text.len(), Role::Rail));
-            for (glyph, role) in line {
-                let at = text.len();
-                text.push(glyph);
-                // One escape for a run of cells in one role.
-                match (roles.last_mut(), role) {
-                    (Some((span, last)), Some(role)) if *last == role && span.end == at => {
-                        span.end = text.len();
-                    }
-                    (_, role) => roles.extend(role.map(|role| (at..text.len(), role))),
-                }
+    grid.rendered()
+}
+
+/// The gutter's cells while they are drawn, `w + 1` per row.
+struct Grid {
+    width: usize,
+    glyphs: Glyphs,
+    cells: Vec<Vec<(char, Option<Role>)>>,
+}
+
+impl Grid {
+    const fn cell_of(&self, lane: usize) -> usize {
+        self.width - 1 - lane
+    }
+
+    /// Each lane's vertical on the rows strictly inside its edge, ends sorted by row.
+    fn verticals(&mut self, edges: &[Edge], lanes: &[Option<usize>], budget: usize) {
+        let mut verticals = vec![Vec::new(); self.cells.len() + 1];
+        for (at, edge) in edges.iter().enumerate() {
+            let Some(lane) = lanes[at] else { continue };
+            if edge.high() > edge.low() + 1 {
+                verticals[edge.low() + 1].push((at, lane));
+                verticals[edge.high()].push((usize::MAX, lane));
             }
-            (text, roles)
-        })
-        .collect()
+        }
+        let mut occupant = vec![None; budget + 1];
+        for (row, ends) in verticals.iter().take(self.cells.len()).enumerate() {
+            for &(at, lane) in ends {
+                occupant[lane] = (at != usize::MAX).then_some(at);
+            }
+            let occupied = occupant.iter().enumerate();
+            for (lane, at) in occupied.filter_map(|(lane, at)| Some((lane, (*at)?))) {
+                let edge: Edge = edges[at];
+                let glyph = match edge.from < edge.to {
+                    true => self.glyphs.down,
+                    false => self.glyphs.up,
+                };
+                let cell = self.cell_of(lane) - 1;
+                self.cells[row][cell] = (glyph, Some(edge.role()));
+            }
+        }
+    }
+
+    /// Each edge's two corners and runs; each row's arrow head, `>` where an edge reaches it.
+    fn corners(&mut self, edges: &[Edge], lanes: &[Option<usize>]) -> Vec<Option<(char, Role)>> {
+        let mut heads = vec![None::<(char, Role)>; self.cells.len()];
+        for (at, edge) in edges.iter().enumerate() {
+            let Some(lane) = lanes[at] else { continue };
+            for (row, source) in [(edge.from, true), (edge.to, false)] {
+                self.corner(*edge, lane, row, source);
+                // A row an edge reaches takes the `>`; one it only leaves takes the `<`.
+                let head = match source {
+                    true => '<',
+                    false => '>',
+                };
+                let held = &mut heads[row];
+                let replaced = |(held, _): &(char, Role)| held == &'<' && head == '>';
+                *held = held
+                    .filter(|kept| !replaced(kept))
+                    .or(Some((head, edge.role())));
+            }
+        }
+        heads
+    }
+
+    /// One end of an edge: its corner in its lane, then a run to the arrow over blank cells.
+    fn corner(&mut self, edge: Edge, lane: usize, row: usize, source: bool) {
+        let glyphs = self.glyphs;
+        let corner = match (row == edge.low(), edge.from < edge.to) {
+            _ if edge.from == edge.to => '@',
+            (true, true) => glyphs.top,
+            (true, false) => glyphs.up_top,
+            (false, _) => glyphs.bottom,
+        };
+        let role = Some(edge.role());
+        let (cell, end) = (self.cell_of(lane), self.width - 2);
+        let line = &mut self.cells[row];
+        line[cell - 1] = (corner, role);
+        let run = match source {
+            true => glyphs.from_run,
+            false => glyphs.to_run,
+        };
+        let blank = line[cell..end].iter_mut().filter(|cell| cell.0 == ' ');
+        blank.for_each(|blank| *blank = (run, role));
+    }
+
+    /// Each row's arrow head and the run cell before it.
+    fn heads(&mut self, heads: &[Option<(char, Role)>]) {
+        for (row, head) in heads.iter().enumerate() {
+            let Some((head, role)) = *head else { continue };
+            let run = match head {
+                '<' => self.glyphs.from_run,
+                _ => self.glyphs.to_run,
+            };
+            self.cells[row][self.width - 2] = (run, Some(role));
+            self.cells[row][self.width - 1] = (head, Some(role));
+        }
+    }
+
+    /// Each row as text after its rail glyph, with one role span per run of cells in one role.
+    fn rendered(self) -> Vec<(String, Roles)> {
+        let rows = self.cells.len();
+        let glyphs = self.glyphs;
+        let row_of = |(row, line)| row_text(line, glyphs, row + 1 == rows);
+        self.cells.into_iter().enumerate().map(row_of).collect()
+    }
+}
+
+/// One row's text: the rail glyph, the last row's where `last`, then its cells, one role span
+/// per run of cells in one role.
+fn row_text(line: Vec<(char, Option<Role>)>, glyphs: Glyphs, last: bool) -> (String, Roles) {
+    let mut text = String::new();
+    let mut roles = Roles::new();
+    let rail = match last {
+        true => glyphs.rail_end,
+        false => glyphs.rail,
+    };
+    text.push(rail);
+    roles.push((0..text.len(), Role::Rail));
+    for (glyph, role) in line {
+        let at = text.len();
+        text.push(glyph);
+        // One escape for a run of cells in one role.
+        match (roles.last_mut(), role) {
+            (Some((span, last)), Some(role)) if *last == role && span.end == at => {
+                span.end = text.len();
+            }
+            (_, role) => roles.extend(role.map(|role| (at..text.len(), role))),
+        }
+    }
+    (text, roles)
 }
 
 /// A maximum over row ranges with range additions, `O(log N)` each.
@@ -300,41 +343,74 @@ impl MaxTree {
 
     /// One more edge over rows `low..=high`.
     fn add(&mut self, low: usize, high: usize) {
-        self.update(1, 0, self.size - 1, low, high);
+        self.update(self.root(), low, high);
     }
 
-    fn update(&mut self, node: usize, from: usize, to: usize, low: usize, high: usize) {
-        if high < from || to < low {
+    const fn root(&self) -> Node {
+        Node {
+            at: 1,
+            from: 0,
+            to: self.size - 1,
+        }
+    }
+
+    fn update(&mut self, node: Node, low: usize, high: usize) {
+        if high < node.from || node.to < low {
             return;
         }
-        if low <= from && to <= high {
-            self.max[node] += 1;
-            self.add[node] += 1;
+        if low <= node.from && node.to <= high {
+            self.max[node.at] += 1;
+            self.add[node.at] += 1;
             return;
         }
-        let middle = from + (to - from) / 2;
-        self.update(2 * node, from, middle, low, high);
-        self.update(2 * node + 1, middle + 1, to, low, high);
-        self.max[node] = self.add[node] + self.max[2 * node].max(self.max[2 * node + 1]);
+        let (left, right) = node.children();
+        self.update(left, low, high);
+        self.update(right, low, high);
+        self.max[node.at] = self.add[node.at] + self.max[left.at].max(self.max[right.at]);
     }
 
     /// The most edges over any row of `low..=high`.
     fn max(&self, low: usize, high: usize) -> usize {
-        self.query(1, 0, self.size - 1, low, high)
+        self.query(self.root(), low, high)
     }
 
-    fn query(&self, node: usize, from: usize, to: usize, low: usize, high: usize) -> usize {
-        if high < from || to < low {
+    fn query(&self, node: Node, low: usize, high: usize) -> usize {
+        if high < node.from || node.to < low {
             return 0;
         }
-        if low <= from && to <= high {
-            return self.max[node];
+        if low <= node.from && node.to <= high {
+            return self.max[node.at];
         }
-        let middle = from + (to - from) / 2;
+        let (left, right) = node.children();
         let below = self
-            .query(2 * node, from, middle, low, high)
-            .max(self.query(2 * node + 1, middle + 1, to, low, high));
-        self.add[node] + below
+            .query(left, low, high)
+            .max(self.query(right, low, high));
+        self.add[node.at] + below
+    }
+}
+
+/// A segment tree node: its slot and the rows `from..=to` it covers.
+#[derive(Clone, Copy)]
+struct Node {
+    at: usize,
+    from: usize,
+    to: usize,
+}
+
+impl Node {
+    const fn children(self) -> (Self, Self) {
+        let middle = self.from + (self.to - self.from) / 2;
+        let left = Self {
+            at: 2 * self.at,
+            from: self.from,
+            to: middle,
+        };
+        let right = Self {
+            at: 2 * self.at + 1,
+            from: middle + 1,
+            to: self.to,
+        };
+        (left, right)
     }
 }
 
@@ -509,28 +585,45 @@ mod tests {
                 .filter(|edge| edge.from != edge.to)
                 .collect::<Vec<_>>();
             let lanes = plan(rows, &edges, gutter.lanes());
-            for (a, first) in edges.iter().enumerate() {
-                let Some(lane) = lanes[a] else { continue };
-                assert!((1..=gutter.lanes()).contains(&lane));
-                for (b, second) in edges.iter().enumerate().skip(a + 1) {
-                    let shared = first.low() <= second.high() && second.low() <= first.high();
-                    assert!(!(shared && lanes[b] == Some(lane)), "{first:?} {second:?}");
-                }
-            }
+            apart(&edges, &lanes, gutter.lanes());
             let drawn = gutters(rows, &edges, &[], gutter);
-            for (at, edge) in edges.iter().enumerate() {
-                for row in [edge.from, edge.to] {
-                    let cells = drawn[row].0.chars().collect::<Vec<_>>();
-                    match lanes[at] {
-                        Some(lane) => {
-                            let corner = cells[width - 1 - lane];
-                            assert!("┌└".contains(corner), "{edge:?} row {row}: {cells:?}");
-                            assert!("<>".contains(cells[width]), "{edge:?}: {cells:?}");
-                        }
-                        None => assert!(cells[width] == '+' || cells[width + 1] == '+'),
-                    }
-                }
+            drawn_ends(&edges, &lanes, &drawn, width);
+        }
+    }
+
+    /// No two edges sharing a row share a lane, and every lane is within the budget.
+    fn apart(edges: &[Edge], lanes: &[Option<usize>], budget: usize) {
+        for (a, first) in edges.iter().enumerate() {
+            let Some(lane) = lanes[a] else { continue };
+            assert!((1..=budget).contains(&lane));
+            let sharing =
+                edges.iter().enumerate().skip(a + 1).filter(|(_, second)| {
+                    first.low() <= second.high() && second.low() <= first.high()
+                });
+            for (b, second) in sharing {
+                assert!(lanes[b] != Some(lane), "{first:?} {second:?}");
             }
+        }
+    }
+
+    /// Each end of an edge with a lane has its corner and an arrow; one without has a `+` stub.
+    fn drawn_ends(
+        edges: &[Edge],
+        lanes: &[Option<usize>],
+        drawn: &[(String, Roles)],
+        width: usize,
+    ) {
+        let ends = (edges.iter().enumerate())
+            .flat_map(|(at, edge)| [(at, edge, edge.from), (at, edge, edge.to)]);
+        for (at, edge, row) in ends {
+            let cells = drawn[row].0.chars().collect::<Vec<_>>();
+            let Some(lane) = lanes[at] else {
+                assert!(cells[width] == '+' || cells[width + 1] == '+');
+                continue;
+            };
+            let corner = cells[width - 1 - lane];
+            assert!("┌└".contains(corner), "{edge:?} row {row}: {cells:?}");
+            assert!("<>".contains(cells[width]), "{edge:?}: {cells:?}");
         }
     }
 

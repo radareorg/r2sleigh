@@ -759,6 +759,19 @@ impl Parser<'_> {
         Some((Ty::Builtin("int"), Node::Literal(Rc::new(ty), value)))
     }
 
+    /// `D` and one letter: the builtins C++11 and later name, after the `D`'s position.
+    fn d_builtin(&mut self) -> Option<Both> {
+        self.at += 1;
+        let (spelling, shown) = match self.take(1)? {
+            b"s" => ("uint16_t", "char16_t"),
+            b"i" => ("uint32_t", "char32_t"),
+            b"u" => ("unsigned char", "char8_t"),
+            b"n" => ("void *", "decltype(nullptr)"),
+            _ => return None,
+        };
+        Some((Ty::Builtin(spelling), Node::Builtin(shown)))
+    }
+
     /// `F [Y] <type>+ [ref-qualifier] E`, after the `F`.
     fn function(&mut self) -> Option<Both> {
         self.eat(b'Y');
@@ -769,7 +782,7 @@ impl Parser<'_> {
             let ref_qualifier = self.text.get(self.at + 1) == Some(&b'E');
             let qualifier = self.peek();
             if ref_qualifier && (self.eat(b'R') || self.eat(b'O')) {
-                reference = Some(if qualifier == Some(b'R') { " &" } else { " &&" });
+                reference = Some(ref_qualified(qualifier));
             } else {
                 types.push(self.ty()?.1);
             }
@@ -800,17 +813,7 @@ impl Parser<'_> {
             return Some((Ty::Builtin(spelling), Node::Builtin(shown)));
         }
         let both = match byte {
-            b'D' => {
-                self.at += 1;
-                let (spelling, shown) = match self.take(1)? {
-                    b"s" => ("uint16_t", "char16_t"),
-                    b"i" => ("uint32_t", "char32_t"),
-                    b"u" => ("unsigned char", "char8_t"),
-                    b"n" => ("void *", "decltype(nullptr)"),
-                    _ => return None,
-                };
-                return Some((Ty::Builtin(spelling), Node::Builtin(shown)));
-            }
+            b'D' => return self.d_builtin(),
             b'P' | b'R' | b'O' => {
                 self.at += 1;
                 let (ty, shown) = self.ty()?;
@@ -1057,6 +1060,16 @@ impl<'a> Printer<'a> {
         self.pending.clear();
     }
 
+    /// Each node in turn, `, ` between.
+    fn listed(&mut self, nodes: &'a [Node]) {
+        for (index, node) in nodes.iter().enumerate() {
+            if index > 0 {
+                self.out.push_str(", ");
+            }
+            self.comp(node, None);
+        }
+    }
+
     fn comp(&mut self, node: &'a Node, head: Option<usize>) {
         match node {
             Node::Name(text) => self.out.push_str(text),
@@ -1072,12 +1085,7 @@ impl<'a> Printer<'a> {
                     self.out.push(' ');
                 }
                 self.out.push('<');
-                for (index, argument) in arguments.iter().enumerate() {
-                    if index > 0 {
-                        self.out.push_str(", ");
-                    }
-                    self.comp(argument, None);
-                }
+                self.listed(arguments);
                 // Two `>` in a row would read as a shift.
                 if self.last() == Some('>') {
                     self.out.push(' ');
@@ -1308,22 +1316,27 @@ impl<'a> Printer<'a> {
         self.array_type(dimension, head);
     }
 
+    /// The first modifier on the list from `at` not yet printed.
+    fn first_unprinted(&self, mut at: Option<usize>) -> Option<Mod<'a>> {
+        while let Some(index) = at {
+            let pending = &self.pending[index];
+            if !pending.printed {
+                return Some(pending.modifier);
+            }
+            at = pending.next;
+        }
+        None
+    }
+
     /// libiberty `d_print_array_type`.
     fn array_type(&mut self, dimension: &'a str, mods: Option<usize>) {
         let mut space = true;
         if mods.is_some() {
             let mut paren = false;
-            let mut at = mods;
-            while let Some(index) = at {
-                let pending = &self.pending[index];
-                if !pending.printed {
-                    match pending.modifier {
-                        Mod::Array(_) => space = false,
-                        _ => (paren, space) = (true, true),
-                    }
-                    break;
-                }
-                at = pending.next;
+            match self.first_unprinted(mods) {
+                Some(Mod::Array(_)) => space = false,
+                Some(_) => (paren, space) = (true, true),
+                None => {}
             }
             if paren {
                 self.out.push_str(" (");
@@ -1339,6 +1352,14 @@ impl<'a> Printer<'a> {
         self.out.push('[');
         self.out.push_str(dimension);
         self.out.push(']');
+    }
+}
+
+/// A function type's ref-qualifier as `c++filt` prints it: `R` is `&`, `O` is `&&`.
+const fn ref_qualified(qualifier: Option<u8>) -> &'static str {
+    match qualifier {
+        Some(b'R') => " &",
+        _ => " &&",
     }
 }
 

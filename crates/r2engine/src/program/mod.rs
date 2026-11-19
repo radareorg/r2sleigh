@@ -26,7 +26,7 @@ use view::View;
 
 pub use fates::World;
 pub use requests::{
-    AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge,
+    AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge, Header,
     RenderedResponse, Rendering, Syscall,
 };
 

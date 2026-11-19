@@ -502,15 +502,16 @@ impl<I: Inputs + 'static> Db<I> {
         let mut seen = BTreeSet::new();
         let mut lists = vec![frame.deps.as_slice()];
         while let Some(list) = lists.pop() {
-            for dep in list {
-                match dep {
-                    Dep::Query { table: read, .. } if *read == table => return true,
-                    Dep::Held { deps, from } if seen.insert(deps.as_ptr()) => {
-                        lists.push(&deps[*from..]);
-                    }
-                    _ => {}
-                }
+            let read = |dep: &Dep| matches!(dep, Dep::Query { table: read, .. } if *read == table);
+            if list.iter().any(read) {
+                return true;
             }
+            let held = list.iter().filter_map(|dep| match dep {
+                Dep::Held { deps, from } => Some((deps, *from)),
+                _ => None,
+            });
+            let unseen = held.filter(|(deps, _)| seen.insert(deps.as_ptr()));
+            lists.extend(unseen.map(|(deps, from)| &deps[from..]));
         }
         false
     }

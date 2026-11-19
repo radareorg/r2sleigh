@@ -114,16 +114,7 @@ pub(super) fn over_run(
         claims.extend(arms.map(|(kind, rung)| (kind, rung.into())));
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
         if answered.holdings {
-            let revision = revision_at(memory, &claims, page);
-            claims.extend(revision);
-            if work >= Work::BlockLocal {
-                let unclaimed = unclaimed_text(memory, lift, &claims);
-                claims.extend(
-                    unclaimed
-                        .into_iter()
-                        .map(|kind| (kind, Basis::Decoded.into())),
-                );
-            }
+            held(memory, lift, work >= Work::BlockLocal, page, &mut claims);
         }
         if work >= Work::Function {
             let folded = |storage| named.left(storage);
@@ -134,6 +125,23 @@ pub(super) fn over_run(
         }
         let line = &mut lines[index];
         line.annotations = annotated(claims, line.syntax.as_ref(), memory);
+    }
+}
+
+/// What the revision holds where the line's claims use an address as data, then, where
+/// `unclaimed` holds, the text of each number the line moves whole that no claim uses (D571).
+fn held(
+    memory: &Memory<'_>,
+    lift: &r2il::R2ILBlock,
+    unclaimed: bool,
+    page: Option<u64>,
+    claims: &mut Vec<(AnnotationKind, Confidence)>,
+) {
+    let revision = revision_at(memory, claims, page);
+    claims.extend(revision);
+    if unclaimed {
+        let text = unclaimed_text(memory, lift, claims);
+        claims.extend(text.into_iter().map(|kind| (kind, Basis::Decoded.into())));
     }
 }
 

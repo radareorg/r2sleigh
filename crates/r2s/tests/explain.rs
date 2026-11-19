@@ -55,7 +55,16 @@ fn checked(note: &Value) -> (String, String) {
 fn listed() -> Vec<(u64, Vec<(String, String)>)> {
     let listing = piped("pdf @ 0x08000040");
     let parsed = listing.lines().filter_map(|line| {
-        let address = u64::from_str_radix(line.trim().get(2..10)?, 16).ok()?;
+        // An instruction row: only the rail and flow lanes before its address.
+        let at = line.find("0x")?;
+        let gutter = &line[..at];
+        if gutter
+            .chars()
+            .any(|cell| cell.is_alphanumeric() || cell == ';')
+        {
+            return None;
+        }
+        let address = u64::from_str_radix(line.get(at + 2..at + 10)?, 16).ok()?;
         let notes = (line.split(" ; ").skip(1))
             .map(|note| (note[..1].to_owned(), note[2..].to_owned()))
             .collect();

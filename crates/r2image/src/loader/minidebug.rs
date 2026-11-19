@@ -51,9 +51,8 @@ pub(crate) fn decoded_section(
     })
 }
 
-/// The section's inner file, decoded whole, or why it is refused. The decoder streams into a
-/// dictionary no larger than [`BUDGET`], and output past the stated size refuses at once, so the
-/// whole decode holds at most twice the budget. O(compressed + uncompressed).
+/// The inner file decoded whole, or why it is refused: a dictionary of at most [`BUDGET`] and
+/// output past the stated size refused hold the decode to twice the budget. O(input + output).
 pub(crate) fn decoded(section: &[u8]) -> Result<Vec<u8>, MiniDebugRefusal> {
     let stated = stated_size(section)?;
     if stated > BUDGET {

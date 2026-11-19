@@ -382,37 +382,41 @@ impl<B: Lifted> Solver<'_, '_, B> {
     fn expand(&mut self) {
         while let Some(pending) = self.pending.pop() {
             match pending {
-                Pending::Node(node) => {
-                    let (block, storage) = self.nodes[node as usize].clone();
-                    let predecessors = self.flow.predecessors(block).to_vec();
-                    let exits = (predecessors.iter())
-                        .map(|from| {
-                            let from = *from as usize;
-                            self.before(from, self.flow.ops(from).len(), &storage)
-                        })
-                        .collect();
-                    self.incoming[node as usize] = exits;
-                }
-                Pending::Def(def) => {
-                    let Def { block, op, .. } = self.defs[def as usize];
-                    let operation = &self.flow.ops(block)[op];
-                    let Some((_, _, inputs)) = Operation::of(operation) else {
-                        continue;
-                    };
-                    let inputs = inputs.into_iter().cloned().collect::<Vec<_>>();
-                    let reaches = (inputs.into_iter())
-                        .map(|input| {
-                            let reach = match input.space {
-                                SpaceId::Const => Reach::Literal(input.offset),
-                                _ => self.before(block, op, &input),
-                            };
-                            (reach, input)
-                        })
-                        .collect();
-                    self.defs[def as usize].inputs = reaches;
-                }
+                Pending::Node(node) => self.expand_node(node),
+                Pending::Def(def) => self.expand_def(def),
             }
         }
+    }
+
+    /// A demanded node's incoming reaches: what reaches each predecessor's exit.
+    fn expand_node(&mut self, node: u32) {
+        let (block, storage) = self.nodes[node as usize].clone();
+        let predecessors = self.flow.predecessors(block).to_vec();
+        let exit = |from: &u32| {
+            let from = *from as usize;
+            self.before(from, self.flow.ops(from).len(), &storage)
+        };
+        let exits = predecessors.iter().map(exit).collect();
+        self.incoming[node as usize] = exits;
+    }
+
+    /// A definition's inputs: a literal as itself, anything else as what reaches it before the op.
+    fn expand_def(&mut self, def: u32) {
+        let Def { block, op, .. } = self.defs[def as usize];
+        let operation = &self.flow.ops(block)[op];
+        let Some((_, _, inputs)) = Operation::of(operation) else {
+            return;
+        };
+        let inputs = inputs.into_iter().cloned().collect::<Vec<_>>();
+        let reach = |input: Varnode| {
+            let reach = match input.space {
+                SpaceId::Const => Reach::Literal(input.offset),
+                _ => self.before(block, op, &input),
+            };
+            (reach, input)
+        };
+        let reaches = inputs.into_iter().map(reach).collect();
+        self.defs[def as usize].inputs = reaches;
     }
 
     /// The definitions reaching each node, least fixpoint from `Top`. Terminates: a node only
@@ -420,12 +424,18 @@ impl<B: Lifted> Solver<'_, '_, B> {
     fn solve(&self) -> Vec<Reached> {
         let mut reached = vec![Reached::Top; self.nodes.len()];
         let mut dependents = vec![Vec::new(); self.nodes.len()];
-        for (node, reaches) in self.incoming.iter().enumerate() {
-            for reach in reaches {
-                if let Reach::Node(read) = reach {
-                    dependents[*read as usize].push(node);
-                }
-            }
+        let reads = (self.incoming.iter().enumerate()).flat_map(|(node, reaches)| {
+            let read = |reach: &Reach| match reach {
+                Reach::Node(read) => Some(*read as usize),
+                _ => None,
+            };
+            reaches
+                .iter()
+                .filter_map(read)
+                .map(move |read| (read, node))
+        });
+        for (read, node) in reads {
+            dependents[read].push(node);
         }
         let mut queued = vec![true; self.nodes.len()];
         let mut queue = (0..self.nodes.len()).collect::<std::collections::VecDeque<_>>();
@@ -441,12 +451,9 @@ impl<B: Lifted> Solver<'_, '_, B> {
                 continue;
             }
             reached[node] = joined;
-            for dependent in &dependents[node] {
-                if !queued[*dependent] {
-                    queued[*dependent] = true;
-                    queue.push_back(*dependent);
-                }
-            }
+            let fresh = (dependents[node].iter().copied())
+                .filter(|&dependent| !std::mem::replace(&mut queued[dependent], true));
+            queue.extend(fresh);
         }
         reached
     }

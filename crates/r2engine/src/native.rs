@@ -1191,6 +1191,23 @@ pub(crate) fn hands_a_function(
     })
 }
 
+/// Each parameter an import's declaration says takes code, at the register its convention places
+/// it in; none where the convention places it nowhere.
+fn code_registers(
+    target: &NativeTarget<'_>,
+    machine: &NativeMachine,
+    declared: Declared<'_>,
+) -> Vec<(usize, CanonicalStorageId)> {
+    let registers = |placement: &Placement<'_>| placement.registers(declared);
+    let placed = placing_imports(target, Some(machine), registers).unwrap_or_default();
+    let parameters = declared.prototype.parameters.iter().zip(placed).enumerate();
+    let code = |(index, (parameter, storage)): (usize, (&r2abi::Parameter, Option<_>))| {
+        parameter.code_returns(declared.graph)?;
+        Some((index, storage?))
+    };
+    parameters.filter_map(code).collect()
+}
+
 /// The functions a walked body hands to a parameter a declaration calls a function: each constant
 /// its own lift states reaching such a parameter's register at the call (D590). `O((B + E) x k)`.
 #[cfg_attr(
@@ -1230,20 +1247,12 @@ pub(crate) fn handed(
             else {
                 continue;
             };
-            let registers = |placement: &Placement<'_>| placement.registers(declared);
-            let placed = placing_imports(target, Some(&native.machine), registers);
-            let placed = placed.unwrap_or_default();
-            let parameters = declared.prototype.parameters.iter().zip(&placed);
-            for (index, (parameter, storage)) in parameters.enumerate() {
-                let code = parameter.code_returns(declared.graph).is_some();
-                let (true, Some(storage)) = (code, storage) else {
-                    continue;
-                };
-                let instruction = block.lifted.instruction_of(transfer.op);
+            let instruction = block.lifted.instruction_of(transfer.op);
+            for (index, storage) in code_registers(target, &native.machine, declared) {
                 seeds.push(r2ssa::reaching_constant::Seed {
                     block: at,
                     op: transfer.op,
-                    storage: *storage,
+                    storage,
                 });
                 named.push((instruction, declared.prototype.name.as_str(), index));
             }
