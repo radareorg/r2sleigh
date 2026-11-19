@@ -136,15 +136,16 @@ pub use integrity::{
     validate_ssa_function,
 };
 pub use interproc::{
-    ArgumentReach, CallArgObservation, FunctionSemanticLinkage, FunctionSemanticSummary,
-    InterprocFunctionId, InterprocFunctionInput, InterprocSummaryDiagnostics, InterprocSummarySet,
-    PreparedCalleeSummary, PreparedInterprocFunctionInput, PreparedInterprocSummaryError,
-    PreparedInterprocSummarySet, SummaryAllocationEffect, SummaryArgEffect, SummaryArgumentReach,
-    SummaryAtomicEffect, SummaryAtomicOp, SummaryAtomicOrdering, SummaryLifetimeEffect,
-    SummaryLifetimeOp, SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryLocation,
-    SummaryMemoryRange, SummaryMemoryRegion, SummaryReturnRelation, SummarySyncEffect,
-    SummarySyncOp, SummaryTransferEffect, SummaryTransferLength, observe_call_arguments,
-    solve_interproc_summary_set, solve_prepared_interproc_summary_set,
+    AccessWidths, ArgumentReach, CallArgObservation, FunctionSemanticLinkage,
+    FunctionSemanticSummary, InterprocFunctionId, InterprocFunctionInput,
+    InterprocSummaryDiagnostics, InterprocSummarySet, PreparedCalleeSummary,
+    PreparedInterprocFunctionInput, PreparedInterprocSummaryError, PreparedInterprocSummarySet,
+    SummaryAllocationEffect, SummaryArgEffect, SummaryArgumentReach, SummaryAtomicEffect,
+    SummaryAtomicOp, SummaryAtomicOrdering, SummaryLifetimeEffect, SummaryLifetimeOp,
+    SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryLocation, SummaryMemoryRange,
+    SummaryMemoryRegion, SummaryReturnRelation, SummarySyncEffect, SummarySyncOp,
+    SummaryTransferEffect, SummaryTransferLength, names_formal, observe_call_arguments,
+    own_unstated_access_formals, solve_interproc_summary_set, solve_prepared_interproc_summary_set,
     solve_prepared_interproc_summary_set_from_callee_summaries,
 };
 pub use machine::{

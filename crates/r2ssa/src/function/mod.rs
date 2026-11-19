@@ -2821,6 +2821,7 @@ impl TrustedSsaArtifact {
             mapping_premises,
             preserved: callee_preserved_carriers,
             reach: callee_argument_reach,
+            dereferenced: callee_dereferenced,
             writes: callee_writes,
             lane_reads: callee_lane_reads,
             library,
@@ -2981,6 +2982,7 @@ impl TrustedSsaArtifact {
                 // Promotion's frame walk reads what each callee reaches, by the site's model.
                 provisional_machine_context
                     .set_callee_argument_reach(callee_argument_reach.clone());
+                provisional_machine_context.set_callee_dereferenced(callee_dereferenced.clone());
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
                 provisional_machine_context.set_callee_lane_reads(callee_lane_reads.clone());
                 provisional_machine_context.set_callee_imports(callee_imports.clone());
@@ -3157,6 +3159,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_callee_dereferenced(callee_dereferenced.clone());
         machine_context.set_callee_writes(callee_writes.clone());
         machine_context.set_callee_lane_reads(callee_lane_reads.clone());
         machine_context.set_callee_imports(callee_imports.clone());
@@ -4258,6 +4261,8 @@ pub struct CalleeEvidence {
     pub preserved: CalleePreservedCarriers,
     /// How far each callee reaches through each pointer it is handed.
     pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The widths each callee's own body loads or stores at through each argument it is handed (D610).
+    pub dereferenced: BTreeMap<u64, BTreeMap<usize, crate::AccessWidths>>,
     /// What each stated callee may write of its caller's stack; a callee absent writes any (D377).
     pub writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The low bytes each walked callee may read of each result register; one absent reads any (D372).

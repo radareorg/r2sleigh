@@ -1072,7 +1072,7 @@ impl<'a> Values<'a> {
             // The word is the class the body reads through: no read is cast.
             let differs = hole.is_none()
                 && (declared.as_ref()).is_some_and(|declared| {
-                    *declared != class && !r2types::is_unstated_word(declared)
+                    *declared != class && !r2types::is_width_only(declared)
                 });
             // The source's own declaration, so its struct is the node r2ssa projects into (D359).
             let stated = stated.is_some() && hole.is_none() && declared.is_some();

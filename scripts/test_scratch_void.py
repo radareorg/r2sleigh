@@ -42,10 +42,17 @@ class Classify(unittest.TestCase):
         self.assertEqual(scratch_void.classify(answer("void* fcn_10(void)")), "unproven:unstated")
 
     def test_the_cause_is_read_from_the_proof_line_only(self):
-        proof = "uint64_t f(void) {\n    /* r2dec proof: 3 rendered; the result is unproven: Unread */\n}"
+        proof = "uint64_t f(void) {\n    /* r2dec proof: 3 rendered; the result is unproven (Unread): 1 carried */\n}"
         self.assertEqual(scratch_void.classify(answer("uint64_t f(void)", code=proof)), "unproven:Unread")
         self.assertEqual(scratch_void.classify(answer("uint64_t f(void)", code="int Written = 1;")),
                          "unproven:unstated")
+
+    def test_a_cause_is_counted_by_its_name_and_a_parameter_clause_is_no_result_cause(self):
+        proof = ("uint64_t f(uint64_t a) {\n    /* r2dec proof: 3 rendered; the result is unproven (PointerWide): "
+                 "1 carried; parameter 0 is unproven (PointeeWidths) */\n}")
+        self.assertEqual(scratch_void.classify(answer("uint64_t f(uint64_t a)", code=proof)), "unproven:PointerWide")
+        proof = "uint64_t f(uint64_t a) {\n    /* r2dec proof: 3 rendered; parameter 0 is unproven (PointeeWidths) */\n}"
+        self.assertEqual(scratch_void.classify(answer("uint64_t f(uint64_t a)", code=proof)), "unproven:unstated")
 
     def test_a_refusal_and_a_crash_are_their_own_classes(self):
         self.assertEqual(scratch_void.classify(answer("", refusal="too big")), "refused")

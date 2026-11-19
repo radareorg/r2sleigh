@@ -200,7 +200,7 @@ fn body_pointers<S: Source + 'static>(
     let slots = crate::native::argument_slots(target);
     let mut found = summary
         .dereferenced_arguments()
-        .iter()
+        .keys()
         .filter_map(|index| slots.get(*index))
         .map(|storage| (*storage, Basis::Dereferenced))
         .collect::<BTreeMap<_, _>>();

@@ -1761,9 +1761,6 @@ impl Importer<'_> {
         (!imported.opaque).then_some(imported.term)
     }
 
-    /// The producer's term in place of a read of `value`, under the policy in
-    /// the module doc; `None` keeps the read as a leaf.
-    #[allow(clippy::type_complexity)]
     /// A producer's term stands in for a read only in the class the reader
     /// reads: a floating reader over an integer term is a reinterpretation,
     /// not a substitution. A literal is bits and takes the reader's type.
@@ -1786,6 +1783,8 @@ impl Importer<'_> {
         }
     }
 
+    /// The producer's term in place of a read of `value`, under the policy in
+    /// the module doc; `None` keeps the read as a leaf.
     #[allow(clippy::type_complexity)]
     fn try_substitute(&mut self, value: ValueId) -> Option<(TermId, Vec<Substitution>)> {
         let inst = self.artifact.graph().def_inst(value)?;

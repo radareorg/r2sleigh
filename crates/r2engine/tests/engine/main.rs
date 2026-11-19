@@ -36,6 +36,7 @@ mod notes;
 mod oracle;
 mod parameter_side;
 mod pass_through;
+mod pointee_widths;
 mod ranges;
 mod references;
 mod rendered;

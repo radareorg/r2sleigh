@@ -134,6 +134,7 @@ pub fn render(
             ),
             input.inferred_aggregates().len(),
             &tags.conflicting(),
+            &input.unproven_parameters(),
         ),
         (input.return_type())
             .filter(|fact| fact.is_unproven())

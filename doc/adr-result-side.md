@@ -861,6 +861,18 @@ A closed-world read proves a result exists. Its type needs the width pinned and,
 - Cost: one walk per decided integer read, each function pushed only when its mask grows, at most 128 times: `O((V + E) x 128)` over the returners it reaches, typically itself alone. A session deciding every member of a chain of k forwarders walks `O(k^2)`; a held per-lane answer over the forwarder components would make it `O(V + E)`, and no measured binary needs it (census `stats` held exactly; contabo +0.093% at most). `Escapes` and `DeclaredSlot` are held program queries.
 - Open: the two parameter lines of D610 (`combined` p0, clones `main` p1) are stop facts. A read is an instruction's input width, so `mov r11, rax; shl r11, 32` reads 8 bytes of a 32-bit result (hashes O2 `djb2`, `WidthBetween`): demanded bytes would decide it.
 
+## D610 parameters as built (2026-11-19)
+
+A parameter handed whole to callees that load or store through it is an address; the pointee is what every access through it reads.
+
+- Fact. r2ssa's callee summary states, per argument, the width of each load and store whose address is the argument plus an offset (`AccessWidths`, a bit per width), and opens the argument where an access it does not state may reach it: handed to a call, exposed through the frame, stored, accessed at no argument region, or read by an operation nothing describes (`argument_access_widths`).
+- Owners. r2engine records each read callee's widths beside its reach (`Callees`, `CalleeEvidence::dereferenced`, `MachineContext::callee_dereferenced`). r2types `handed_dereferenced` joins, for each parameter entry value, the widths of every callee it is handed whole at the site's integer position (D365's numbering), and opens it where a call states no arguments, a callee has no read body, a stack or indirect slot takes it, or the body's own accesses at no argument region reach it (`own_unstated_access_formals`). The row: one stated width is `r2sleigh_word_uN *` (`Basis::Dereferenced`, sign unstated); any other join is `r2sleigh_unproven_uN` with `PointerRefusal::PointeeWidths` on the proof line. A declared slot (D262) and the body's own certified access still decide first.
+- Grader. `scripts/differential_truth.py` reads `r2sleigh_unproven_uN` as it reads D201's result carrier: a typedef that claims no C type. The baseline is unchanged.
+- Source-gold (gcc 13): hashes `combined` p0 is unproven (four callees, `murmur3_32` reads 4 and 1 bytes), the step exits 0 against the baseline, 13 silent; shapes 31 to 30 (clones `use_part` p0 is `r2sleigh_word_u64 *`, source `int64_t *`, the sign unstated).
+- Cost: `O(arguments)` per body over facts the summary already walks; the body's own pass runs only where a parameter is handed to an accessing callee.
+- Refuted for results: `tail`'s one caller reads 8 bytes at offset 8, which states nothing of the pointee at offset 0 (source `struct node *`); a result a caller dereferences stays `Unproven` until accesses at offset 0 state a pointee.
+- Open: clones `main` p1 (`r2sleigh_word_u64 *` for `char **`): the pointee is pointer-wide and handed to a reading callee, so its own kind is the same question one level down.
+
 ## Open questions
 
 1. The register effect is computed on ask or deposited by `SiteFates` ("S31b as built", ruled). pumasim `0x3b6b20` does not meet the note's gate (-0.07 G against -0.08 G, run spread 0.014 G); the next lever is D354.

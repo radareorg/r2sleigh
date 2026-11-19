@@ -257,8 +257,9 @@ def declared(dwarf: Dwarf, sub) -> Declared:
 PRESENCE = ("void_to_void", "void_to_value", "value_to_void", "value_to_value")
 # D201's carrier typedef states where the machine leaves a result and claims no C type (doc/adr-scratch-result.md);
 # D165's hole typedef states a slot the body never reads and claims none either (doc/adr-call-boundary.md);
-# D265's word typedef states an integer's width and no sign, alone or as a pointee.
-UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+|r2sleigh_unread_[uf]\d+")
+# D265's word typedef states an integer's width and no sign, alone or as a pointee;
+# D610's unproven parameter typedef states a parameter's carrier, its cause on the proof line.
+UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+|r2sleigh_unread_[uf]\d+|r2sleigh_unproven_u\d+")
 UNSTATED_WORD = re.compile(r"r2sleigh_word_u(\d+)")
 
 

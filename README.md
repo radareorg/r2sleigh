@@ -95,5 +95,5 @@ Documentation
 Requirements
 ------------
 
-Rust 1.99 (edition 2024, pinned in `rust-toolchain.toml`). radare2 only for the differential harnesses. Z3
+Rust 1.100 (edition 2024, pinned in `rust-toolchain.toml`). radare2 only for the differential harnesses. Z3
 optional. License: LGPL-3.0-only.
