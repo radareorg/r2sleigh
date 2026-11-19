@@ -226,8 +226,8 @@ EXPECT=<<EOF
 EOF
 RUN
 
-# D582: `ao` ends with each note `pdf` prints on the line, in full; `aoj` and `pdfj` carry the
-# same as typed fields; `pd?` ends with the mark legend.
+# D582: `ao` ends with each note `pdf` prints on the line, in full; `pdfj` carries the same as
+# typed fields; `pd?` ends with the mark legend.
 
 NAME=ao: a refused call states its reason, no basis
 FILE=crates/r2image/tests/data/relocated.elf

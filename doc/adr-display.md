@@ -255,15 +255,15 @@ tests whether a setter's call is the next call line.
 
 - D592: a call's note carries the premises its argument mapping rests on
   (`CallsiteCertificate.premises`): none where the callee's alone read records
-  none and states the same parameter list exactly, else the read's set, the
-  closed world where that is empty; an import's stays `declared`. A function's
+  none and states the same parameter list exactly, else the closed world and
+  the read's set; an import's stays `declared`. A function's
   own closed-result premises rest on the result fact (`result_premises()`):
   the `ret` note and `afi` carry them, a loop or induction note does not.
   `pdd`'s proof line and `pddj` state the union, unchanged. A whole-function
   note still carries the body's own premises (a decided canary's `ub-free`,
   `frame-isolation`): bash `main`'s 80 call notes keep `*` for those.
-- D582: `Mark::reads_as` is the one speller of what a cell says: the `pd?`
-  legend, `ao`'s `notes:` block and the JSON `mark`. `ao` reads the
+- D582: `Mark::reads_as` is the one speller of what a cell says, read by the
+  `pd?` legend; `ao` and `pdfj` write each note's `Mark::cell`. `ao` reads the
   notes `pdf` prints on the line from the listing of the first function
   holding it (`functions_holding`), so `ao` pays for that function's
   analysis; outside every function they are the instruction's own. The new

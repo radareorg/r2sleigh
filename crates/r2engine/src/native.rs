@@ -1562,7 +1562,7 @@ impl Stated<'_> {
 }
 
 /// What a call's mapping onto `used`'s interface rests on: nothing where the alone read states that
-/// list exactly with no premise, else `used`'s premises or the closed world (D592). O(parameters).
+/// list exactly with no premise, else the closed world and `used`'s premises (D592). O(parameters).
 pub(crate) fn mapping_premises(
     (alone, alone_premises): (Option<&r2ssa::SourceFunctionInterface>, r2source::Premises),
     (used, used_premises): (Option<&r2ssa::SourceFunctionInterface>, r2source::Premises),
@@ -1574,11 +1574,12 @@ pub(crate) fn mapping_premises(
         }
         _ => false,
     };
-    match (witnessed, used_premises.is_empty()) {
-        (true, _) => r2source::Premises::new(),
-        (false, true) => [r2source::Premise::ClosedWorld].into_iter().collect(),
-        (false, false) => used_premises,
+    let mut premises = r2source::Premises::new();
+    if !witnessed {
+        premises.insert(r2source::Premise::ClosedWorld);
+        premises.extend(used_premises.iter());
     }
+    premises
 }
 
 /// A read's mapping onto its own interface: the read is its own alone read (D592).
@@ -4219,6 +4220,27 @@ mod tests {
         fn import_at(&self, vaddr: u64) -> Option<r2abi::SymbolName> {
             (vaddr == 0x1018).then(|| r2abi::SymbolName::new("on_double"))
         }
+    }
+
+    /// A mapping no alone read witnesses rests on the closed world beside the read's own
+    /// premises, whatever those are (D592).
+    #[test]
+    fn an_unwitnessed_mapping_keeps_the_closed_world_beside_the_body_s_premises() {
+        let body = r2source::Premises::from_iter([r2source::Premise::FrameIsolation]);
+        let mapped = mapping_premises((None, body), (None, body));
+        let expected = [
+            r2source::Premise::ClosedWorld,
+            r2source::Premise::FrameIsolation,
+        ];
+        assert_eq!(mapped, r2source::Premises::from_iter(expected));
+        let alone = mapping_premises(
+            (None, r2source::Premises::new()),
+            (None, r2source::Premises::new()),
+        );
+        assert_eq!(
+            alone,
+            r2source::Premises::from_iter([r2source::Premise::ClosedWorld])
+        );
     }
 
     /// System V passes `on_double(double, void (*)())`'s callback in RDI, the first integer

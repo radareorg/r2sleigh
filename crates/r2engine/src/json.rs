@@ -388,7 +388,7 @@ fn comment_body(text: &str) -> String {
         .join(" ")
 }
 
-/// One note of a listing line, as `aoj` and `pdfj` carry it (D582, doc/adr-display.md): the text
+/// One note of a listing line, as `pdfj` carries it (D582, doc/adr-display.md): the text
 /// `pdf` prints and the fact's standing as typed fields. A refusal or an unknown has no basis.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NoteJson {

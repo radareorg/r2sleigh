@@ -303,7 +303,7 @@ pub(crate) fn next_calls(lines: &[r2engine::query::Line]) -> Vec<Option<u64>> {
 }
 
 /// One note of a line as `pdf` spells it, and the annotation it spells: none for the callee's
-/// `noreturn` beside its call. `ao`, `aoj` and `pdfj` read the same notes (D582).
+/// `noreturn` beside its call. `ao` and `pdfj` read the same notes (D582).
 pub(crate) struct Note<'l> {
     pub(crate) mark: r2engine::query::Mark,
     pub(crate) confidence: &'l r2engine::query::Confidence,
