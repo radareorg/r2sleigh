@@ -2958,7 +2958,8 @@ impl TrustedSsaArtifact {
                 // Promotion's frame walk reads what each callee reaches, by the site's model.
                 provisional_machine_context
                     .set_callee_argument_reach(callee_argument_reach.clone());
-                provisional_machine_context.set_callee_dereferenced(callee_dereferenced.clone());
+                provisional_machine_context
+                    .set_callee_dereferenced(Arc::clone(callee_dereferenced));
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
                 provisional_machine_context.set_callee_lane_reads(callee_lane_reads.clone());
                 provisional_machine_context.set_callee_imports(callee_imports.clone());
@@ -3135,7 +3136,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
-        machine_context.set_callee_dereferenced(callee_dereferenced.clone());
+        machine_context.set_callee_dereferenced(Arc::clone(callee_dereferenced));
         machine_context.set_callee_writes(callee_writes.clone());
         machine_context.set_callee_lane_reads(callee_lane_reads.clone());
         machine_context.set_callee_imports(callee_imports.clone());
@@ -4228,7 +4229,7 @@ pub struct CalleeEvidence {
     /// How far each callee reaches through each pointer it is handed.
     pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     /// The widths each callee's own body loads or stores at through each argument it is handed (D610).
-    pub dereferenced: BTreeMap<u64, BTreeMap<usize, crate::AccessWidths>>,
+    pub dereferenced: crate::CalleeWidths,
     /// What each stated callee may write of its caller's stack; a callee absent writes any (D377).
     pub writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The low bytes each walked callee may read of each result register; one absent reads any (D372).
@@ -4247,6 +4248,9 @@ pub struct CalleeEvidence {
     /// import's default, a declaration's own (RULING 1.6, 2.6); every other call runs under `calls`.
     pub conventions: SiteConventions,
 }
+
+/// Each read callee's argument access widths by entry, shared by every preparation that reads them (D610).
+pub type CalleeWidths = Arc<BTreeMap<u64, crate::ArgumentWidths>>;
 
 /// The convention each stated callee runs under, by entry address.
 pub type SiteConventions = BTreeMap<u64, Arc<r2source::ConventionModel>>;
