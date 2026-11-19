@@ -129,6 +129,20 @@ impl Canvas {
         if let Some(&(x, y)) = route.points.first() {
             let stub = if route.upward { DOWN } else { UP };
             self.join(i64::from(x), i64::from(y), stub, ink);
+            // radare2's letters beside a conditional branch's two edges (D565): `t` taken, `f` not.
+            // Each on the side its route turns to, so it stands outside the pair.
+            let side = match route.points.last().is_some_and(|last| last.0 < x) {
+                true => -1,
+                false => 1,
+            };
+            let letter = match kind {
+                EdgeKind::Taken => Some('t'),
+                EdgeKind::NotTaken => Some('f'),
+                _ => None,
+            };
+            if let Some(letter) = letter {
+                self.put(i64::from(x) + side, i64::from(y), letter, ink);
+            }
         }
         for pair in route.points.windows(2) {
             let (ax, ay) = (i64::from(pair[0].0), i64::from(pair[0].1));
@@ -337,6 +351,20 @@ mod tests {
             rows[..left - 2].iter().all(|row| arrows(row) == 0),
             "{drawn}"
         );
+    }
+
+    /// A conditional branch's edges carry radare2's letters where they leave the box: `t` beside
+    /// the taken edge, `f` beside the fall-through (D565).
+    #[test]
+    fn a_conditional_branch_marks_its_taken_and_fallthrough_edges() {
+        let drawn = text(&branch());
+        let rows = drawn.lines().collect::<Vec<_>>();
+        let leaving = rows
+            .iter()
+            .position(|row| row.contains('t') && row.contains('f') && !row.contains("0x"));
+        let leaving = leaving.unwrap_or_else(|| panic!("no row marks both edges:\n{drawn}"));
+        let row = rows[leaving].trim();
+        assert!(row == "t│    │f" || row == "f│    │t", "{drawn}");
     }
 
     /// A window paints exactly the cells the whole drawing has there.

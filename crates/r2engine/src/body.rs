@@ -737,6 +737,16 @@ impl Trace {
         &self.0.tail_calls
     }
 
+    /// Each direct call as (target, instruction), in walk order.
+    pub fn call_sites(&self) -> &[(u64, u64)] {
+        &self.0.call_sites
+    }
+
+    /// Each branch to another function's entry as (target, instruction), in walk order.
+    pub fn tail_sites(&self) -> &[(u64, u64)] {
+        &self.0.tail_sites
+    }
+
     /// Every address a load reads that its lift states as a constant.
     pub const fn loads(&self) -> &BTreeSet<u64> {
         &self.0.loads
@@ -889,6 +899,9 @@ struct Walk {
     calls: BTreeSet<u64>,
     loads: BTreeSet<u64>,
     tail_calls: BTreeSet<u64>,
+    /// Each direct call as (target, instruction), and each tail branch, in walk order (D566).
+    call_sites: Vec<(u64, u64)>,
+    tail_sites: Vec<(u64, u64)>,
     /// Each call through a slot the loader binds to an import and seals, by instruction: the slot.
     slot_calls: BTreeMap<u64, u64>,
     /// The calls through a slot the program states never returns, by instruction.
@@ -957,6 +970,8 @@ impl Walk {
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
+            call_sites: Vec::new(),
+            tail_sites: Vec::new(),
             slot_calls: BTreeMap::new(),
             halting: BTreeSet::new(),
             handles: Handles::default(),
@@ -1074,6 +1089,8 @@ impl Walk {
             calls: BTreeSet::new(),
             loads: BTreeSet::new(),
             tail_calls: BTreeSet::new(),
+            call_sites: Vec::new(),
+            tail_sites: Vec::new(),
             slot_calls: BTreeMap::new(),
             halting: BTreeSet::new(),
             handles: Handles::default(),
@@ -1125,7 +1142,7 @@ impl Walk {
             self.retract(stopped);
             for target in targets.iter().collect::<BTreeSet<_>>() {
                 self.arms.insert(*target);
-                self.transfer(*target, &mut pending, program);
+                self.transfer(addr, *target, &mut pending, program);
             }
         }
         pending
@@ -1340,11 +1357,18 @@ impl Walk {
     }
 
     /// Follow a transfer, or end the body where it leaves for another function's entry; its own entry is a loop.
-    fn transfer(&mut self, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
+    fn transfer(
+        &mut self,
+        site: u64,
+        target: u64,
+        successors: &mut Vec<u64>,
+        program: &dyn Program,
+    ) {
         if target != self.entry && program.is_entry(target) {
             if self.tail_calls.insert(target) {
                 self.reached.tail_calls.push(target);
             }
+            self.tail_sites.push((target, site));
             return;
         }
         self.leaders.insert(target);
@@ -1383,11 +1407,11 @@ impl Walk {
     }
 
     /// Follow a branch's target, a start the instruction states.
-    fn branch(&mut self, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
+    fn branch(&mut self, site: u64, target: u64, successors: &mut Vec<u64>, program: &dyn Program) {
         if self.direct.insert(target) {
             self.retract_overlaps(target);
         }
-        self.transfer(target, successors, program);
+        self.transfer(site, target, successors, program);
     }
 
     /// Continue to the address after an instruction, or run on into the function that begins there.
@@ -1452,7 +1476,9 @@ impl Walk {
             BlockTerminator::Fallthrough { next: after } => {
                 self.continues(Some(after), &mut successors, program)
             }
-            BlockTerminator::Branch { target } => self.branch(target, &mut successors, program),
+            BlockTerminator::Branch { target } => {
+                self.branch(addr, target, &mut successors, program)
+            }
             // The arm that leaves is a return or an indirect transfer, either of which may hand control back.
             BlockTerminator::ConditionalExit { next: after } => {
                 self.leaving = true;
@@ -1462,8 +1488,8 @@ impl Walk {
                 true_target,
                 false_target,
             } => {
-                self.branch(true_target, &mut successors, program);
-                self.branch(false_target, &mut successors, program);
+                self.branch(addr, true_target, &mut successors, program);
+                self.branch(addr, false_target, &mut successors, program);
             }
             BlockTerminator::Call {
                 target,
@@ -1472,6 +1498,7 @@ impl Walk {
                 if self.calls.insert(target) {
                     self.reached.calls.push(target);
                 }
+                self.call_sites.push((target, addr));
                 // A predicated call reaches the next instruction when its predicate fails, whatever the callee does.
                 let predicated = r2il::predicated_call(&instruction.lifted.ops, next);
                 let foreign = self.target_contexts.get(&target).copied().unwrap_or(false);
@@ -1645,7 +1672,7 @@ impl Walk {
         };
         for target in arms.into_iter().collect::<BTreeSet<_>>() {
             self.arms.insert(target);
-            self.transfer(target, successors, program);
+            self.transfer(addr, target, successors, program);
         }
     }
 

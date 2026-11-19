@@ -20,6 +20,7 @@ mod degraded;
 mod discovery;
 mod gs;
 mod handed;
+mod header;
 mod imports;
 mod language;
 mod layouts;

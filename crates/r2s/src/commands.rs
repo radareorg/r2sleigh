@@ -443,8 +443,9 @@ fn help() -> String {
     out
 }
 
-/// `verb?`: one verb's usage, and the other names it answers to; `pd?` ends with the mark legend.
-fn usage(verb: &Verb) -> String {
+/// `verb?`: one verb's usage, and the other names it answers to; `pd?` ends with the mark legend,
+/// each cell in the proof role a listing paints it in.
+fn usage(verb: &Verb, paints: Option<r2s_tui::theme::Depth>) -> String {
     let mut out = format!("Usage: {}  {}", verb.usage(), verb.summary);
     if verb.names.len() > 1 {
         out.push_str(&format!("\naliases: {}", verb.names[1..].join(" ")));
@@ -455,6 +456,11 @@ fn usage(verb: &Verb) -> String {
             let cell = match mark.cell() {
                 ' ' => "(space)".to_owned(),
                 cell => cell.to_string(),
+            };
+            let roles = r2s_tui::theme::Role::marked(mark.cell()).map(|role| (0..cell.len(), role));
+            let cell = match paints {
+                Some(depth) => r2s_tui::theme::ansi(&cell, &Vec::from_iter(roles), depth),
+                None => cell,
             };
             out.push_str(&format!("\n{cell}  {}", mark.reads_as()));
         }
@@ -472,7 +478,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         return Ok(help());
     }
     if let Some(named) = verb.strip_suffix('?').and_then(find) {
-        return Ok(usage(named));
+        return Ok(usage(named, session.paints()));
     }
     match find(verb).and_then(|verb| verb.run) {
         Some(run) => run(session, argument),
@@ -1603,16 +1609,33 @@ fn replay_stop(stop: r2engine::query::replay::ReplayStop) -> serde_json::Value {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
-    let roles = match (&rendering.response.output, session.paints()) {
-        (r2engine::EngineRendering::Function(rendered), true) => {
-            Some(crate::listing::c_roles(rendered.emission().roles()))
+    let laid = match &rendering.response.output {
+        r2engine::EngineRendering::Function(rendered) if session.railed() || session.pdd_addr => {
+            let emission = rendered.emission();
+            let residuals = emission.residuals().len();
+            let notes = crate::rails::notes(session, addr, &rendering.response, residuals);
+            let stated = crate::rails::Stated {
+                text: emission.definition(),
+                indent: emission.indent(),
+                roles: crate::listing::c_roles(emission.roles()),
+                depths: emission.depths(),
+                proof: emission.proof_line(),
+                lowest: emission.lowest_addresses(),
+            };
+            Some(crate::rails::laid(session, &stated, &notes))
         }
-        _ => None,
+        r2engine::EngineRendering::Function(rendered) => {
+            let roles = crate::listing::c_roles(rendered.emission().roles());
+            Some((rendered.emission().definition().to_owned(), roles))
+        }
+        r2engine::EngineRendering::Listing(_) => None,
     };
     let text = rendering.response.output.into_text();
-    let mut out = match roles {
-        Some(roles) => r2s_tui::theme::ansi(&text, &roles),
-        None => text,
+    // Plain `pdd` is the definition's bytes; the layout is only where a key asks for it (D568).
+    let mut out = match (laid, session.paints()) {
+        (Some((text, roles)), Some(depth)) => r2s_tui::theme::ansi(&text, &roles, depth),
+        (Some((laid, _)), None) if session.railed() || session.pdd_addr => laid,
+        _ => text,
     };
     // A callee whose analysis panicked is a defect in the engine, not a fact
     // about the program, so it is printed with the rendering it degraded

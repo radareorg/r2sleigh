@@ -412,8 +412,8 @@ fn the_disassembly_paints_a_call_and_its_target_name_in_their_roles() {
                 .unwrap_or_else(|| panic!("{needle} not drawn"))
         };
         let (x, y) = at("call fcn");
-        assert_eq!(drawn[(x, y)].fg, Role::Call.color().unwrap());
-        assert_eq!(drawn[(x + 5, y)].fg, Role::Name.color().unwrap());
+        assert_eq!(drawn[(x, y)].fg, Role::Call.style().fg.unwrap());
+        assert_eq!(drawn[(x + 5, y)].fg, Role::Name.style().fg.unwrap());
     });
 }
 

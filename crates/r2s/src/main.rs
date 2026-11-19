@@ -5,12 +5,14 @@ mod allocator;
 mod commands;
 mod complete;
 mod config;
+mod flow;
 mod function;
 mod grep;
 mod line;
 mod listing;
 mod opcodes;
 mod prompt;
+mod rails;
 mod session;
 mod visual;
 
@@ -105,8 +107,13 @@ fn main() {
     };
     // Colour is for a person: a terminal, and nobody who asked for none
     // (https://no-color.org). Anything a program reads gets plain text.
-    session.color = std::io::stdout().is_terminal()
-        && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+    let terminal = std::io::stdout().is_terminal();
+    let painted = terminal && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+    session.color = u8::from(painted);
+    // A terminal's width decides the lanes and the cut; a pipe is the plain grid, never cut.
+    session.columns = terminal.then(r2s_tui::theme::columns).flatten();
+    // `pdd`'s rails are for a person, as colour is: census and certification read a pipe's bytes.
+    session.rails = terminal;
     for setting in &cli.config {
         if let Err(message) = config::run(&mut session, setting) {
             eprintln!("r2s: {message}");

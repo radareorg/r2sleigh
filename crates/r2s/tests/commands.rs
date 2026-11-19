@@ -892,7 +892,13 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
         "asm.bytes = true\n\
          asm.demangle = true\n\
          asm.proof = false\n\
+         asm.lines = true\n\
+         asm.lines.width = 10\n\
+         asm.cmt.col = 71\n\
+         asm.rails = false\n\
+         asm.pdd.addr = false\n\
          scr.color = 0\n\
+         scr.utf8 = true\n\
          \x20           0x00401330      endbr64\n\
          false\n\
          r2s: asm.bytes takes true or false, not 'maybe'\n",
@@ -1058,7 +1064,7 @@ mod listing {
         // The mask bounds the value by evaluating the and alone, so the instruction's own bound is decoded.
         assert!(
             run.out
-                .contains("and eax, 0x1 ;   defines rax in [0x0, 0x1] (decoded)"),
+                .contains("and eax, 0x1                ;   defines rax in [0x0, 0x1] (decoded)"),
             "{}",
             run.out
         );
@@ -1088,10 +1094,7 @@ mod listing {
         assert_eq!(cases.len(), 8, "{}", rendered.out);
         for case in cases {
             let label = format!(";-- case {case}:");
-            let label = listed
-                .out
-                .lines()
-                .find(|line| line.trim_start().starts_with(&label));
+            let label = listed.out.lines().find(|line| line.contains(&label));
             assert!(
                 label.is_some_and(|line| line.ends_with("; from 0x0040197e")),
                 "case {case}: {}",
@@ -1131,7 +1134,12 @@ mod listing {
         let run = super::r2s("s 0x401330; pdf");
         assert!(run.ok, "{}", run.out);
         assert!(run.out.contains("0x0040135c"), "{}", run.out);
-        assert!(!run.out.contains("0x0040135d"), "{}", run.out);
+        // The padding is a gap row, never a line of its own (D566).
+        assert!(!run.out.contains("0x0040135d      "), "{}", run.out);
+        assert!(
+            run.out
+                .contains(";-- 3 bytes not in this function: 0x0040135d..0x0040135f")
+        );
         assert!(run.out.contains("0x00401360"), "{}", run.out);
     }
 
@@ -1157,7 +1165,7 @@ mod listing {
         let fixture = "tests/fixtures/code_pointer_table_O0";
         let run = at(fixture, "e asm.proof=true; pdf @ sym._table_dispatch");
         assert!(run.ok, "{}", run.out);
-        let page = "add x8, x8, 0x0 ;   defines x8 = 0x100004000 (folded)";
+        let page = "add x8, x8, 0x0            ;   defines x8 = 0x100004000 (folded)";
         assert!(run.out.contains(page), "{}", run.out);
         // The word is a chained fixup dyld rebases to 0x100000400: what the
         // file holds there is the fixup's encoding, and what the container
@@ -1166,7 +1174,7 @@ mod listing {
             .out
             .lines()
             .find(|line| line.contains("ldr x8, [x8, 0x10]"));
-        let loaded = "ldr x8, [x8, 0x10] ;   [0x100004010:8]=0x100000400 sym._table_op_mul after relocation (folded)";
+        let loaded = "ldr x8, [x8, 0x10]         ;   [0x100004010:8]=0x100000400 sym._table_op_mul after relocation (folded)";
         assert!(
             load.is_some_and(|line| line.ends_with(loaded)),
             "{}",
@@ -1189,9 +1197,9 @@ mod listing {
         let listed = at(fixture, "e asm.proof=true; pdf @ sym._main");
         assert!(listed.ok, "{}", listed.out);
         let mut lines = listed.out.lines();
-        let call = lines.find(|line| line.trim_start().starts_with("0x100000e18"));
+        let call = lines.find(|line| line.contains(" 0x100000e18      "));
         // An import's arity is its name-found declaration's (D579).
-        let certified = "bl sym.imp.memcpy ; ^ (x0, 0x100004008, 0x50) (declared)";
+        let certified = "bl sym.imp.memcpy          ; ^ (x0, 0x100004008, 0x50) (declared)";
         assert!(
             call.is_some_and(|line| line.ends_with(certified)),
             "{}",
@@ -1199,7 +1207,9 @@ mod listing {
         );
         // No transfer's target is text, whichever function it goes to.
         for line in listed.out.lines() {
-            let mnemonic = line.split_whitespace().nth(2).unwrap_or_default();
+            // From the address on: the rail and lanes are layout (D565).
+            let listed = line.find("0x").map_or("", |at| &line[at..]);
+            let mnemonic = listed.split_whitespace().nth(2).unwrap_or_default();
             if matches!(mnemonic, "b" | "bl") || mnemonic.starts_with("b.") {
                 assert!(!line.contains(r#"; ""#), "{line}");
             }
@@ -1300,7 +1310,7 @@ mod dispatch_table {
             "cyclomatic-complexity: 2",
             "is-lineal: true",
             "locals: 5",
-            "args: 2",
+            "args: 2 ; ~ at least 2 args",
         ] {
             assert!(
                 run.out.lines().any(|out| out == line),

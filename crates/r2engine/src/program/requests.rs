@@ -26,6 +26,45 @@ pub struct FunctionListing {
     /// Where this is `Some`, the lines are the walk's: every block it reaches without the
     /// analysis, claiming only what each line and the walked def-use show.
     pub refused: Option<AnalysisRefused>,
+    /// Each jump and taken branch between two listed lines, in `(from, to)` order (D565).
+    pub edges: Vec<FlowEdge>,
+    /// What `pdf` states above the first line (D566).
+    pub header: Header,
+}
+
+/// A function's header: who reaches it, and the frame answer `afi` reads.
+#[derive(Debug, Clone, Default)]
+pub struct Header {
+    /// Each call of the function among the walked bodies, by caller then site.
+    pub calls: Vec<Xref>,
+    /// Each branch to its entry from another walked body.
+    pub tails: Vec<Xref>,
+    /// How many indirect transfers no walk followed, program-wide, where the survey states it; a
+    /// list is complete only where this is `Some(0)`.
+    pub unresolved: Option<usize>,
+    /// The function as `afi` reads it, where the analysis sealed one.
+    pub info: Option<super::info::FunctionInfo>,
+}
+
+/// One instruction of a caller that reaches a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Xref {
+    /// The caller's entry.
+    pub from: u64,
+    /// The instruction.
+    pub site: u64,
+}
+
+/// One transfer a listing draws: from the transferring instruction to its target's line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FlowEdge {
+    pub from: u64,
+    pub to: u64,
+    /// `Jump` or `Taken`: a fall-through needs no line, a dispatch's arms are its case labels.
+    pub kind: EdgeKind,
+    /// A back edge of a loop the analysis states: its target carries the `Loop` note, and its
+    /// source block is one of that note's latches.
+    pub latch: bool,
 }
 
 /// One function as its control-flow graph: each block with its lines, and
@@ -137,6 +176,49 @@ fn edges_of(
     edges
 }
 
+/// Each block's jump or taken branch as a [`FlowEdge`]: from the block's last listed line to the
+/// line its target starts. `O(B log L)` over the shape's blocks and the listing's sorted lines.
+fn flow_edges(lines: &[Line], shape: &Shape) -> Vec<FlowEdge> {
+    // A target is any listed line: a pad's jump may land inside a block of the body's outline.
+    let at = |address: u64| {
+        lines
+            .binary_search_by_key(&address, |line| line.address)
+            .ok()
+    };
+    let mut edges = Vec::new();
+    for (address, size, successors) in &shape.blocks {
+        let end = lines.partition_point(|line| line.address < address + size);
+        let Some(last) = end
+            .checked_sub(1)
+            .filter(|last| lines[*last].address >= *address)
+        else {
+            continue;
+        };
+        let dispatch = shape.dispatches.contains(&lines[last].address);
+        for edge in edges_of(successors, dispatch, |target| at(target).is_some()) {
+            if !matches!(edge.kind, EdgeKind::Jump | EdgeKind::Taken) {
+                continue;
+            }
+            let Some(target) = at(edge.target) else {
+                continue;
+            };
+            let latch = lines[target].annotations.iter().any(|annotation| {
+                matches!(&annotation.kind, crate::query::AnnotationKind::Loop { latches, .. }
+                    if latches.contains(address))
+            });
+            edges.push(FlowEdge {
+                from: lines[last].address,
+                to: edge.target,
+                kind: edge.kind,
+                latch,
+            });
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    edges
+}
+
 /// Why a function's listing carries no analysis, and what its walk could not follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalysisRefused {
@@ -232,10 +314,10 @@ pub(super) struct Survey {
     supervisor: BTreeMap<u64, std::collections::BTreeSet<u64>>,
     /// Which walked bodies hold each address.
     holders: crate::discovery::Holders,
-    /// Each function's direct callers among the walked bodies, in address order.
-    callers: BTreeMap<u64, Vec<u64>>,
-    /// The walked bodies that leave for each function by a direct branch, in address order.
-    tail_callers: BTreeMap<u64, Vec<u64>>,
+    /// Each function's direct callers among the walked bodies, in address order, with their sites.
+    callers: BTreeMap<u64, Callers>,
+    /// The walked bodies that leave for each function by a direct branch, with their sites.
+    tail_callers: BTreeMap<u64, Callers>,
     /// The address after each call a walk ended at because its callee never comes back, ascending.
     after_exits: Vec<u64>,
     /// How many walked bodies hold a call that unwinds to a landing pad (D570).
@@ -245,18 +327,31 @@ pub(super) struct Survey {
 impl Survey {
     /// The walked bodies that call `callee` directly, in address order.
     pub(super) fn callers_of(&self, callee: u64) -> &[u64] {
-        self.callers.get(&callee).map_or(&[], Vec::as_slice)
+        self.callers
+            .get(&callee)
+            .map_or(&[], |callers| &callers.entries)
     }
 
     /// The walked bodies that leave for `callee` by a direct branch, in address order.
     pub(super) fn tail_callers_of(&self, callee: u64) -> &[u64] {
-        self.tail_callers.get(&callee).map_or(&[], Vec::as_slice)
+        self.tail_callers
+            .get(&callee)
+            .map_or(&[], |callers| &callers.entries)
+    }
+
+    /// Each call of `callee` and each branch to it, as caller and instruction, ascending: `O(log F + k)`.
+    pub(super) fn xrefs_of(&self, callee: u64) -> (Vec<Xref>, Vec<Xref>) {
+        let of =
+            |map: &BTreeMap<u64, Callers>| map.get(&callee).map(Callers::xrefs).unwrap_or_default();
+        (of(&self.callers), of(&self.tail_callers))
     }
 
     /// Every direct call and tail branch between walked bodies, as caller and callee.
     pub(super) fn call_edges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         let edges = self.callers.iter().chain(&self.tail_callers);
-        edges.flat_map(|(callee, callers)| callers.iter().map(move |caller| (*caller, *callee)))
+        edges.flat_map(|(callee, callers)| {
+            (callers.entries.iter()).map(move |caller| (*caller, *callee))
+        })
     }
 
     /// Every range a walked body holds, in address order.
@@ -565,8 +660,21 @@ impl<S: Source + 'static> OpenProgram<S> {
         })
     }
 
-    /// The listing and the shape of the body it lists, within a request already started.
+    /// The listing and the shape of the body it lists, within a request already started; the
+    /// listing's edges are read off the shape once, `O(B log L)`.
     fn listed_body(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
+        let (mut listing, shape) = self.listed_shape(entry)?;
+        listing.edges = flow_edges(&listing.lines.value, &shape);
+        // The survey every request reads: its caller sets, never the reference index (D566). A survey
+        // that fails lists no xref, and the `?` line stands: the listing does not depend on it.
+        if let Ok(survey) = self.surveyed() {
+            (listing.header.calls, listing.header.tails) = survey.xrefs_of(entry);
+        }
+        Ok((listing, shape))
+    }
+
+    /// [`Self::listed_body`] before its edges are read.
+    fn listed_shape(&self, entry: u64) -> Result<(FunctionListing, Shape), String> {
         self.loaded()?;
         self.assembled()?;
         let target = self.target(entry)?;
@@ -620,6 +728,19 @@ impl<S: Source + 'static> OpenProgram<S> {
         let result = sealed
             .as_ref()
             .and_then(|sealed| sealed.facts().return_type());
+        // The header reads the frame answer `afi` reads, off the seal the `ret` notes read.
+        let noreturn = self.view().exit(entry, key.1);
+        // Isolated on its own: a defect reading the header drops the header, never the lines.
+        let info = sealed.as_ref().and_then(|sealed| {
+            let artifact = prepared.artifact().artifact();
+            let read = || {
+                let facts = sealed.facts();
+                let mut info = super::info::FunctionInfo::read(entry, artifact, facts, noreturn);
+                info.hold_pads(&pads);
+                info
+            };
+            isolated(read).ok()
+        });
         let proved = Proved::new(prepared, result);
         let answered = Answered {
             body: Some(&body),
@@ -628,6 +749,11 @@ impl<S: Source + 'static> OpenProgram<S> {
         let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted),
             refused: None,
+            edges: Vec::new(),
+            header: Header {
+                info,
+                ..Header::default()
+            },
         };
         Ok((listing, pads))
     }
@@ -660,6 +786,8 @@ impl<S: Source + 'static> OpenProgram<S> {
                         reason: error,
                         unresolved: Vec::new(),
                     }),
+                    edges: Vec::new(),
+                    header: Header::default(),
                 };
                 let shape = shape_of(std::iter::empty(), std::iter::empty(), None);
                 return Ok((listing, shape));
@@ -693,6 +821,8 @@ impl<S: Source + 'static> OpenProgram<S> {
         let listing = FunctionListing {
             lines: listed_by_block(&answered, &lifted),
             refused: Some(AnalysisRefused { reason, unresolved }),
+            edges: Vec::new(),
+            header: Header::default(),
         };
         Ok((listing, shape))
     }
@@ -1100,23 +1230,73 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
 }
 
 /// Each callee's callers.
-type Inverted = BTreeMap<u64, Vec<u64>>;
+type Inverted = BTreeMap<u64, Callers>;
 
-/// O(call edges): each walked body's direct call targets and tail call targets, inverted.
+/// One callee's callers in address order, each with its sites: a compressed row, so the callers are
+/// one slice and each site is one word (`sites[start[i]..start[i + 1]]` are `entries[i]`'s).
+#[derive(Debug, Default)]
+pub(super) struct Callers {
+    entries: Vec<u64>,
+    start: Vec<u32>,
+    sites: Vec<u64>,
+}
+
+impl Callers {
+    /// Sorted `(caller, site)` pairs, deduplicated, as one row.
+    fn of(pairs: &[(u64, u64)]) -> Self {
+        let mut row = Self::default();
+        for &(caller, site) in pairs {
+            if row.entries.last() != Some(&caller) {
+                row.entries.push(caller);
+                row.start
+                    .push(u32::try_from(row.sites.len()).unwrap_or(u32::MAX));
+            }
+            row.sites.push(site);
+        }
+        row.start
+            .push(u32::try_from(row.sites.len()).unwrap_or(u32::MAX));
+        row
+    }
+
+    fn xrefs(&self) -> Vec<Xref> {
+        let mut out = Vec::with_capacity(self.sites.len());
+        for (at, &from) in self.entries.iter().enumerate() {
+            let (low, high) = (self.start[at] as usize, self.start[at + 1] as usize);
+            out.extend(
+                self.sites[low..high]
+                    .iter()
+                    .map(|&site| Xref { from, site }),
+            );
+        }
+        out
+    }
+}
+
+/// O(S log S) over the call sites: each walked body's direct calls and tail branches, inverted.
 fn inverted(
     walks: &BTreeMap<u64, Result<super::returns::BodyWalk, NativeRefusal>>,
 ) -> (Inverted, Inverted) {
-    let mut callers = Inverted::new();
-    let mut tail_callers = Inverted::new();
+    let mut calls = Vec::new();
+    let mut tails = Vec::new();
     for (entry, walk) in walks {
-        for &callee in walk.as_ref().map(|walk| walk.calls()).into_iter().flatten() {
-            callers.entry(callee).or_default().push(*entry);
-        }
-        for callee in walk.as_ref().into_iter().flat_map(|walk| walk.tail_calls()) {
-            tail_callers.entry(callee).or_default().push(*entry);
-        }
+        let Ok(walk) = walk else { continue };
+        calls.extend((walk.call_sites().iter()).map(|&(callee, site)| (callee, *entry, site)));
+        tails.extend((walk.tail_sites().iter()).map(|&(callee, site)| (callee, *entry, site)));
     }
-    (callers, tail_callers)
+    let rows = |mut triples: Vec<(u64, u64, u64)>| {
+        triples.sort_unstable();
+        triples.dedup();
+        let mut map = Inverted::new();
+        for group in triples.chunk_by(|a, b| a.0 == b.0) {
+            let pairs = group
+                .iter()
+                .map(|&(_, caller, site)| (caller, site))
+                .collect::<Vec<_>>();
+            map.insert(group[0].0, Callers::of(&pairs));
+        }
+        map
+    };
+    (rows(calls), rows(tails))
 }
 
 /// Which instruction set the discovered code at each address is in; empty where the machine has one.

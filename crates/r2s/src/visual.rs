@@ -139,8 +139,8 @@ impl Visual<'_> {
     /// A line's roles where `scr.color` paints, and none where it does not.
     fn painted(&self, roles: r2s_tui::theme::Roles) -> r2s_tui::theme::Roles {
         match self.session.color {
-            true => roles,
-            false => r2s_tui::theme::Roles::default(),
+            0 => r2s_tui::theme::Roles::default(),
+            _ => roles,
         }
     }
 }
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn scr_color_off_paints_no_role_in_the_visual_mode() {
         let mut session = fixture();
-        for color in [true, false] {
+        for color in [1, 0] {
             session.color = color;
             let mut host = Visual {
                 session: &mut session,
@@ -424,7 +424,7 @@ mod tests {
             let decompiled = host.decompile(0x120a).expect("it decompiles");
             let painted = listed.iter().any(|line| !line.roles.is_empty())
                 || decompiled.iter().any(|line| !line.roles.is_empty());
-            assert_eq!(painted, color, "scr.color={color}");
+            assert_eq!(painted, color != 0, "scr.color={color}");
         }
     }
 

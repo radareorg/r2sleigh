@@ -63,7 +63,7 @@ fn a_ret_note_states_the_result_afi_states() {
     assert!(info.contains("result: unproven ; ! rax, Written"), "{info}");
     // An unproven result is a refusal kind: `!`, no basis word (D579's speller at the merge).
     assert!(
-        listing.contains("ret ; ! result unproven (rax, Written)"),
+        listing.contains("ret                         ; ! result unproven (rax, Written)"),
         "{listing}"
     );
     assert!(!listing.contains("returns rax"), "{listing}");

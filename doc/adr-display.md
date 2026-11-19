@@ -1,7 +1,9 @@
 # ADR: display
 
 Status: D580, D579, D583, D581 and D567 built in round 14 ("Round 14 as
-built"); D565, D566, D568, D569, D574 and D582 proposed (ROADMAP).
+built"); D569, D565 and D568 built and D566 built in part in round 15
+("Round 15 as built: listing", open parts D619 to D622); D574 and D582
+proposed (ROADMAP).
 
 ## Problem
 
@@ -139,13 +141,14 @@ entry.
 
 | Control | Effect | Default |
 |---|---|---|
-| `e scr.color=0..3` | none, 16, 256, truecolor (2 and 3 with D569) | 1 on a tty, 0 in a pipe |
+| `e scr.color=0..3` | none, 16, 256, truecolor (D569) | 1 on a tty, 0 in a pipe |
 | `e scr.utf8` | box rails, or radare2's ASCII rails | true |
 | `e asm.lines`, `asm.lines.width` | flow lanes (D565) | true; 6 at 80 columns |
 | `e asm.bytes` | byte column | true |
 | `e asm.cmt.col` | the `;` column | 71 |
 | `e asm.demangle` | demangled names (D574) | true |
-| `e asm.addr` | `pdd` statement addresses (D568) | false |
+| `e asm.rails` (r2s only) | `pdd` rails, one `│` per level, and the proof comment in the mark grammar (D568) | true on a tty, false in a pipe |
+| `e asm.pdd.addr` (r2s only) | `pdd` statement addresses (D568); radare2's `asm.addr` hides `pd` offsets (`cconfig.c:4301`) | false |
 | `e asm.proof` (r2s only) | the basis word and setter back-links after each note | false |
 | visual `z` (D582) | cycles notes: reader, proof, none | reader |
 | `ao @ addr` (D582) | a `notes:` block with each note in full | |
@@ -190,7 +193,7 @@ tests whether a setter's call is the next call line.
 | Callee noreturn | r2engine | `Call { noreturn: Option<Fact<bool>> }` from the callee's `Never` |
 | Arity floor, result, widths | r2types through r2engine's frame answer | `Fact`, floor, `UnprovenCause` |
 | Block edges, gaps, span | r2engine block index | D565 edges |
-| Xrefs and coverage | r2engine reference index | the `axt` answer and the unresolved count |
+| Xrefs and coverage | r2engine reference index (`axt`); the survey's caller rows (`pdf` header, D566) | the `axt` answer and its unresolved count; `Header { calls, tails, unresolved }` |
 | Names, demangled | r2engine `names.rs` | D574 |
 | `pdd` rails, statement addresses | r2dec | D568 |
 | Theme | r2s-tui `theme.rs` | D569 |
@@ -375,3 +378,80 @@ tests whether a setter's call is the next call line.
   (`bfile.c:335`, `bin_elf64.c:147`), lists 0pack 17,560 strings (radare2
   17,874, r2s 6,641) but raises r2s-only `iz` rows 5,420 to 7,543 over the
   same 241 files, so the chance bound stays.
+## Round 15 as built: listing
+
+- D569: `Role` gains the 8 proof roles, `Flow`, `FlowLoop` and `Rail`. One
+  table in `theme.rs` gives each role its SGR parameters at depth 1, 2 and 3;
+  `ansi` takes the depth and `style()` reads the depth-1 column for the visual
+  mode, so the visual mode and the shell paint from one table. The light
+  column is not built: no key selects it. `Role::marked` maps a mark cell to
+  its proof role, so colour repeats the glyph; r2s-tui reads no `r2source`
+  type. `scr.color` takes 0 to 3 (`Session.color` is the depth). The listing
+  and `afi` write every note through `listing::noted`: the cell in its proof
+  role, a refusal's words in `ProofReason`, a quoted string in `String`.
+  Plain output moves 0 bytes.
+- D565: `FunctionListing.edges` holds each `Jump` and `Taken` edge as
+  `FlowEdge { from, to, kind, latch }`, read once off the shape `listed_body`
+  already builds, `O(B log L)`. `latch` is the engine's: the target line
+  carries `Loop` and the source block is one of its latches (the block starts
+  are in the shape, not in the lines r2s reads). r2s `flow.rs` lays rows out:
+  label, trailing and gap rows are rows, so a lane passes through them.
+  Admission is a segment tree over rows (range add, range maximum) taking
+  edges by (span, from); colouring takes admitted edges by span start and
+  gives each the lowest free lane from a min-heap, lane 1 nearest the
+  address. Glyphs are radare2's: `┌─<`, `└─>`, an upward edge mirrored
+  (`┌─>` at its target, `└─<` at its source) with `╎` for its lane, as
+  `get_utf8_char` maps `:` (`libr/core/disasm.c:446-460`); ASCII as
+  `reflines.c:486-503` and `:552-555` write it. A horizontal run keeps a lane
+  it crosses. A row any edge reaches takes `>`, else `<`. A stub sits in cell
+  `w`, or `w + 1` where a head stands. `asm.lines=false` keeps the rail and the
+  address column. The first `;` stands at `asm.cmt.col` on `pd` and `pdf`
+  rows; a terminal cuts note text, then operand text, then the mark
+  (`flow::cut`); a pipe never cuts. `VV` writes radare2's `t` and `f` beside
+  a conditional branch's two edges, each on the side its route turns to.
+- D566: the trace records each call and tail branch with its instruction
+  (`Trace::call_sites`, `tail_sites`; `transfer` and `branch` take the site).
+  `Survey.callers` and `tail_callers` hold one compressed row per callee: the
+  distinct callers as one slice (`callers_of` is unchanged) and each caller's
+  sites, so no second map of callers exists; `xrefs_of` answers in
+  `O(log F + k)`. `FunctionListing.header` holds the calls, the tails,
+  `unresolved` and the `FunctionInfo` read off the seal the `ret` notes read.
+  `unresolved` is `None`: a trace counts neither the indirect calls it walks
+  past nor which dispatch stops a table later resolved, so the header prints
+  `; ? xrefs may be short: indirect transfers unread` on every function
+  (default-deny). r2s spells radare2's grammar (`disasm.c:1723-1734`,
+  `:1849-1866`): `CALL XREF`/`CALL XREFS` per caller, `CODE XREF` for a tail
+  branch, `; XREFS(N)` past 5. `┌ realsz: name (args);` takes the proven
+  parameters by name and `?` where the interface states a floor (`?` alone
+  where no analysis states any). The notes are `afi`'s, one speller in
+  `function.rs`: `~ at least N args` (also on `afi`'s `args:` row) and
+  `! result unproven: carrier, cause`. A span line where blocks lie below the
+  entry, and a gap row `;-- N bytes not in this function: A..B` between
+  non-adjacent lines. Not built: the `*` result line (the closed result's
+  premise moves to the result fact with D592), the `.` unstated-sign width
+  line, the `?` kind of gap (bytes no body holds needs a range query on
+  `Holders`), and the floor's causes in the header (they stay on `pdd`'s proof
+  line, whose speller is r2dec's). Cost left open: `afb`, `agf` and `VV` go
+  through `listed_body` and pay for the header's `FunctionInfo` read and
+  survey lookup they discard.
+- D568: r2dec's `Emission` states `depths` (one byte per definition line, the
+  indentation `emit_indent` writes), `proof_line` (the line of
+  `/* r2dec proof: ... */`), `indent` (the bytes one level takes) and
+  `lowest_addresses` (each line's lowest instruction, from `lines`, unit
+  numbering less the prelude). r2s `rails.rs` lays the definition out only
+  under `asm.rails` or `asm.pdd.addr`; plain `pdd` prints the definition's
+  bytes, so `census.py:138`, `certify_render.py:98` and the four `r2dec
+  proof:` parsers read what they read. Each level's indentation becomes `│`
+  and three spaces (`Rail`); past 24 levels one `│ N>`. The column is
+  `0x%08x` and a space, blank where a line accounts for no instruction; a
+  blank line takes neither. The proof line gives way to at most 2 lines: the
+  refused and undecided facts (`afi`'s result note, the residual count, the
+  ledger's refused and residual columns), then the assumed column, `afi`'s
+  floor note, the compiler-inserted column and the response's premises. The
+  type clauses (`N data object types refused`, `N never assigned`) are not in
+  the typed response, so they stay in plain `pdd` and `pddo` only. A grep
+  reads plain `pdd` and an uncut `pdf`, as a pipe does. Not held: the
+  160-cell bound. A statement alone exceeds it (plain `pdd` on
+  hashes has 57 lines over 149 cells, branchy 12, shapes 41; bash `main`
+  reaches 2,594 with the proof line and 310 without); a rail never widens a
+  line, so with the column a line is at most 11 cells past its plain width.

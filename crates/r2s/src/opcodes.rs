@@ -31,15 +31,16 @@ pub(crate) fn text(session: &mut Session, argument: &str) -> Result<String, Stri
         }
         if !one.notes.is_empty() {
             out.push_str("notes:\n");
-            out.extend(one.notes.iter().map(explained));
+            out.extend(one.notes.iter().map(|(head, note)| explained(head, note)));
         }
     }
     Ok(out.trim_end().to_owned())
 }
 
-/// One note in full: the line `pdf` prints, then its basis, grade and premises, or its refusal.
-fn explained(note: &NoteJson) -> String {
-    let mut out = format!("  {} {}\n", note.mark, note.text);
+/// One note in full: the line `pdf` prints, painted as `pdf` paints it, then its basis, grade and
+/// premises, or its refusal.
+fn explained(head: &str, note: &NoteJson) -> String {
+    let mut out = format!("  {head}\n");
     match (&note.refusal, note.basis, note.grade) {
         (Some(refusal), ..) => out.push_str(&format!("    refused: {}\n", refusal.reason)),
         (None, Some(basis), Some(grade)) => {
@@ -124,10 +125,32 @@ pub(crate) fn function_json(session: &mut Session, argument: &str) -> Result<Str
 /// The line's notes as `pdf` spells them, each with its standing as typed fields.
 fn noted(session: &Session, line: &Line, next_call: Option<u64>) -> Vec<NoteJson> {
     let notes = crate::listing::notes(session, line, next_call).into_iter();
+    notes.map(typed).collect()
+}
+
+fn typed(note: crate::listing::Note<'_>) -> NoteJson {
+    match note.annotation {
+        Some(annotation) => NoteJson::of(annotation, note.text),
+        None => NoteJson::fact("noreturn", note.confidence, note.text),
+    }
+}
+
+/// `ao`'s notes: each one's `M text` as `pdf` writes and paints it, with its typed fields.
+fn explained_notes(
+    session: &Session,
+    line: &Line,
+    next_call: Option<u64>,
+) -> Vec<(String, NoteJson)> {
+    let notes = crate::listing::notes(session, line, next_call).into_iter();
     notes
-        .map(|note| match note.annotation {
-            Some(annotation) => NoteJson::of(annotation, note.text),
-            None => NoteJson::fact("noreturn", note.confidence, note.text),
+        .map(|note| {
+            let (mut head, mut roles) = (String::new(), r2s_tui::theme::Roles::new());
+            crate::listing::noted(&mut head, &mut roles, note.mark, &note.text, note.words());
+            let head = match session.paints() {
+                Some(depth) => r2s_tui::theme::ansi(&head, &roles, depth),
+                None => head,
+            };
+            (head, typed(note))
         })
         .collect()
 }
@@ -148,8 +171,9 @@ struct Spelled {
     registers: Result<(Vec<String>, Vec<String>), String>,
     /// Its operations as `pdil` prints them, absent where it did not lift.
     il: Option<Vec<String>>,
-    /// What `pdf` notes on the line, from the listing of the function holding it.
-    notes: Vec<NoteJson>,
+    /// What `pdf` notes on the line, from the listing of the function holding it: each one's
+    /// painted `M text` and its typed fields.
+    notes: Vec<(String, NoteJson)>,
 }
 
 /// `n` instructions from the seek, radare2's default of one; with `notes`, each line's `pdf` notes.
@@ -178,7 +202,7 @@ fn read(session: &mut Session, argument: &str, notes: bool) -> Result<Vec<Spelle
             Err(_) => (&one.line, None),
         };
         let notes = match notes {
-            true => noted(session, line, next_call),
+            true => explained_notes(session, line, next_call),
             false => Vec::new(),
         };
         spelled_all.push(Spelled {

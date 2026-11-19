@@ -246,9 +246,46 @@ pub struct Emission {
     calls: Vec<crate::report::RenderedCall>,
     /// What each span of the definition is.
     roles: CRoles,
+    /// Each line of the definition's nesting depth, as its indentation writes it (D568).
+    depths: Vec<u8>,
+    /// The definition's line, from 0, that holds the proof comment, where one is written.
+    proof_line: Option<usize>,
+    /// The bytes one level of indentation takes.
+    indent: usize,
 }
 
 impl Emission {
+    /// Each line of the definition's nesting depth: the indentation units it opens with.
+    pub fn depths(&self) -> &[u8] {
+        &self.depths
+    }
+
+    /// The bytes one level of [`Emission::depths`] indents a line by.
+    pub const fn indent(&self) -> usize {
+        self.indent
+    }
+
+    /// The definition's line, from 0, holding `/* r2dec proof: ... */`.
+    pub const fn proof_line(&self) -> Option<usize> {
+        self.proof_line
+    }
+
+    /// Each line of the definition's lowest instruction, where it accounts for any: `O(lines)`.
+    pub fn lowest_addresses(&self) -> Vec<Option<u64>> {
+        let prelude = self.unit[..self.unit.len() - self.definition.len()]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let mut lowest = vec![None; self.depths.len()];
+        for line in &self.lines {
+            let at = line.line.checked_sub(prelude + 1);
+            if let Some(slot) = at.and_then(|at| lowest.get_mut(at)) {
+                *slot = line.addrs.first().copied();
+            }
+        }
+        lowest
+    }
+
     /// What each span of [`Emission::definition`] is.
     pub fn roles(&self) -> &[(std::ops::Range<usize>, CRole)] {
         &self.roles
@@ -390,6 +427,10 @@ pub(crate) struct CodeGenerator<'c> {
     /// Set while a literal is written under a cast wider than 64 bits, where a negative spelling
     /// would sign-extend past the literal's own 64 bits.
     wide_literal: bool,
+    /// Each line's depth, by one-based line of `output`, as `emit_indent` writes it.
+    depths: Vec<u8>,
+    /// The one-based line of `output` the proof comment is written on.
+    proof_line: Option<usize>,
 }
 
 impl<'c> CodeGenerator<'c> {
@@ -411,6 +452,8 @@ impl<'c> CodeGenerator<'c> {
             roles: Vec::new(),
             callee: false,
             wide_literal: false,
+            depths: Vec::new(),
+            proof_line: None,
         }
     }
 
@@ -524,7 +567,12 @@ impl<'c> CodeGenerator<'c> {
             })
             .collect();
         prelude.push_str(&definition);
+        let mut depths = std::mem::take(&mut self.depths);
+        depths.resize(definition.lines().count(), 0);
         Emission {
+            depths,
+            proof_line: self.proof_line.take().map(|line| line - 1),
+            indent: self.config.indent.len(),
             definition,
             unit: prelude,
             lines,
@@ -589,6 +637,8 @@ impl<'c> CodeGenerator<'c> {
         self.residuals.clear();
         self.signature = None;
         self.roles.clear();
+        self.depths.clear();
+        self.proof_line = None;
 
         // A declared address defines nothing: the reason stands where the body
         // would, and the declarations say what the address resolves to.
@@ -976,6 +1026,9 @@ impl<'c> CodeGenerator<'c> {
             }
             CStmt::Comment(text) => {
                 if self.config.emit_comments {
+                    if text.starts_with("r2dec proof:") {
+                        self.proof_line = Some(self.current_line());
+                    }
                     self.emit_indent();
                     let start = self.output.len();
                     self.output.push_str("/* ");
@@ -1344,8 +1397,13 @@ impl<'c> CodeGenerator<'c> {
         self.emit_object_declaration(ty, &name);
     }
 
-    /// Emit indentation.
+    /// Emit indentation, and record the line's depth.
     fn emit_indent(&mut self) {
+        let line = self.current_line();
+        if self.depths.len() < line {
+            self.depths.resize(line, 0);
+        }
+        self.depths[line - 1] = u8::try_from(self.indent_level).unwrap_or(u8::MAX);
         for _ in 0..self.indent_level {
             self.output.push_str(&self.config.indent);
         }
@@ -2214,5 +2272,71 @@ mod tests {
         assert!(code.contains("int8_t* p;"));
         assert!(code.contains("x = 1;"));
         assert!(!code.contains("int32_t x = 1;"));
+    }
+
+    /// Each line's depth is the brace nesting it stands in, a closing brace one less; the proof
+    /// comment's line is stated (D568).
+    #[test]
+    fn depths_are_the_brace_nesting_and_the_proof_line_is_stated() {
+        let symbols = test_table();
+        let x = crate::symbol::declare(&symbols, "x");
+        let assign = |value| CStmt::expr(CExpr::assign(CExpr::var(x), CExpr::int(value)));
+        let inner = CStmt::If {
+            cond: CExpr::var(x),
+            then_body: Box::new(CStmt::Block(vec![assign(2), CStmt::Return(None)])),
+            else_body: Some(Box::new(CStmt::Block(vec![assign(3)]))),
+        };
+        let outer = CStmt::If {
+            cond: CExpr::var(x),
+            then_body: Box::new(CStmt::Block(vec![inner, assign(4)])),
+            else_body: None,
+        };
+        let func = CFunction {
+            declaration_only: None,
+            externs: Vec::new(),
+            typedefs: Vec::new(),
+            aggregates: Vec::new(),
+            bitvector_helpers: Vec::new(),
+            extern_objects: Vec::new(),
+            name: "nested".to_string(),
+            ret_type: CType::Void,
+            params: vec![],
+            locals: vec![CLocal {
+                ty: CType::i32(),
+                name: x,
+                stack_offset: None,
+                align: None,
+            }],
+            body: vec![
+                CStmt::comment("r2dec proof: test".to_owned()),
+                outer,
+                assign(1),
+            ],
+            params_known: true,
+            variadic: false,
+            symbols: std::rc::Rc::new(symbols),
+        };
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        let emission = codegen.emit(&prepare_function_for_emission(func), 64);
+        let text = emission.definition();
+        assert_eq!(emission.depths().len(), text.lines().count());
+        let mut open = 0usize;
+        for (line, depth) in text.lines().zip(emission.depths()) {
+            let closes = line.trim_start().starts_with('}');
+            let expected = open - usize::from(closes);
+            let indented = (line.len() - line.trim_start().len()) / 4;
+            assert_eq!(usize::from(*depth), indented, "{line:?}\n{text}");
+            if !line.trim().is_empty() && !line.trim_start().starts_with("int32_t") {
+                assert_eq!(usize::from(*depth), expected, "{line:?}\n{text}");
+            }
+            open = open + line.matches('{').count() - line.matches('}').count();
+        }
+        let proof = emission.proof_line().expect("the proof comment is written");
+        assert!(
+            text.lines()
+                .nth(proof)
+                .expect("a line")
+                .contains("r2dec proof: test")
+        );
     }
 }

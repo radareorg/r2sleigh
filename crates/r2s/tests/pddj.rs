@@ -47,8 +47,9 @@ fn functions(binary: &Path) -> Vec<u64> {
 /// The instruction starts `pdf` lists for the function at `addr`.
 fn instructions(binary: &Path, addr: u64) -> BTreeSet<u64> {
     let (out, _) = shell(binary, &format!("pdf @ {addr:#x}"));
+    // From the address on: the rail and lanes before it are layout (D565).
     out.lines()
-        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|line| line[line.find("0x")?..].split_whitespace().next())
         .filter_map(|word| word.strip_prefix("0x"))
         .filter_map(|hex| u64::from_str_radix(hex, 16).ok())
         .collect()
