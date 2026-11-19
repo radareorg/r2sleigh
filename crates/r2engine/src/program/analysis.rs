@@ -504,11 +504,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
         let refused = |refusal: NativeRefusal| {
             let stopped = control.stopped() || refusal.stopped();
             let name = crate::native::Program::name_at(&View::new(db, true), entry);
-            let name = name.map_or_else(
-                || r2source::unnamed_function(entry),
-                |name| name.text().to_owned(),
-            );
-            let rendering = super::Rendering::refused(&name, entry, language, refusal);
+            let name = name.as_ref().map(|name| name.text());
+            let rendering = super::Rendering::refused(name, entry, language, refusal);
             Render(Rc::new(Drawn { rendering, stopped }))
         };
         // D32's admission is the container's fact, asked before any analysis is paid for.

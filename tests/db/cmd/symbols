@@ -17,3 +17,109 @@ nth paddr      vaddr      bind   type   size lib name
 0x00401010    1      4 sym.absfn
 EOF
 RUN
+
+# A C++ symbol is shown as c++filt prints it under asm.demangle, its default (D574).
+NAME=afl demangled
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=afl
+EXPECT=<<EOF
+0x00001000    3     27 sym._init
+0x000010c0    1     10 sym.imp.__cxa_finalize
+0x000010d0    1     10 std::runtime_error::runtime_error(char const*)
+0x000010e0    1     10 sym.imp.__cxa_begin_catch
+0x000010f0    1     10 sym.imp.__cxa_allocate_exception
+0x00001100    1     10 sym.imp.__cxa_free_exception
+0x00001110    1     10 sym.imp.__stack_chk_fail
+0x00001120    1     10 sym.imp.puts
+0x00001130    1     10 sym.imp.__cxa_end_catch
+0x00001140    1     10 sym.imp.__cxa_throw
+0x00001150    1     10 sym.imp._Unwind_Resume
+0x00001160    1     37 sym._start
+0x00001190    4     34 sym.deregister_tm_clones
+0x000011c0    4     51 sym.register_tm_clones
+0x00001200    5     54 sym.__do_global_dtors_aux
+0x00001240    1      9 sym.frame_dummy
+0x0000124a    3     41 Guard::~Guard()
+0x00001273    5    125 risky(int)
+0x000012f0   12    279 guarded(int)
+0x00001407    1     32 sym.main
+0x00001428    1     13 sym._fini
+EOF
+RUN
+
+# With asm.demangle off every name is its flag spelling, as JSON prints it.
+NAME=afl flag spellings
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+ARGS=-e asm.demangle=false
+CMDS=afl
+EXPECT=<<EOF
+0x00001000    3     27 sym._init
+0x000010c0    1     10 sym.imp.__cxa_finalize
+0x000010d0    1     10 sym.imp._ZNSt13runtime_errorC1EPKc
+0x000010e0    1     10 sym.imp.__cxa_begin_catch
+0x000010f0    1     10 sym.imp.__cxa_allocate_exception
+0x00001100    1     10 sym.imp.__cxa_free_exception
+0x00001110    1     10 sym.imp.__stack_chk_fail
+0x00001120    1     10 sym.imp.puts
+0x00001130    1     10 sym.imp.__cxa_end_catch
+0x00001140    1     10 sym.imp.__cxa_throw
+0x00001150    1     10 sym.imp._Unwind_Resume
+0x00001160    1     37 sym._start
+0x00001190    4     34 sym.deregister_tm_clones
+0x000011c0    4     51 sym.register_tm_clones
+0x00001200    5     54 sym.__do_global_dtors_aux
+0x00001240    1      9 sym.frame_dummy
+0x0000124a    3     41 sym._ZN5GuardD1Ev
+0x00001273    5    125 sym._Z5riskyi
+0x000012f0   12    279 sym._Z7guardedi
+0x00001407    1     32 sym.main
+0x00001428    1     13 sym._fini
+EOF
+RUN
+
+# A stripped PIE's function symbols, read from the xz ELF its .gnu_debugdata holds (GDB's
+# MiniDebugInfo, D572): both static helpers and main are named, and afl lists them.
+NAME=minidebuginfo symbols
+FILE=tests/fixtures/minidebug_gcc_x64_O2
+CMDS=is; afl
+EXPECT=<<EOF
+nth paddr      vaddr      bind   type   size lib name
+------------------------------------------------------------
+1   0x000011e0 0x000011e0 LOCAL  FUNC   62       helper
+2   0x00001100 0x00001100 LOCAL  FUNC   0        deregister_tm_clones
+3   0x00001130 0x00001130 LOCAL  FUNC   0        register_tm_clones
+4   0x00001170 0x00001170 LOCAL  FUNC   0        __do_global_dtors_aux
+5   0x000011b0 0x000011b0 LOCAL  FUNC   0        frame_dummy
+6   0x000011c0 0x000011c0 LOCAL  FUNC   4        helper
+7   ---------- 0x00004010 GLOBAL NOTYPE 0        _edata
+8   0x00001228 0x00001228 GLOBAL FUNC   0        _fini
+9   0x00001220 0x00001220 GLOBAL FUNC   6        from_b
+10  0x00003000 0x00004000 GLOBAL NOTYPE 0        __data_start
+11  0x00003008 0x00004008 GLOBAL OBJ    0        __dso_handle
+12  0x000010d0 0x000010d0 GLOBAL FUNC   38       _start
+13  0x00001060 0x00001060 GLOBAL FUNC   101      main
+14  0x000011d0 0x000011d0 GLOBAL FUNC   6        from_a
+15  ---------- 0x00004010 GLOBAL OBJ    0        __TMC_END__
+16  0x00001000 0x00001000 GLOBAL FUNC   0        _init
+1   ---------- ---------- GLOBAL FUNC   0        imp.__libc_start_main
+2   ---------- ---------- WEAK   NOTYPE 0        imp._ITM_deregisterTMCloneTable
+3   0x00001050 0x00001050 GLOBAL FUNC   16       imp.__stack_chk_fail
+4   ---------- ---------- WEAK   NOTYPE 0        imp.__gmon_start__
+5   ---------- ---------- WEAK   NOTYPE 0        imp._ITM_registerTMCloneTable
+6   0x00001040 0x00001040 WEAK   FUNC   16       imp.__cxa_finalize
+0x00001000    3     27 sym._init
+0x00001040    1     10 sym.imp.__cxa_finalize
+0x00001050    1     10 sym.imp.__stack_chk_fail
+0x00001060    3    101 sym.main
+0x000010d0    1     37 sym._start
+0x00001100    4     34 sym.deregister_tm_clones
+0x00001130    4     51 sym.register_tm_clones
+0x00001170    5     54 sym.__do_global_dtors_aux
+0x000011b0    1      9 sym.frame_dummy
+0x000011c0    1      4 sym.helper
+0x000011d0    1      6 sym.from_a
+0x000011e0    8     57 sym.helper
+0x00001220    1      6 sym.from_b
+0x00001228    1     13 sym._fini
+EOF
+RUN

@@ -37,7 +37,7 @@ trap 'rm -f "$functions"' EXIT
 # renderings cannot come from different analyses. A discovered function the
 # binary has no name for is keyed by its address, so two of them are two cells
 # rather than one.
-{ "$r2s_bin" -q -c 'afl' "$binary" 2>/dev/null || true; } \
+{ "$r2s_bin" -e asm.demangle=false -q -c 'afl' "$binary" 2>/dev/null || true; } \
     | awk '$1 ~ /^0x/ { print $1, ($NF == "-" ? $1 : $NF) }' > "$functions"
 
 # `aa` first: each rendering reads its callers, as an analysed session's does.

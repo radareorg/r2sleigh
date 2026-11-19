@@ -714,9 +714,10 @@ def order_answers(args, order, binary):
     sys.path.insert(0, str(ROOT / "tests" / "equiv"))
     import r2s_batch
 
-    listing = r2s(binary, "aa; afl", args.r2s)
-    addresses = [int(line.split()[0], 16) for line in listing.splitlines()
-                 if line.startswith("0x") and not line.split()[3].startswith(("sym.imp", "sym._"))]
+    # `aflj` names by flag spelling, which `asm.demangle` leaves alone (D574).
+    listing = r2s(binary, "aa; aflj", args.r2s)
+    rows = json.loads(listing[listing.index("["):listing.rindex("]") + 1])
+    addresses = [row["addr"] for row in rows if not row["name"].startswith(("sym.imp", "sym._"))]
     env = {**os.environ, "R2SLEIGH_WRITE_ORDER": order}
     report = r2s_batch.run_batch(args.r2s, binary, addresses, function_timeout=120, startup_timeout=600, env=env)
     answers = {}

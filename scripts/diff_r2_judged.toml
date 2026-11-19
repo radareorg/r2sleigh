@@ -127,14 +127,6 @@ verdict = "r2-right"
 reason = "66 66 66 66 66 66 2e 0f 1f 84 00 ...: the 0x66 prefixes make the operand 16 bits (objdump: nopw %cs:0x0(%rax,%rax,1)); Sleigh decodes dword; owner r2sleigh-lift (ROADMAP LS)"
 
 [[judged]]
-command = "pd"
-binaries = ["swift-main", "swift-main2"]
-r2 = '\[reloc\._[0-9A-F]{32}\.\.\.token\d\]$'
-r2s = '\[reloc\.globalinit_33_[0-9A-F]{32}_token\d\]$'
-verdict = "deliberate"
-reason = "radare2 elides the middle of a long flag name; r2s spells the symbol whole"
-
-[[judged]]
 command = ["px", "pd", "ie", "iS", "is"]
 binaries = "Lab01-03.exe"
 corpus = "pe"
@@ -764,14 +756,6 @@ r2 = 'j\w+ try\.0x[0-9a-f]+\.0x[0-9a-f]+\.to$'
 r2s = 'j\w+ 0x[0-9a-f]+$'
 verdict = "unfilled"
 reason = "radare2 flags each LSDA call-site range (try.*); r2s states no landing pads yet (owner r2image, ROADMAP I: LSDA landing pads as statements)"
-
-[[judged]]
-command = "pd"
-binaries = "ls-toybox"
-r2 = 'b sym\.\w+$'
-r2s = 'b 0x[0-9a-f]+$'
-verdict = "unfilled"
-reason = "_start_main is named only in .gnu_debugdata (MiniDebugInfo, an xz-packed .symtab), which radare2 reads and r2s does not (owner r2image symbols, ROADMAP I)"
 
 [[judged]]
 command = "is"
@@ -1856,15 +1840,6 @@ reason = "class A: r2s's aa follows each direct call and each code address hande
 
 [[judged]]
 command = "afl"
-binaries = "fedora_32_bin_ls"
-corpus = "elf"
-lacking = "r2s"
-r2 = ' sym\.[A-Za-z_]+\.cold$'
-verdict = "unfilled"
-reason = "class A: fedora_32_bin_ls carries its symbols in .gnu_debugdata (LZMA MiniDebugInfo, 0xe9c bytes); radare2 reads it and lists sym.main.cold (0x4e15, `e876f9ffff call sym.imp.abort`) and twelve more; r2s's `is` states none of them. Owner ROADMAP I (.gnu_debugdata symbols)"
-
-[[judged]]
-command = "afl"
 binaries = "x86_64-pie-memimg"
 corpus = "elf"
 lacking = "r2s"
@@ -1912,16 +1887,6 @@ r2 = ' entry0$'
 verdict = "r2s-right"
 upstream = "ie invents a program entry for an ELF whose e_entry is 0 (aarch64-relative-linkbase.so 0x502c8)"
 reason = "class A: objdump -f: aarch64-relative-linkbase.so `start address: 0x0`; radare2's ie prints a program entry at 0x502c8 (a `c0035fd6 ret`) and makes entry0 there, r2s states no entry"
-
-[[judged]]
-command = "afl"
-binaries = ["fedora_32_bin_ls", "vim"]
-corpus = "elf"
-lacking = "r2s"
-r2 = ' sym\.register_tm_clones$'
-r2s = '^<missing> refs=JUMP:jmp'
-verdict = "deliberate"
-reason = "class A: vim 0x55ab0 is reached only by frame_dummy's tail `jmp` and no symbol, FDE or call states it; r2s keeps a jmp target nothing else states in the jumping body, radare2 names it register_tm_clones by its crtstuff heuristic"
 
 [[judged]]
 command = "afl"
@@ -1988,6 +1953,16 @@ corpus = "elf"
 r2s = '^refused: under the golang_abi0 convention'
 verdict = "unfilled"
 reason = "class F: dwarf_go_tree 0x401000 runtime.text is Go ABI0, which returns results on the stack; r2s refuses its afv (`refused: under the golang_abi0 convention: Go ABI0 returns results on the stack, which no call boundary states`), radare2 lists rsp slots. Owner ROADMAP LP (Go assembly ABIs)"
+
+[[judged]]
+command = "afv"
+binaries = "fedora_32_bin_ls"
+corpus = "elf"
+function = '^0x000122e0 '
+lacking = "r2"
+r2s = '^var uint64_t stack_m72 @ entry\.sp-0x48$'
+verdict = "r2s-right"
+reason = "class E, sampled once D572 named fedora_32_bin_ls's functions from .gnu_debugdata: sym.ambsalign 0x122e0 stores realloc's size at [rsp] (`48890424 mov qword [rsp], rax` at 0x12305) and reads it back (`488b0424 mov rax, qword [rsp]` at 0x1232a), entry.sp-0x48 after six pushes and `sub rsp, 0x18`; radare2 makes no variable of a zero displacement unless the return address lives in a register (libr/anal/var.c:1232-1233 at 5a1d380d5f, `zero_ok`)"
 
 [[judged]]
 command = "afv"

@@ -637,15 +637,18 @@ pub enum SymbolVersion {
     Defined { version: std::sync::Arc<str> },
 }
 
-/// Where each symbol table states a symbol, by its index there.
+/// Where each symbol table states a symbol, by its index there; 32 bits each keep `Symbol` at
+/// 144 bytes, one copy per symbol in every table the engine holds (D572).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SymbolOrigin {
     /// The static table: ELF's `.symtab`, Mach-O's `LC_SYMTAB`.
-    pub table: Option<usize>,
+    pub table: Option<u32>,
     /// The dynamic table the loader reads: ELF's `.dynsym`.
-    pub dynamic: Option<usize>,
+    pub dynamic: Option<u32>,
     /// A PE import or export directory, by position within its library's list, from one.
-    pub directory: Option<usize>,
+    pub directory: Option<u32>,
+    /// The `.symtab` of the ELF `.gnu_debugdata` holds (GDB's MiniDebugInfo).
+    pub minidebug: Option<u32>,
 }
 
 /// One relocation record the loader, or the program's own start-up, applies.

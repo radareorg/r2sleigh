@@ -10,6 +10,7 @@ rustc-hash.workspace = true
 gimli = { version = "0.34.0", default-features = false, features = ["read", "std"] }
 memmap2 = "0.9.5"
 object.workspace = true
+xz4rust.workspace = true
 r2abi = { version = "0.1.0", path = "../r2abi" }
 thiserror.workspace = true
 

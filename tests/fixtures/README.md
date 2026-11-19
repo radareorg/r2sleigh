@@ -13,6 +13,7 @@ answer.
 | `hashes_gcc_x64_O2_stripped` | `tests/corpus/hashes.c` | discovery with no symbol table, which has to reach `main` through `__libc_start_main` |
 | `rv_O0g` | `tests/gold/review.c` | the review fixture: x86-64 PIE, GCC 13.3.0 `-O0 -g`; `classify`'s jump table is read through a spilled index nothing bounds |
 | `rv_O0g_stripped` | `rv_O0g` after `strip --strip-all` | the same program with no debug information: every declared fact has to come from the DWARF, and none may appear without it |
+| `minidebug_gcc_x64_O2` | `src/two_units_a.c`, `src/two_units_b.c` | GCC 13.3.0 `-O2`, x86-64 PIE, then GDB 15.2's MiniDebugInfo recipe (below): stripped, its function symbols in an xz `.gnu_debugdata` (872 bytes, LZMA2, CRC64) whose `.symtab` states both `static helper`s (0x11c0, 4 bytes; 0x11e0, 62) and `main` (0x1060, 101) |
 | `two_units_O0g` | `src/two_units_a.c`, `src/two_units_b.c` | GCC 13.3.0 `-O0 -g`: two units each defining a `static helper` of its own, so a declaration found by name would be the other unit's |
 | `syscalls_static_O2` | `src/syscalls.c` | GCC 13.3.0 `-O2 -nostdlib -static`, stripped: system calls whose number is a constant, the same constant on two paths, folded in the body, and a parameter; and `0f 05` as an immediate |
 | `struct_pointers_O0g` | `src/struct_pointers.c` | GCC 13.3.0 `-O0 -g`, x86-64 PIE: parameters declared through typedefs of structs, a struct holding a pointer to `struct lock_s`, which no unit lays out, and a function calling itself with them |
@@ -46,3 +47,21 @@ rather than for their behaviour. Each binary is built with
 `tests/coverage/pinned/` carries the whole-binary coverage cells, which are the
 same idea for a different question: those are gated as a population, these are
 named by individual tests.
+
+`minidebug_gcc_x64_O2`, by the recipe in GDB 15.2's manual, node "MiniDebugInfo"
+(binutils 2.42, xz 5.4.5):
+
+```sh
+gcc -O2 -o minidebug_gcc_x64_O2 src/two_units_a.c src/two_units_b.c
+nm -D minidebug_gcc_x64_O2 --format=posix --defined-only | awk '{ print $1 }' | sort > dynsyms
+nm minidebug_gcc_x64_O2 --format=posix --defined-only \
+  | awk '{ if ($2 == "T" || $2 == "t" || $2 == "D") print $1 }' | sort > funcsyms
+comm -13 dynsyms funcsyms > keep_symbols
+objcopy --only-keep-debug minidebug_gcc_x64_O2 debug
+objcopy -S --remove-section .gdb_index --remove-section .comment \
+  --keep-symbols=keep_symbols debug mini_debuginfo
+strip --strip-all -R .comment minidebug_gcc_x64_O2
+xz mini_debuginfo
+objcopy --add-section .gnu_debugdata=mini_debuginfo.xz minidebug_gcc_x64_O2
+xz -dc mini_debuginfo.xz > inner && readelf -sW inner   # the hand truth the r2image test reads
+```

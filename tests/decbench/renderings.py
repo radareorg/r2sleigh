@@ -10,6 +10,7 @@ binary that is already stripped from ``afl``, the engine's own discovery.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -69,15 +70,14 @@ def targets(binary: Path) -> list[tuple[str, int]] | None:
 
 
 def afl(r2s: Path, binary: Path) -> list[tuple[str, int]]:
-    proc = subprocess.run([str(r2s), "-q", "-c", "afl", str(binary)], capture_output=True,
+    """Each function `aflj` lists, by its flag spelling, which `asm.demangle` leaves alone."""
+    proc = subprocess.run([str(r2s), "-q", "-c", "aflj", str(binary)], capture_output=True,
                           text=True, check=False)
     found = []
-    for line in proc.stdout.splitlines():
-        fields = line.split()
-        if fields and fields[0].startswith("0x"):
-            name = fields[-1]
-            if name not in CRT and not name.startswith(("sym.imp.", "entry")):
-                found.append((name, int(fields[0], 16)))
+    for row in json.loads(proc.stdout or "[]"):
+        name = row["name"]
+        if name not in CRT and not name.startswith(("sym.imp.", "entry")):
+            found.append((name, row["addr"]))
     return found
 
 

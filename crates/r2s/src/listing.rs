@@ -42,7 +42,7 @@ pub(crate) fn instruction_painted(
 ) -> (String, Roles) {
     let (mut text, roles) = match line.decoded() {
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
-        true => painted(line, &session.program.names()),
+        true => painted(line, &session.program.names(), session.demangle),
     };
     // A pane shows one line, so a setter names its call's address.
     text.push_str(&held(session, line, None));
@@ -59,7 +59,7 @@ fn listed(session: &Session, line: &r2engine::query::Line, next_call: Option<u64
     }
     let (text, roles) = match line.decoded() {
         false => ("invalid".to_owned(), vec![(0..7, Role::Invalid)]),
-        true => painted(line, &session.program.names()),
+        true => painted(line, &session.program.names(), session.demangle),
     };
     let offset = format!("{:#010x}", line.address);
     let (offset, text) = match session.paints() {
@@ -130,16 +130,21 @@ fn runs(values: &[u64]) -> Vec<(u64, u64)> {
 /// number. A span says which number is being claimed about, and the sign it
 /// was written with is part of it: a negative literal names no address however
 /// well its magnitude matches.
-pub(crate) fn spelled(line: &r2engine::query::Line, names: &r2engine::names::NameDb) -> String {
-    painted(line, names).0
+pub(crate) fn spelled(
+    line: &r2engine::query::Line,
+    names: &r2engine::names::NameDb,
+    demangle: bool,
+) -> String {
+    painted(line, names, demangle).0
 }
 
 /// [`spelled`], with what each part of it is: the mnemonic by where the
 /// instruction sends control, each register the decoder named, each number,
-/// and each name written over one.
+/// and each name written over one, demangled where `demangle` holds.
 pub(crate) fn painted(
     line: &r2engine::query::Line,
     names: &r2engine::names::NameDb,
+    demangle: bool,
 ) -> (String, Roles) {
     let Some(syntax) = &line.syntax else {
         return (String::new(), Vec::new());
@@ -176,7 +181,7 @@ pub(crate) fn painted(
             let claimed = claimed_address(line, *number);
             let name = claimed
                 .and_then(|address| names.of(address))
-                .map(|name| name.spelled());
+                .map(|name| name.shown(demangle).into_owned());
             let role = if name.is_some() {
                 Role::Name
             } else {
@@ -387,7 +392,7 @@ fn named(session: &Session, value: u64) -> String {
         .program
         .names()
         .of(value)
-        .map(|name| format!(" {}", name.spelled()))
+        .map(|name| format!(" {}", name.shown(session.demangle)))
         .unwrap_or_default()
 }
 
@@ -426,7 +431,10 @@ fn note(
                 true => format!("defines {name} = {low:#x}"),
                 false => format!("defines {name} in [{low:#x}, {high:#x}]"),
             }),
-        r2engine::query::AnnotationKind::Text { ref text, .. } => Some(format!("{text:?}")),
+        r2engine::query::AnnotationKind::Text { ref text, .. }
+        | r2engine::query::AnnotationKind::TextIfAddress { ref text, .. } => {
+            Some(format!("\"{}\"", r2engine::names::escaped(text)))
+        }
         // The call a setter feeds is named where it is not the next call line, or `asm.proof` asks.
         r2engine::query::AnnotationKind::ArgumentOf { call, index } => {
             Some(match session.proof || next_call != Some(call) {
@@ -715,7 +723,7 @@ mod tests {
     #[test]
     fn a_named_address_is_spelled_by_its_name() {
         assert_eq!(
-            spelled(&line("call", "0x100000340"), &db()),
+            spelled(&line("call", "0x100000340"), &db(), false),
             "call sym._add_two"
         );
     }
@@ -723,15 +731,15 @@ mod tests {
     #[test]
     fn a_named_effective_address_takes_its_brackets_and_a_named_read_keeps_them() {
         assert_eq!(
-            spelled(&line("lea", "r8, [0x100000340]"), &db()),
+            spelled(&line("lea", "r8, [0x100000340]"), &db(), false),
             "lea r8, sym._add_two"
         );
         assert_eq!(
-            spelled(&line("lea", "r8, [0x100000341]"), &db()),
+            spelled(&line("lea", "r8, [0x100000341]"), &db(), false),
             "lea r8, [0x100000341]"
         );
         assert_eq!(
-            spelled(&line("mov", "rax, qword [0x100000340]"), &db()),
+            spelled(&line("mov", "rax, qword [0x100000340]"), &db(), false),
             "mov rax, qword [sym._add_two]"
         );
     }
@@ -739,10 +747,13 @@ mod tests {
     #[test]
     fn an_address_with_no_name_stays_a_number() {
         assert_eq!(
-            spelled(&line("call", "0x100000341"), &db()),
+            spelled(&line("call", "0x100000341"), &db(), false),
             "call 0x100000341"
         );
-        assert_eq!(spelled(&line("sub", "rsp, 0x10"), &db()), "sub rsp, 0x10");
+        assert_eq!(
+            spelled(&line("sub", "rsp, 0x10"), &db(), false),
+            "sub rsp, 0x10"
+        );
     }
 
     #[test]
@@ -750,7 +761,7 @@ mod tests {
         // The defect this replaced: a `-0x4` written against a register came
         // out as the name of whatever sits at address four.
         assert_eq!(
-            spelled(&line("ldr", "r3, [sp, -0x4]"), &db()),
+            spelled(&line("ldr", "r3, [sp, -0x4]"), &db(), false),
             "ldr r3, [sp, -0x4]"
         );
     }
@@ -770,7 +781,10 @@ mod tests {
             operand: Some(number),
             reference: true,
         });
-        assert_eq!(spelled(&line, &db()), "call qword [0xffffffffffff10e8]");
+        assert_eq!(
+            spelled(&line, &db(), false),
+            "call qword [0xffffffffffff10e8]"
+        );
     }
 
     #[test]
@@ -778,7 +792,7 @@ mod tests {
         // Substituting by value rewrote the whole line at once; by span, each
         // occurrence is its own decision and the count comes out right.
         assert_eq!(
-            spelled(&line("mov", "0x100000340, [0x100000340]"), &db()),
+            spelled(&line("mov", "0x100000340, [0x100000340]"), &db(), false),
             "mov sym._add_two, [sym._add_two]"
         );
     }
@@ -788,7 +802,7 @@ mod tests {
         // `adrp x17, 0x100008000` computes a page base that happens to equal a
         // named address; the instruction after it moves fifty bytes past.
         assert_eq!(
-            spelled(&unclaimed("adrp", "x17, 0x100000340"), &db()),
+            spelled(&unclaimed("adrp", "x17, 0x100000340"), &db(), false),
             "adrp x17, 0x100000340"
         );
     }
@@ -796,7 +810,7 @@ mod tests {
     #[test]
     fn a_binary_with_no_names_changes_nothing() {
         assert_eq!(
-            spelled(&line("call", "0x1030"), &NameDb::new()),
+            spelled(&line("call", "0x1030"), &NameDb::new(), false),
             "call 0x1030"
         );
     }

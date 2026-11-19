@@ -112,7 +112,7 @@ pub(crate) fn function_json(session: &mut Session, argument: &str) -> Result<Str
             serde_json::json!({
                 "addr": line.address,
                 "bytes": hex(&line.bytes),
-                "disasm": crate::listing::spelled(line, &names),
+                "disasm": crate::listing::spelled(line, &names, session.demangle),
                 "notes": noted(session, line, next),
             })
         })
@@ -220,7 +220,7 @@ fn spelled(one: &Instruction, names: &r2engine::names::NameDb) -> Spelled {
         None => ("invalid".to_owned(), "invalid".to_owned()),
     };
     let disasm = match line.decoded() {
-        true => crate::listing::spelled(line, names),
+        true => crate::listing::spelled(line, names, false),
         false => opcode.clone(),
     };
     let named = |registers: &[Register]| registers.iter().map(register).collect();

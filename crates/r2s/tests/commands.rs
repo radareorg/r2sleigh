@@ -890,6 +890,7 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
     assert_eq!(
         run.out,
         "asm.bytes = true\n\
+         asm.demangle = true\n\
          asm.proof = false\n\
          scr.color = 0\n\
          \x20           0x00401330      endbr64\n\

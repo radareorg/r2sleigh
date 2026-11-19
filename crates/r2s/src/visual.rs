@@ -216,10 +216,7 @@ impl Host for Visual<'_> {
         // that body rather than one starting where the cursor is.
         let entry = containing_entry(self.session, address)?;
         let rendering = self.session.program.rendered(entry)?;
-        let name = self.session.program.names().of(entry).map_or_else(
-            || format!("fcn.{entry:08x}"),
-            r2engine::names::Name::spelled,
-        );
+        let name = self.session.program.names().function(entry, false);
         let answer = rendering.answer(&name, entry);
         // What each part of the unit is, as the renderer wrote it, cut at its
         // lines: the code is the emission's unit.

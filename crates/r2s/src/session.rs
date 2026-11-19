@@ -21,6 +21,8 @@ pub struct Session {
     pub grepped: bool,
     /// Whether a listing shows each instruction's bytes: `asm.bytes`.
     pub bytes: bool,
+    /// Whether a C++ name is shown demangled: `asm.demangle`.
+    pub demangle: bool,
     /// Whether each note names its basis and each setter its call: `asm.proof` (r2s only).
     pub proof: bool,
 }
@@ -33,6 +35,7 @@ impl Session {
             color: false,
             grepped: false,
             bytes: true,
+            demangle: true,
             proof: false,
             addr: program.start().unwrap_or(0),
             program,

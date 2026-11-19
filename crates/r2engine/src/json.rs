@@ -479,6 +479,7 @@ fn kind_of(kind: &query::AnnotationKind) -> &'static str {
         K::Loaded { .. } => "loaded",
         K::Points { .. } => "points",
         K::Text { .. } => "text",
+        K::TextIfAddress { .. } => "text-if-address",
         K::Call { .. } => "call",
         K::ArgumentOf { .. } => "argument",
         K::Switch { .. } => "switch",

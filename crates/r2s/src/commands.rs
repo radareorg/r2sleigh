@@ -515,7 +515,7 @@ pub(crate) fn parse_number(session: &mut Session, text: &str) -> Result<u64, Str
     }
     session
         .program
-        .address_named(text)?
+        .address_spelled(text)?
         .ok_or_else(|| format!("unknown address or flag '{}'", text))
 }
 
@@ -574,6 +574,10 @@ fn info(session: &Session) -> Result<String, String> {
         image.container().languages.program.spelled()
     ));
     posture(&mut out, image.container());
+    // A `.gnu_debugdata` section refused whole: no symbol of it is listed (D572).
+    if let Some(refused) = image.minidebug_refusal() {
+        out.push_str(&format!("minidebug refused: {refused}\n"));
+    }
     if let Some(entry) = image
         .entry_points()
         .iter()
@@ -658,7 +662,8 @@ pub(crate) fn discovered(session: &mut Session) -> Result<Table, String> {
     // radare2's layout, with no header: `addr nbbs size name`, so the two
     // diff line for line. How sure discovery is moved to `aflj`.
     let mut table = Table::default();
-    for row in listed_functions(session)? {
+    let demangle = session.demangle;
+    for row in listed_functions(session, demangle)? {
         table.row(
             Some(row.address),
             format!(
@@ -673,7 +678,8 @@ pub(crate) fn discovered(session: &mut Session) -> Result<Table, String> {
 /// `aflj`: the same rows as JSON objects, with radare2's keys and the reason
 /// discovery believes each one.
 fn discovered_json(session: &mut Session) -> Result<String, String> {
-    let rows = listed_functions(session)?
+    // JSON keeps the flag spelling (`asm.demangle` shows names; it does not rename them).
+    let rows = listed_functions(session, false)?
         .into_iter()
         .map(|row| {
             serde_json::json!({
@@ -697,10 +703,11 @@ struct ListedFunction {
     confidence: String,
 }
 
-/// Every function discovery found, with the blocks and span its walk traced.
-fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String> {
+/// Every function discovery found, with the blocks and span its walk traced, named as `demangle` shows.
+fn listed_functions(session: &mut Session, demangle: bool) -> Result<Vec<ListedFunction>, String> {
     let found = session.program.functions()?;
     let extents = session.program.function_extents()?;
+    let names = session.program.names();
     Ok(found
         .iter()
         .map(|one| {
@@ -709,15 +716,8 @@ fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String
                 address: one.address,
                 blocks: extent.map_or(0, |extent| extent.blocks),
                 size: extent.map_or(0, |extent| extent.bytes),
-                // Spelled as a listing spells it, which is how radare2 writes
-                // it and what makes the two comparable.
-                name: session
-                    .program
-                    .names()
-                    .of(one.address)
-                    .map(r2engine::names::Name::spelled)
-                    .or_else(|| one.name.clone())
-                    .unwrap_or_else(|| format!("fcn.{:08x}", one.address)),
+                // Shown as a listing shows it, which is how radare2 writes it.
+                name: names.function(one.address, demangle),
                 confidence: one.confidence.to_string(),
             }
         })
@@ -848,7 +848,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
     for (fact, source) in index.to(wanted) {
         count += 1;
         let text = match &source.line.syntax {
-            Some(_) => crate::listing::spelled(&source.line, &names),
+            Some(_) => crate::listing::spelled(&source.line, &names, session.demangle),
             // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
             None => format!("{} {wanted:#010x}", datum(session)),
         };
@@ -858,7 +858,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
             false => source
                 .owners
                 .iter()
-                .map(|owner| names.function(*owner))
+                .map(|owner| names.function(*owner, session.demangle))
                 .collect(),
         };
         for owner in owners {
@@ -1016,7 +1016,7 @@ fn every_string(session: &Session) -> Result<String, String> {
             text.len() + 1,
             section_of(session, *paddr, true),
             text_type(text),
-            escaped(text)
+            r2engine::names::escaped(text)
         ));
     }
     Ok(out)
@@ -1041,7 +1041,7 @@ fn string_table(session: &Session, found: &[(u64, String)]) -> Table {
                 text.len() + 1,
                 section_of(session, *vaddr, false),
                 text_type(text),
-                escaped(text)
+                r2engine::names::escaped(text)
             ),
         );
     }
@@ -1068,22 +1068,6 @@ fn text_type(text: &str) -> &'static str {
         true => "ascii",
         false => "utf8",
     }
-}
-
-/// A string as radare2 prints one: each control character escaped, so one string is one line.
-fn escaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.
@@ -1249,12 +1233,14 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .iter()
         .filter(|symbol| !symbol.import)
         .collect();
-    // Numbered as the static table numbers them, where it states them.
+    // Numbered as the static table numbers them, where it states them; a MiniDebugInfo symbol by
+    // the inner `.symtab`'s number, as radare2 numbers it.
     let nth = |symbol: &r2image::Symbol| {
-        symbol.origin.table.map_or(
-            (true, symbol.origin.dynamic.or(symbol.origin.directory)),
-            |index| (false, Some(index)),
-        )
+        let origin = &symbol.origin;
+        let other = origin.dynamic.or(origin.directory).or(origin.minidebug);
+        origin
+            .table
+            .map_or((true, other), |index| (false, Some(index)))
     };
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {
@@ -1650,11 +1636,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 fn decompile_json(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
-    let name = session
-        .program
-        .names()
-        .of(addr)
-        .map_or_else(|| format!("fcn.{addr:08x}"), r2engine::names::Name::spelled);
+    let name = session.program.names().function(addr, false);
     serde_json::to_string(&rendering.answer(&name, addr)).map_err(|error| error.to_string())
 }
 

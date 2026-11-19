@@ -274,3 +274,104 @@ tests whether a setter's call is the next call line.
   cycles reader, proof (`e asm.proof=true`) and none (the text after the first
   ` ; ` cut in the held lines). Plain and colour print the
   same bytes; the exit paints the cells with D569's proof roles.
+## Round 15 as built: names
+
+- D574, one spelling. An unnamed function is `fcn.%08x`, radare2's form
+  (`libr/core/canal.c:158` and `:888`, `"%s.%08"PFMT64x`), written by
+  `r2source::unnamed_function` alone; `afl`, `axt`, `pddj`'s `name` and the
+  visual mode ask `NameDb::function`. C keeps `unnamed_identifier`
+  (`fcn_1e1d0`): `rendered_name_of` takes no display spelling, and a refused
+  rendering's definition is `rendered_name_of(None, entry)`. A refusal comment
+  of an unnamed function reads the listing's spelling (below). bash `main` stays `fcn_1e1d0` in `pdd`:
+  `respell_nonconforming_main` (r2dec `ast.rs:2072-2095`) refuses the name
+  `main` to a prototype C11 5.1.2.2.1 does not allow, which is correct C.
+- D574, seeking. `OpenProgram::address_spelled` resolves a name the table
+  holds (`NameDb::address_of`), else `fcn.%08x` where the survey lists that
+  entry (a binary search of its sorted functions); `fcn.1e1d0` names nothing.
+  `s` and every `@` read it through `parse_number`. The command line keeps
+  radare2's operators (`~ ; @ | > " ' # $( &&`, `line.rs`, cmd.c:5241-5247), so
+  a demangled name holding one seeks through the API and by its flag spelling
+  on the line: 3,096 of 0pack's 8,699 `afl` names, 2,107 of pumasim's 15,298
+  (D624, open). `crates/r2s/tests/names.rs` seeks every `afl` name both ways
+  and holds the uncarried set (`Guard::~Guard()`).
+- D574, the one moved `pdd` class: a refused unnamed function's comment
+  (`/* r2sleigh refused fcn.0001e1d0: ... */`, also `pddj` `code`) reads the
+  listing's spelling. Census, goldens and x86-64 and AArch64 equivalence hold
+  none; win64 equivalence holds 15, whose reason `gate.reason` normalises to
+  the same key (`\b(?:fcn|sub)[._][0-9a-f]+\b`). Keeping `fcn.{x}` there would
+  be the second speller this row deletes.
+- D574, demangling. `r2abi::mangled` parses each type in two readings at once
+  (`Both = (Ty, Node)`): the C spelling `parse` states, unchanged on all 23,770
+  names below, and libiberty's component tree. `Mangled::spelled` is a port of
+  `d_print_comp` (the modifier list that prints a declarator inside out,
+  reference collapsing, `> >`, `operator< <`, literals, `[abi:...]`,
+  `(anonymous namespace)`, `[clone .x]`, `DMGL_VERBOSE` expansions of
+  `Ss`/`Si`/`So`/`Sd`). It refuses what `parse` refuses, a restrict-qualified
+  type (a candidate `parse` does not count), a float literal and an empty one.
+  Differential against GNU `c++filt` 2.42 (contabo) and 2.47 (Mac), which
+  agree, over every `_Z` FUNC symbol (`readelf -sW`, version suffix cut):
+  0pack 8,884 names, 8,371 equal, 513 refused (5.8%), 0 different; pumasim
+  14,814, 14,476, 338 (2.3%), 0; demangle-test-cpp 72, 67, 5, 0. Under 10% on
+  both, so no `cpp_demangle` dependency. Script:
+  `designs/round15/demangle/compare.py` in the round's scratchpad.
+- `Name::shown(demangle)`: the spelled form of a `Symbol` or `Import` whose
+  text parses whole, else `spelled()`. It is the same symbol respelled by the
+  ABI's grammar, so as Stated as the mangled text; no fact reads it.
+  `e asm.demangle` (radare2's, `cconfig.c:4363`, default true) reaches `afl`,
+  `afi`'s `name:`, `axt` and `pdf`/`pd` operands and word notes; `aflj`, `ao`,
+  `f`, `is` and `pddj` keep the flag spelling. `diff_r2.py` runs radare2 with
+  `asm.demangle=false bin.demangle=false` and r2s with `asm.demangle=false`,
+  so names compare as flags. Scripts that read names from `afl` read `aflj`
+  (census `orders`, `run_refuter.py`, DecBench's `renderings.py` and
+  `r2sleigh_raw.py`, the stub `aflj`), which an older r2s also answers; the
+  coverage sweep passes the key.
+- Cost: `Names` keeps no demangled key. A seek that misses every table and
+  holds `(` asks each C++ name in address order, O(names x length): demangling
+  all 14,814 of pumasim's takes 20 ms (Mac), which an eager key would add to
+  every session's `Names`, about 0.1% of the pumasim `aa; pdd` row. Showing a
+  name demangles it at print, O(length).
+- D571, text. A terminated run is text where each character is printable or
+  a byte a C string literal names by a simple escape (`\a \b \t \n \v \f \r`,
+  ISO C 6.4.4.4) or ESC, the alphabet radare2's scanner admits
+  (`libr/bin/bfile.c:288-298`); any other control byte ends it, and the
+  first start whose suffix is text is what a scan finds (`first_text_in`).
+  `names::escaped` is the one speller, radare2's string scanner's table
+  (`bfile.c:303-310`: `\a \b \t \n \v \f \r`, `\e` for ESC, `\\` for a
+  backslash, no quote escaping, as radare2's `iz` and string comments print);
+  a string flag is its `flag_filter` (macOS `ansi`: `str.e8qo__d_n`, as
+  radare2 names it; `\x1b` first gave `str.x1b8qo__d_n`, a D490 `pd` line).
+  Rendered C reads `native::literal_at`, the pre-D571 alphabet, so rendering moves no
+  byte: census, goldens 0 moves.
+- D571, immediates. A constant the line moves whole, by a copy, an extension
+  or as the word a store writes, and that no claim on the line uses as an
+  address, gets `AnnotationKind::TextIfAddress` where static data the file
+  backs reads as text there: standing `Unknown`, mark `?`, role none, so it is
+  no reference and names no operand. A constant an arithmetic, compare or mask
+  operation reads gets nothing (`moved_whole`, O(ops of one instruction)).
+  bomb 0x400f51 `mov esi, 0x4025cf ; ? "%d %d"`; bash 0x1f8b2 keeps
+  `and eax, 0xf000 ;   defines rax in [0x0, 0xf000]`; crackme 0x4006ac keeps
+  `^ "Password: "`.
+- D571, pages. AArch64 `adrp` lifts as a copy of its page, as `adr` lifts as a
+  copy of its address, so the lift alone does not tell them apart. A value a
+  line forms from its own position alone is lifted again `STEP` (4) bytes on:
+  an address moves 4 bytes, a rounded page base moves 0 or a page. A page
+  holds no text or held word until an `add` or a load completes it; its
+  `Computes` claim and reference stay. One extra lift per such line, no pass.
+  ls-toybox `seq_main` (0x392dc): text notes 15 to 8, the 7 on `adrp` lines
+  gone; the AArch64 goldens hold no page-base note, so none moves.
+- D571, quotes: a note's text was Rust's `{:?}`, which escaped `"` and spelled
+  other characters as `\u{..}`; it is `"` + `names::escaped` + `"` now, a quote
+  bare as radare2's comment prints it (bash 0x2c8b9: `"Use "%s" to leave the
+  shell.\n"`). Goldens: 0 lines.
+- D571, `iz` and `izz` against radare2 6.2.5 (Mac) over 241 ELF testbins:
+  r2s-only `iz` rows 5,827 to 5,420 and `izz` 5,414 to 3,730; radare2-only
+  rows fall too. Rows r2s newly lists alone: `iz` 44 (23 radare2's `izz`
+  lists within 2 bytes, 12 shorter than radare2's 4, 9 packed `.\v` tables
+  in libflutter.so and textile), `izz` 709 (663 within 2 bytes, radare2's
+  start backs up after a short run, `bfile.c:331-334`; 46 code bytes and
+  tables radare2's UTF-8 block filter, `bfile.c:356-390`, refuses). bashbot
+  0x9908 `wget ... \r\n` is listed by `izz` and `iz`.
+- D571, the floor (D623, open). radare2's rule, at least 4 characters
+  (`bfile.c:335`, `bin_elf64.c:147`), lists 0pack 17,560 strings (radare2
+  17,874, r2s 6,641) but raises r2s-only `iz` rows 5,420 to 7,543 over the
+  same 241 files, so the chance bound stays.
