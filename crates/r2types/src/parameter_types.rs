@@ -14,6 +14,20 @@ pub enum PointerRefusal {
     IntegerBound,
     /// The carrier is not as wide as a pointer.
     NotPointerWide,
+    /// Callees handed it whole access through it at more than one width, or at one no integer
+    /// spells: a pointer whose pointee no access states (D610).
+    PointeeWidths,
+}
+
+impl PointerRefusal {
+    /// The cause as the proof line names it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::IntegerBound => "IntegerBound",
+            Self::NotPointerWide => "NotPointerWide",
+            Self::PointeeWidths => "PointeeWidths",
+        }
+    }
 }
 
 /// What the body states of an integer's sign: every sign-seeding use of the lane agrees, none
@@ -146,6 +160,21 @@ pub fn unstated_word(bits: u32) -> CTypeLike {
 /// The unstated word typedef's prefix.
 pub const UNSTATED_WORD: &str = "r2sleigh_word_u";
 
+/// The prelude typedef a parameter of no proven type spells: its carrier's width, which claims no
+/// C type, as D201's result carrier (D610).
+pub fn unproven_parameter(bits: u32) -> CTypeLike {
+    CTypeLike::Typedef {
+        name: format!("{UNPROVEN_PARAMETER}{bits}"),
+        ty: Box::new(CTypeLike::Int {
+            bits,
+            signedness: Signedness::Unsigned,
+        }),
+    }
+}
+
+/// The unproven parameter typedef's prefix.
+pub const UNPROVEN_PARAMETER: &str = "r2sleigh_unproven_u";
+
 /// `ty`, the unstated word as the integer it is: a merge of evidence reads it as a weak scalar.
 pub fn word_free(ty: &CTypeLike) -> &CTypeLike {
     match ty {
@@ -157,6 +186,13 @@ pub fn word_free(ty: &CTypeLike) -> &CTypeLike {
 /// Whether `ty` is the unstated word typedef.
 pub fn is_unstated_word(ty: &CTypeLike) -> bool {
     matches!(ty, CTypeLike::Typedef { name, .. } if name.starts_with(UNSTATED_WORD))
+}
+
+/// Whether `ty` is a typedef that states a width and no C type: the unstated word or an unproven
+/// parameter's carrier, each read as its integer.
+pub fn is_width_only(ty: &CTypeLike) -> bool {
+    is_unstated_word(ty)
+        || matches!(ty, CTypeLike::Typedef { name, .. } if name.starts_with(UNPROVEN_PARAMETER))
 }
 
 /// One slot's row: its type, and why a declared pointer did not reach it.
@@ -236,5 +272,10 @@ impl ParameterTypes {
 
     pub fn is_empty(&self) -> bool {
         self.formals.is_empty()
+    }
+
+    /// How many formals the table is over.
+    pub fn formals(&self) -> usize {
+        self.formals.len()
     }
 }

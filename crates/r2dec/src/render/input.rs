@@ -70,6 +70,23 @@ impl<'a> RenderInput<'a> {
     }
 
     /// The structures the function's parameter accesses lay out, by tag (doc/adr-aggregates.md).
+    /// Each formal whose row is spelled at its carrier, and why (D610).
+    pub fn unproven_parameters(&self) -> Vec<(usize, r2types::PointerRefusal)> {
+        let rows = &self.facts.report().type_facts().parameter_types;
+        let refused = |index| {
+            rows.row(index)
+                .and_then(|row| row.refused)
+                .map(|why| (index, why))
+        };
+        let unproven = |(_, why): &(usize, r2types::PointerRefusal)| {
+            matches!(why, r2types::PointerRefusal::PointeeWidths)
+        };
+        (0..rows.formals())
+            .filter_map(refused)
+            .filter(unproven)
+            .collect()
+    }
+
     pub fn inferred_aggregates(
         &self,
     ) -> &'a std::collections::BTreeMap<String, r2types::AggregateDefinition> {

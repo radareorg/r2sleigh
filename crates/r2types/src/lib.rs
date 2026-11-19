@@ -58,8 +58,9 @@ pub use function_facts::{
     admit_declaration_type, declaration_type_width_bits, unread_slot,
 };
 pub use parameter_types::{
-    IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType, UNSTATED_WORD,
-    is_unstated_word, unstated_word, word_free,
+    IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType,
+    UNPROVEN_PARAMETER, UNSTATED_WORD, is_unstated_word, is_width_only, unproven_parameter,
+    unstated_word, word_free,
 };
 
 pub use model::{Signedness, Type};
