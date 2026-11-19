@@ -124,3 +124,21 @@ fn an_adrp_page_holds_no_text_and_the_address_its_add_completes_does() {
     assert_eq!(texts(&lines[0]), [], "{:?}", lines[0].annotations);
     assert_eq!(texts(&lines[1]), [(BASE + 0x1050, "done".to_owned())]);
 }
+
+/// `pdfj` spells the unknown as its own kind, standing on no basis, with the `?` cell `pdf` prints.
+#[test]
+fn pdfj_spells_text_if_address_as_an_unknown() {
+    let literal = Literal::plt_wrapped("__isoc99_sscanf", &MOVES_TO_ESI).with_data();
+    let listing = OpenProgram::of(literal).function_listing(PLT_CALLER);
+    let lines: Vec<Line> = listing.expect("it lists").lines.value;
+    let first = lines.iter().find(|line| line.address == PLT_CALLER);
+    let mut annotations = first.expect("the first line").annotations.iter();
+    let unknown = annotations
+        .find(|annotation| matches!(annotation.kind, AnnotationKind::TextIfAddress { .. }))
+        .expect("the moved constant's note");
+    let note = r2engine::NoteJson::of(unknown, "\"%d %d\"".to_owned());
+    assert_eq!(
+        (note.kind, note.mark.as_str(), note.basis, note.grade),
+        ("text-if-address", "?", None, None)
+    );
+}

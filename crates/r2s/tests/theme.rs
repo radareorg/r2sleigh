@@ -98,3 +98,28 @@ fn scr_color_takes_radare2s_four_depths() {
     let (out, _) = piped(hashes(), "e scr.color=4; e scr.color");
     assert_eq!(out, "0\n");
 }
+
+/// `ao`'s notes and `pd?`'s legend paint each mark cell in the role `pdf` paints it, and print
+/// the same bytes unpainted in a pipe.
+#[test]
+fn ao_notes_and_the_pd_legend_paint_their_mark_cells() {
+    let said = "args of sym.imp.ext: the import has no declaration to state its arguments";
+    let (out, ok) = piped(relocated(), "e scr.color=1; ao @ 0x08000040");
+    assert!(ok);
+    let painted = format!("\n  \x1b[41;97m!\x1b[0m \x1b[39m{said}\x1b[0m\n");
+    assert!(out.contains(&painted), "{out:?}");
+    let (out, _) = piped(relocated(), "ao @ 0x08000040");
+    assert!(out.contains(&format!("\n  ! {said}\n")), "{out:?}");
+    let (legend, ok) = piped(relocated(), "e scr.color=1; pd?");
+    assert!(ok);
+    assert!(
+        legend.contains("\n\x1b[41;97m!\x1b[0m  refused; the reason follows"),
+        "{legend:?}"
+    );
+    assert!(legend.contains("\n(space)  holds"), "{legend:?}");
+    let (legend, _) = piped(relocated(), "pd?");
+    assert!(
+        legend.contains("\n!  refused; the reason follows"),
+        "{legend:?}"
+    );
+}
