@@ -1621,6 +1621,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
                 depths: emission.depths(),
                 proof: emission.proof_line(),
                 lowest: emission.lowest_addresses(),
+                breaks: emission.break_points(),
             };
             Some(crate::rails::laid(session, &stated, &notes))
         }

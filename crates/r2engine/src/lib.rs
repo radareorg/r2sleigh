@@ -50,7 +50,7 @@ pub use r2sleigh_lift::{NumberSpan, Syntax};
 mod route;
 mod stub;
 
-pub use r2dec::{CRole, EffectObligationAudit, EffectObligationDisposition};
+pub use r2dec::{BreakPoint, CRole, EffectObligationAudit, EffectObligationDisposition};
 use route::decompile_route_decision;
 pub use route::{
     EngineDiagnostics, EnginePlan, EngineRequestKind, EngineRequestPlan, EngineRouteDecision,

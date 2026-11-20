@@ -67,6 +67,21 @@ fn stripped(line: &str) -> (String, Option<u64>) {
     (format!("{}{rest}", " ".repeat(depth * 4)), address)
 }
 
+/// A laid out continuation line's bytes: after the column and the rails, 4 cells more (D620).
+fn continued(line: &str) -> Option<&str> {
+    let mut rest = line.get(11..)?;
+    while let Some(after) = rest.strip_prefix("│   ") {
+        rest = after;
+    }
+    if let Some((_, after)) = rest
+        .strip_prefix("│ ")
+        .and_then(|after| after.split_once("> "))
+    {
+        rest = after;
+    }
+    rest.strip_prefix("    ")
+}
+
 /// In a pipe `asm.rails` and `asm.pdd.addr` are off, so `pdd` is the definition's bytes: the same
 /// as with both keys set false.
 #[test]
@@ -90,9 +105,17 @@ fn the_laid_out_pdd_strips_back_to_the_plain_one() {
             .filter_map(|line| line[line.find("0x")?..].split_whitespace().next())
             .filter_map(|word| u64::from_str_radix(word.strip_prefix("0x")?, 16).ok())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut back = Vec::new();
-        let mut widths = Vec::new();
+        let mut back: Vec<String> = Vec::new();
+        let mut widths: Vec<usize> = Vec::new();
         for line in laid.lines() {
+            // A continuation is its statement's next bytes (D620).
+            if let (Some(segment), Some(last), Some(width)) =
+                (continued(line), back.last_mut(), widths.last_mut())
+            {
+                last.push_str(segment);
+                *width = (*width).max(line.chars().count());
+                continue;
+            }
             let (back_line, address) = stripped(line);
             if let Some(address) = address {
                 assert!(
@@ -181,4 +204,30 @@ fn the_railed_notes_count_the_proof_lines_type_clauses() {
         }
     }
     assert!(seen > 0, "hashes states a type or unassigned clause");
+}
+
+/// On a terminal no laid out line passes 160 cells (D620), except where an `r2dec gap` comment,
+/// which holds no break point, is the run past the room; the line without it fits.
+#[test]
+fn a_laid_out_line_fits_160_cells_or_holds_one_unbreakable_comment() {
+    let laid = each("e asm.rails=true; e asm.pdd.addr=true; pdd");
+    let mut over = Vec::new();
+    for line in laid.iter().flat_map(|text| text.lines()) {
+        let width = line.chars().count();
+        if width <= 160 {
+            continue;
+        }
+        let before = line
+            .find("/* r2dec gap")
+            .map(|at| line[..at].chars().count());
+        if before.is_none_or(|before| before > 160) {
+            over.push(format!("{width}: {line}"));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "{} lines:\n{}",
+        over.len(),
+        over.join("\n")
+    );
 }

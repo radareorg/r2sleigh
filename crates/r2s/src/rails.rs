@@ -8,6 +8,12 @@ use r2s_tui::theme::{Role, Roles};
 /// Past this depth the rails fold to a depth count, `│ N>`.
 const FOLD: usize = 24;
 
+/// The cells a laid out line fills before it wraps at a break point (D620).
+const WIDTH: usize = 160;
+
+/// The cells a continuation line indents past its statement's rails.
+const CONTINUED: &str = "    ";
+
 /// The proof comment's replacement: refused and undecided facts first, then bounds and premises,
 /// at most 2 lines; the full list stays in plain `pdd` and `pddo`.
 pub(crate) fn notes(
@@ -88,6 +94,8 @@ pub(crate) struct Stated<'a> {
     pub depths: &'a [u8],
     pub proof: Option<usize>,
     pub lowest: Vec<Option<u64>>,
+    /// Where each line may break, by line then offset.
+    pub breaks: &'a [r2engine::BreakPoint],
 }
 
 /// The definition with its rails, address column and proof comment laid out, and its roles.
@@ -100,7 +108,14 @@ pub(crate) fn laid(
     let mut out = String::with_capacity(text.len() * 2);
     let mut painted = Roles::new();
     let mut start = 0;
+    let mut breaks = stated.breaks.iter().peekable();
     for (line, source) in text.split_inclusive('\n').enumerate() {
+        let mut points = Vec::new();
+        while let Some(point) = breaks.next_if(|point| point.line as usize <= line) {
+            if point.line as usize == line {
+                points.push(*point);
+            }
+        }
         let depth = usize::from(depths.get(line).copied().unwrap_or(0));
         let end = start + source.len();
         let column = |out: &mut String, painted: &mut Roles, address: Option<u64>| {
@@ -129,6 +144,7 @@ pub(crate) fn laid(
             start = end;
             continue;
         }
+        let laid_from = out.len();
         column(&mut out, &mut painted, lowest.get(line).copied().flatten());
         let indent = depth * stated.indent;
         let stripped =
@@ -139,18 +155,89 @@ pub(crate) fn laid(
                 }
                 false => 0,
             };
-        let shift = out.len();
-        let from = start + stripped;
-        out.push_str(&source[stripped..]);
-        for (span, role) in roles {
-            let (low, high) = (span.start.max(from), span.end.min(end));
-            if low < high {
-                painted.push((low - from + shift..high - from + shift, *role));
+        let prefix = out[laid_from..].chars().count();
+        let cuts = match session.railed() {
+            true => wrapped(&source[stripped..], stripped, &points, prefix),
+            false => Vec::new(),
+        };
+        let mut from = stripped;
+        for to in cuts.into_iter().chain([source.len()]) {
+            if from > stripped {
+                out.push('\n');
+                column(&mut out, &mut painted, None);
+                railed(session, &mut out, &mut painted, depth);
+                out.push_str(CONTINUED);
             }
+            let shift = out.len();
+            out.push_str(&source[from..to]);
+            for (span, role) in roles {
+                let (low, high) = (span.start.max(start + from), span.end.min(start + to));
+                if low < high {
+                    painted.push((
+                        low - start - from + shift..high - start - from + shift,
+                        *role,
+                    ));
+                }
+            }
+            from = to;
         }
         start = end;
     }
     (out, painted)
+}
+
+/// The bytes of a line where it wraps past [`WIDTH`] cells: greedy, each cut the fitting point of
+/// lowest depth, then latest offset (Oppen, TOPLAS 1980). `rest` starts at byte `skipped` of the
+/// line and is laid after `prefix` cells. `O(line length)`.
+fn wrapped(
+    rest: &str,
+    skipped: usize,
+    points: &[r2engine::BreakPoint],
+    prefix: usize,
+) -> Vec<usize> {
+    let text = rest.trim_end_matches('\n');
+    // The cells before each byte of `text`, so a run's width is one subtraction.
+    let mut before = Vec::with_capacity(text.len() + 1);
+    let mut count = 0;
+    for byte in text.bytes() {
+        before.push(count);
+        count += usize::from(byte & 0xc0 != 0x80);
+    }
+    before.push(count);
+    let cells = |from: usize, to: usize| before[to - skipped] - before[from - skipped];
+    let end = skipped + text.len();
+    let mut cuts = Vec::new();
+    let mut from = skipped;
+    let mut room = WIDTH.saturating_sub(prefix);
+    let mut next = 0;
+    while cells(from, end) > room {
+        let mut best: Option<r2engine::BreakPoint> = None;
+        let mut overflow = None;
+        while let Some(point) = points.get(next) {
+            let at = point.offset as usize;
+            if at <= from {
+                next += 1;
+                continue;
+            }
+            if at >= end || cells(from, at) > room {
+                overflow = Some(at).filter(|at| *at < end);
+                break;
+            }
+            if best.is_none_or(|kept| point.depth <= kept.depth) {
+                best = Some(*point);
+            }
+            next += 1;
+        }
+        // No point fits: the run up to the next one stays wider than the room.
+        let Some(cut) = best.map(|point| point.offset as usize).or(overflow) else {
+            break;
+        };
+        cuts.push(cut);
+        from = cut;
+        room = WIDTH.saturating_sub(prefix + CONTINUED.len());
+        next = points.partition_point(|point| (point.offset as usize) <= from);
+    }
+    cuts
 }
 
 /// One `│` and three spaces per level in `Rail`; past [`FOLD`] levels, `│ N>` and a space.
