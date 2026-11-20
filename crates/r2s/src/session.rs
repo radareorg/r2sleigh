@@ -45,7 +45,18 @@ pub struct Session {
 
 impl Session {
     pub fn open(path: &str) -> Result<Self, String> {
-        let image = Image::open(path).map_err(|error| error.to_string())?;
+        Self::of(path, Image::open(path).map_err(|error| error.to_string())?)
+    }
+
+    /// `-a`/`-b`: the file as raw code of `arch`, at address 0 (D577).
+    pub fn open_raw(path: &str, arch: r2image::Arch) -> Result<Self, String> {
+        Self::of(
+            path,
+            Image::open_raw(path, arch).map_err(|error| error.to_string())?,
+        )
+    }
+
+    fn of(path: &str, image: Image) -> Result<Self, String> {
         let program = OpenProgram::of(Opened::of(image));
         Ok(Self {
             color: 0,

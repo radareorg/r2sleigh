@@ -1600,6 +1600,44 @@ impl Leb<'_> {
     }
 }
 
+/// The file's bytes with its header's section table fields (`e_shoff`, `e_shnum`, `e_shstrndx`)
+/// zeroed, where `object` refused the file for that table and its header and program headers read
+/// (ELF gABI: `e_shoff` 0 states no section header table). Nothing a section header states is
+/// inferred: the copy is read for segments and the dynamic table only. `O(n)` in the file, once.
+pub(crate) fn without_section_table(data: &[u8]) -> Option<Vec<u8>> {
+    let wide = match data.get(..5)? {
+        [0x7f, b'E', b'L', b'F', class] if *class == elf::ELFCLASS64.0 => true,
+        [0x7f, b'E', b'L', b'F', class] if *class == elf::ELFCLASS32.0 => false,
+        _ => return None,
+    };
+    // Offsets of `e_shoff`, `e_shnum` and `e_shstrndx` (gABI "ELF Header").
+    let fields: [(usize, usize); 3] = match wide {
+        true => [(0x28, 8), (0x3c, 2), (0x3e, 2)],
+        false => [(0x20, 4), (0x30, 2), (0x32, 2)],
+    };
+    let headed = match wide {
+        true => elf::FileHeader64::<object::Endianness>::parse(data).is_ok(),
+        false => elf::FileHeader32::<object::Endianness>::parse(data).is_ok(),
+    };
+    if !headed {
+        return None;
+    }
+    let mut blind = data.to_vec();
+    for (at, size) in fields {
+        blind.get_mut(at..at + size)?.fill(0);
+    }
+    Some(blind)
+}
+
+/// The `e_machine` an ELF header states, where it names a machine `object` does not know.
+pub(crate) fn machine(file: &object::File<'_>) -> Option<u16> {
+    match file {
+        object::File::Elf32(elf) => Some(elf.elf_header().e_machine(elf.endian()).0),
+        object::File::Elf64(elf) => Some(elf.elf_header().e_machine(elf.endian()).0),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

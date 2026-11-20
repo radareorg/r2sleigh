@@ -38,6 +38,10 @@ answer.
 | `cxx_cold_split_gcc_x64_O2` | `src/cold_split.cc` | GCC 13.3.0 `g++ -O2` (x86-64, PIE): `nm -C` lists `build(int) [clone .cold]` at 0x11a0; the pad at 0x1911 jumps into it (D570) |
 | `c_cleanup_gcc_aarch64_O0` | `src/cleanup.c` | GCC 13.3.0 `aarch64-linux-gnu-gcc -O0 -fexceptions`: a `cleanup` attribute under `__gcc_personality_v0` (`R_AARCH64_ABS64`); `guarded` (0x9e8), LSDA 0xc84 by hand `[0xa24,0xa28) pad 0xa64`, `[0xa98,0xa9c) none`. The AArch64 twin is C: the build host has no `aarch64-linux-gnu-g++` (D570) |
 | `fuzzed_elf9`, `fuzzed_file12` | radare2-testbins `fuzzed/elf9`, `fuzzed/file12` (not executable, so the census skips them) | hostile headers: an `.init_array` and a `__cstring` stating sizes far past the file's end, which once hung on open and read 2 GB |
+| `crackme_shoff_past_end`, `crackme_shoff_high`, `crackme_shoff_byte2`, `crackme_shentsize`, `crackme_shentsize_strndx` | radare2-testbins `elf/crackme` through `damaged_elf.py` | a section table `object` refuses (offset past the file, entry size): the image is its segments and dynamic table, and says so (D577) |
+| `crackme_unknown_machine` | the same, `e_machine` 0x653e | a refusal that names the field and its value (D577) |
+| `crackme_entry_in_data` | the same, `e_entry` 0x40052f in `.rela.plt` | a header entry no code backs: `ie` lists it, nothing walks from it (D577) |
+| `raw_x64_start.bin` | the crackme's `_start`, 42 bytes | `-a x86 -b 64`: raw code at 0 that states no function (D577) |
 
 `src/` holds sources the equivalence gate must not build as programs of their
 own: a multi-unit program, and fixtures that exist for their debug information

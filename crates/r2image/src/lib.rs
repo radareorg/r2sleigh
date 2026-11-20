@@ -39,6 +39,8 @@ pub enum ImageError {
     Parse(String),
     #[error("this build decodes no {} code", architecture_name(*.0))]
     UnsupportedArchitecture(object::Architecture),
+    #[error("unrecognised binary: e_machine {0:#x} names no machine the ELF registry lists")]
+    UnknownMachine(u16),
     #[error(
         "unrecognised binary: a universal binary with {slices} slices, none of an architecture this build decodes"
     )]
@@ -572,6 +574,11 @@ pub struct Image {
     identity: u64,
     /// Why `.gnu_debugdata` is refused, where the container holds one that does not read.
     minidebug: Option<MiniDebugRefusal>,
+    /// Why the section header table was not read, where `object` refused it: the image then states
+    /// its segments and dynamic table alone (D577).
+    sections_refused: Option<String>,
+    /// The header's entry where no code backs it: `ie` lists it, and nothing walks from it (D577).
+    unbacked_entry: Option<Entry>,
 }
 
 /// How many programs this process has opened.
@@ -597,6 +604,47 @@ impl Image {
         Self::held(held::Held::map(&file).map_err(io)?)
     }
 
+    /// The file at `path` as raw bytes of `arch`, mapped read-execute at address 0, as radare2's
+    /// `-a -b` open it. No container states anything: no entry, symbol or section (D577).
+    pub fn open_raw(path: impl AsRef<Path>, arch: Arch) -> Result<Self, ImageError> {
+        let path = path.as_ref();
+        let io = |source| ImageError::Io {
+            path: path.display().to_string(),
+            source,
+        };
+        let file = std::fs::File::open(path).map_err(io)?;
+        let data = held::Held::map(&file).map_err(io)?;
+        let size = data.len() as u64;
+        let segments = (size > 0)
+            .then_some(Segment {
+                vaddr: 0,
+                vsize: size,
+                file_offset: 0,
+                file_size: size,
+                permissions: Permissions::RX,
+                name: None,
+            })
+            .into_iter()
+            .collect();
+        Ok(Self {
+            data,
+            file_base: 0,
+            container: Container {
+                format: Format::Other,
+                arch,
+                segments,
+                ..Container::default()
+            },
+            patches: BTreeMap::new(),
+            byte_revision: 0,
+            written: Vec::new(),
+            identity: next_identity(),
+            minidebug: None,
+            sections_refused: None,
+            unbacked_entry: None,
+        })
+    }
+
     pub fn parse(data: Vec<u8>) -> Result<Self, ImageError> {
         Self::held(held::Held::Owned(data))
     }
@@ -606,8 +654,29 @@ impl Image {
             Some(range) => (data.narrowed(range.clone()), range.start as u64),
             None => (data, 0),
         };
-        let file = object::File::parse(&*data).map_err(|e| ImageError::Parse(e.to_string()))?;
+        // An ELF whose section table `object` refuses is read without it, and says so (D577).
+        let blind;
+        let (file, sections_refused) = match object::File::parse(&*data) {
+            Ok(file) => (file, None),
+            Err(error) => {
+                // Only the table's three header fields differ, so a copy that parses was refused for its table.
+                let refused = ImageError::Parse(error.to_string());
+                let Some(copy) = loader::without_section_table(&data) else {
+                    return Err(refused);
+                };
+                blind = copy;
+                match object::File::parse(&*blind) {
+                    Ok(file) => (file, Some(error.to_string())),
+                    Err(_) => return Err(refused),
+                }
+            }
+        };
 
+        if file.architecture() == object::Architecture::Unknown
+            && let Some(machine) = loader::machine(&file)
+        {
+            return Err(ImageError::UnknownMachine(machine));
+        }
         let mut arch = map_architecture(file.architecture(), file.is_64(), file.endianness())?;
         arch.instructions = instruction_order(&file);
         let format = map_format(file.format());
@@ -1024,6 +1093,13 @@ impl Image {
                 .any(|segment| segment.contains(vaddr) && segment.permissions.mapped()),
             None => vaddr != 0 && executable(vaddr),
         };
+        // An entry no code backs is stated for `ie` and seeds nothing (D577).
+        let unbacked_entry = entry.filter(|entry| !runs(*entry)).map(|vaddr| Entry {
+            vaddr,
+            kind: EntryKind::Main,
+            thumb,
+            stated_at: entry_field,
+        });
         if let Some(entry) = entry.filter(|entry| runs(*entry)) {
             entries.push(Entry {
                 vaddr: entry,
@@ -1110,7 +1186,19 @@ impl Image {
             written: Vec::new(),
             identity: next_identity(),
             minidebug: minidebug_refusal,
+            sections_refused,
+            unbacked_entry,
         })
+    }
+
+    /// The entry the header states where no code backs it, which seeds no walk (D577).
+    pub const fn unbacked_entry(&self) -> Option<&Entry> {
+        self.unbacked_entry.as_ref()
+    }
+
+    /// Why the section header table states nothing, where the reader refused it (D577).
+    pub fn sections_refused(&self) -> Option<&str> {
+        self.sections_refused.as_deref()
     }
 
     /// Why the `.gnu_debugdata` section states no symbols, where it is present and refused whole.
@@ -1767,6 +1855,8 @@ mod tests {
             written: Vec::new(),
             identity: next_identity(),
             minidebug: None,
+            sections_refused: None,
+            unbacked_entry: None,
         }
     }
 

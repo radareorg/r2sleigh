@@ -739,14 +739,15 @@ fn info(session: &Session) -> Result<String, String> {
     if let Some(refused) = image.minidebug_refusal() {
         out.push_str(&format!("minidebug refused: {refused}\n"));
     }
-    if let Some(entry) = image
-        .entry_points()
-        .iter()
-        .find(|entry| entry.kind == r2image::EntryKind::Main)
-    {
-        out.push_str(&format!("entry    {:#010x}", entry.vaddr));
-    } else {
-        out.push_str("entry    none");
+    // A section table refused whole: the image states segments and the dynamic table (D577).
+    if let Some(refused) = image.sections_refused() {
+        out.push_str(&format!("sections refused: {refused}\n"));
+    }
+    let main = (image.entry_points().iter()).find(|entry| entry.kind == r2image::EntryKind::Main);
+    match (main, image.unbacked_entry()) {
+        (Some(entry), _) => out.push_str(&format!("entry    {:#010x}", entry.vaddr)),
+        (None, Some(entry)) => out.push_str(&format!("entry    {:#010x} (no code)", entry.vaddr)),
+        (None, None) => out.push_str("entry    none"),
     }
     Ok(out)
 }
@@ -773,7 +774,9 @@ fn entries(session: &Session, initialisers: bool) -> Result<String, String> {
     let spelled = |value: Option<u64>| {
         value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
     };
-    for entry in session.image().entry_points() {
+    // The header's entry is listed where no code backs it too, as the header states it (D577).
+    let image = session.image();
+    for entry in image.entry_points().iter().chain(image.unbacked_entry()) {
         let kind = match entry.kind {
             r2image::EntryKind::Main if !initialisers => "program",
             r2image::EntryKind::Init if initialisers => "init",
