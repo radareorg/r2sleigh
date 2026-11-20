@@ -376,6 +376,17 @@ pub enum UnassignedCause {
 }
 
 impl UnassignedCause {
+    /// The cause's stable name in a typed response.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::UnadmittedArgument => "unadmitted-argument",
+            Self::VariadicTail => "variadic-tail",
+            Self::Unassigned => "never-assigned",
+            Self::NotDominated => "not-dominated",
+        }
+    }
+
     /// The proof line's words for `count` reads of this cause.
     pub const fn spelled(self, count: usize) -> &'static str {
         let one = count == 1;

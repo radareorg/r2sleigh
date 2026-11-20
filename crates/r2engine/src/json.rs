@@ -38,6 +38,9 @@ pub struct RenderedFunctionJson {
     /// A translation unit that compiles on its own.
     pub code: String,
     pub proof: RenderProofJson,
+    /// The proof line's refusal clauses by name (D621); absent where it states none.
+    #[serde(skip_serializing_if = "ProofClausesJson::is_empty")]
+    pub clauses: ProofClausesJson,
     /// The premises the rendering assumed (`Premise::spelled`); empty where it assumed none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub premises: Vec<&'static str>,
@@ -50,6 +53,39 @@ pub struct RenderedFunctionJson {
     pub residuals: Vec<RenderedResidualJson>,
     /// Every call to a function `code` spells, in text order.
     pub calls: Vec<RenderedCallJson>,
+}
+
+/// The proof line's clauses `pdd` spells and `asm.rails` counts (D621).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct ProofClausesJson {
+    /// The data objects whose type was refused.
+    pub refused_types: Vec<String>,
+    /// Each cause a read was left unassigned for (`r2dec::UnassignedCause::kind`), with its names.
+    pub unassigned: Vec<UnassignedJson>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnassignedJson {
+    pub cause: &'static str,
+    pub names: Vec<String>,
+}
+
+impl ProofClausesJson {
+    fn of(clauses: &r2dec::ProofClauses) -> Self {
+        Self {
+            refused_types: clauses.refused_object_types().to_vec(),
+            unassigned: (clauses.unassigned().iter())
+                .map(|(cause, names)| UnassignedJson {
+                    cause: cause.kind(),
+                    names: names.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.refused_types.is_empty() && self.unassigned.is_empty()
+    }
 }
 
 /// One call `code` spells: whom it calls and how many arguments it hands on.
@@ -239,6 +275,7 @@ impl RenderedFunctionJson {
                     refused: Some(refused),
                     code: text.clone(),
                     proof,
+                    clauses: ProofClausesJson::default(),
                     premises,
                     variables: Vec::new(),
                     lines: Vec::new(),
@@ -264,6 +301,7 @@ impl RenderedFunctionJson {
             refused: refused.map(RenderRefusalJson::rendering),
             code: emission.unit().to_owned(),
             proof,
+            clauses: ProofClausesJson::of(emission.proof_clauses()),
             premises,
             variables: emission.variables().iter().map(variable_json).collect(),
             lines: emission
