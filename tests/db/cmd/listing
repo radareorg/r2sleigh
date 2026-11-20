@@ -77,6 +77,7 @@ EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
 ; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 51: sym.fnv1a32 (arg0, arg1);
+│ ; * result rests on closed-world
 │           0x00401330      f30f1efa       endbr64
 │           0x00401334      4885f6         test rsi, rsi
 │       ┌─< 0x00401337      7427           je 0x401360
@@ -97,6 +98,7 @@ EXPECT=<<EOF
 ; CALL XREF from sym.combined @ 0x401b7d(x)
 ; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 76: sym.crc32_bitwise (arg0, arg1);
+│ ; * result rests on closed-world
 │           0x00401530      f30f1efa       endbr64
 │           0x00401534      4885f6         test rsi, rsi
 │       ┌─< 0x00401537      7440           je 0x401579
@@ -467,6 +469,7 @@ EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
 ; ? xrefs may be short: 5 indirect transfers unresolved
 / 51: sym.fnv1a32 (arg0, arg1);
+| ; * result rests on closed-world
 |           0x00401330      f30f1efa       endbr64
 |           0x00401334      4885f6         test rsi, rsi
 |       ,=< 0x00401337      7427           je 0x401360
@@ -495,6 +498,7 @@ EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
 ; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 51: sym.fnv1a32 (arg0, arg1);
+│ ; * result rests on closed-world
 │           0x00401330      f30f1efa       endbr64
 │           0x00401334      4885f6         test rsi, rsi
 │           0x00401337      7427           je 0x401360

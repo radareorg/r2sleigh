@@ -416,10 +416,8 @@ tests whether a setter's call is the next call line.
   sites, so no second map of callers exists; `xrefs_of` answers in
   `O(log F + k)`. `FunctionListing.header` holds the calls, the tails,
   `unresolved` and the `FunctionInfo` read off the seal the `ret` notes read.
-  `unresolved` is `None`: a trace counts neither the indirect calls it walks
-  past nor which dispatch stops a table later resolved, so the header prints
-  `; ? xrefs may be short: indirect transfers unread` on every function
-  (default-deny). r2s spells radare2's grammar (`disasm.c:1723-1734`,
+  `unresolved` was `None` in round 15 (the `? ... unread` line on every
+  function); round 16 counts it (below, D619). r2s spells radare2's grammar (`disasm.c:1723-1734`,
   `:1849-1866`): `CALL XREF`/`CALL XREFS` per caller, `CODE XREF` for a tail
   branch, `; XREFS(N)` past 5. `┌ realsz: name (args);` takes the proven
   parameters by name and `?` where the interface states a floor (`?` alone
@@ -455,3 +453,22 @@ tests whether a setter's call is the next call line.
   hashes has 57 lines over 149 cells, branchy 12, shapes 41; bash `main`
   reaches 2,594 with the proof line and 310 without); a rail never widens a
   line, so with the column a line is at most 11 cells past its plain width.
+
+## Round 16 as built: header facts (rd16-cost-index)
+
+- D619: each walk keeps its opaque calls (an `IndirectCall` no fold names,
+  a sealed slot's too, and a link-register call); `Survey.unresolved` sums
+  them with the `IndirectBranch` stops the table rounds left, pads included,
+  and is `None` where a body is unwalked. The header prints
+  `; ? xrefs may be short: N indirect transfers unresolved` (`1 indirect
+  transfer`) and drops the line only on `Some(0)`; `axt`'s coverage line
+  reads the same count.
+- D622: `FunctionListing.gaps` states each gap and whether a walked body
+  holds any of its bytes (`Holders::holds_any`). Unheld: `;-- ? N bytes in
+  no block: A..B`, the unknown mark; held: `;-- N bytes not in this
+  function: A..B`.
+- D566: `FunctionInfo.result_premises` is a proven result's closed
+  premises (`result_premises()`). `afi` prints `result: proven ; * rests on
+  closed-world`; the header prints `│ ; * result rests on closed-world`,
+  both from `function.rs` `premised`. `pdd`'s laid-out proof line reads
+  `notes` without it: the response's premises already state it there.

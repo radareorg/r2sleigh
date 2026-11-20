@@ -441,7 +441,7 @@ fn header(
     };
     for (mark, said) in info
         .into_iter()
-        .flat_map(|info| crate::function::notes(session, info))
+        .flat_map(|info| crate::function::header_notes(session, info))
     {
         out.push(rail(mark, &said));
     }
