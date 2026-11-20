@@ -167,7 +167,8 @@ golden harness.
   removed.
 - Plain mode uses the 160 grid with no cut (with D565, D566).
 - Marks and the header stay; `pdfj` and `aoj` carry each note's `Confidence`
-  and refusal as typed fields (D582).
+  and refusal as typed fields (D582). `aoj` carries its line's notes as `pd`
+  prints them, `pdfj` the function's (Round 16 as built: explain, verbs).
 
 The differential stays green:
 
@@ -472,3 +473,31 @@ tests whether a setter's call is the next call line.
   closed-world`; the header prints `│ ; * result rests on closed-world`,
   both from `function.rs` `premised`. `pdd`'s laid-out proof line reads
   `notes` without it: the response's premises already state it there.
+
+## Round 16 as built: explain, verbs
+
+- D582, three grades, three verbs. `aoj` is the instruction record scripts
+  loop over: it reads no function. Its `notes` are the instruction's own
+  line's annotations, what `pd` prints there (the run's next call included,
+  as `pd n` reads it), each a `NoteJson` as `pdfj` writes one. `ao` keeps the
+  holder's notes from the first function holding the address, and `pdfj` is
+  the function-grade JSON. So `ao` and `aoj` may differ on one address: `ao`
+  reads the function, `aoj` the line. Cost: `O(1)` per instruction past the
+  decode; D490's `aoj` sample reads no function.
+- D575, verbs radare2 6.2.4 spells. `aaa` runs `aa`'s handler: r2s's `aa`
+  already states everything it can. `ij` and `izj` serialise typed structs
+  (r2engine `json.rs`: `InfoJson`, `StringJson`) under radare2's keys, and `i`
+  and `iz` print the same structs, so the text and the JSON read one fact.
+  `s-` and `s+` step a seek history on `Session` (a `Vec<u64>` and a cursor,
+  `O(1)` amortised; every `s` pushes, `@` does not, as `r_io_sundo_push`
+  does). A letter more than one verb starts with (`a?`, `i?`, `p?`, `s?`,
+  `w?`) prints its group in table order; a multi-letter `pd?` keeps its
+  usage. An unknown verb names its nearest verb by Levenshtein distance, at
+  most 2 and less than the verb's length, ties by table order
+  (`O(|VERBS| x len^2)`).
+
+- D624, the call line. A line that starts with `'` is radare2's call: one
+  command read whole, so a name holding `~`, `;`, `@` or `>` (every
+  destructor, every template) is typed as a listing prints it:
+  `'s LIEF::corrupted::~corrupted()`. A seek the line cut at an operator
+  that names nothing says so and shows the form.

@@ -1,0 +1,22 @@
+# D576: `afi` at an address inside a function describes that function, as radare2's `afi @` does;
+# an address no body holds is still analysed as a function there.
+
+NAME=afi inside main describes main
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=afi @ 0x40105d~^addr; afi @ 0x40105d~^name; afi @ 0x40105d~^size
+EXPECT=<<EOF
+addr: 0x00401050
+name: sym.main
+size: 493
+EOF
+RUN
+
+NAME=afi at main's entry is unchanged
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=afi @ 0x401050~^addr; afi @ 0x401050~^name; afi @ 0x401050~^size
+EXPECT=<<EOF
+addr: 0x00401050
+name: sym.main
+size: 493
+EOF
+RUN

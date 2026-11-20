@@ -43,6 +43,36 @@ struct Cli {
     /// Set a configuration key before anything runs, as `e key=value` would
     #[arg(short = 'e', value_name = "key=value")]
     config: Vec<String>,
+
+    /// Open the file as raw code of this architecture at address 0 (`x86`, `arm`, `riscv`)
+    #[arg(short = 'a', value_name = "arch", requires = "bits")]
+    arch: Option<String>,
+
+    /// The raw code's word size with `-a`: 32 or 64
+    #[arg(short = 'b', value_name = "bits", requires = "arch")]
+    bits: Option<u32>,
+}
+
+/// radare2's `-a <arch> -b <bits>` spelled as the lifter names the language; little-endian.
+fn raw_arch(arch: &str, bits: u32) -> Result<r2image::Arch, String> {
+    let name = match (arch, bits) {
+        ("x86", 64) => "x86-64",
+        ("x86", 32) => "x86",
+        ("arm", 64) => "AArch64",
+        ("arm", 32) => "ARM",
+        ("riscv", 64) => "riscv64",
+        _ => {
+            return Err(format!(
+                "this build decodes no raw {arch} code at {bits} bits"
+            ));
+        }
+    };
+    Ok(r2image::Arch {
+        name: name.to_owned(),
+        bits,
+        endian: r2image::Endian::Little,
+        instructions: None,
+    })
 }
 
 /// The engine's work counts on stderr, one `r2s: stats: <name> <count>` line each, for the census
@@ -98,7 +128,13 @@ fn main() {
     allocator::install();
     let profile = allocator::profile();
     let cli = Cli::parse();
-    let mut session = match session::Session::open(&cli.file) {
+    let opened = match (&cli.arch, cli.bits) {
+        (Some(arch), Some(bits)) => {
+            raw_arch(arch, bits).and_then(|arch| session::Session::open_raw(&cli.file, arch))
+        }
+        _ => session::Session::open(&cli.file),
+    };
+    let mut session = match opened {
         Ok(session) => session,
         Err(message) => {
             eprintln!("r2s: {}", message);
