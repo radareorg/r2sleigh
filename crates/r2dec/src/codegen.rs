@@ -252,6 +252,8 @@ pub struct Emission {
     proof_line: Option<usize>,
     /// The bytes one level of indentation takes.
     indent: usize,
+    /// The proof line's typed clauses, which its text was spelled from (D621).
+    clauses: crate::render::proof::ProofClauses,
 }
 
 impl Emission {
@@ -268,6 +270,15 @@ impl Emission {
     /// The definition's line, from 0, holding `/* r2dec proof: ... */`.
     pub const fn proof_line(&self) -> Option<usize> {
         self.proof_line
+    }
+
+    /// The proof line's typed clauses: what a typed reader counts where the text is not read.
+    pub const fn proof_clauses(&self) -> &crate::render::proof::ProofClauses {
+        &self.clauses
+    }
+
+    pub(crate) fn with_clauses(self, clauses: crate::render::proof::ProofClauses) -> Self {
+        Self { clauses, ..self }
     }
 
     /// Each line of the definition's lowest instruction, where it accounts for any: `O(lines)`.
@@ -582,6 +593,7 @@ impl<'c> CodeGenerator<'c> {
             links: crate::report::links(func, pointer_bits),
             calls: crate::report::calls(func),
             roles: std::mem::take(&mut self.roles),
+            clauses: crate::render::proof::ProofClauses::default(),
         }
     }
 

@@ -31,6 +31,18 @@ pub(crate) fn notes(
     if residuals > 0 {
         refused.push((Mark::Refused, format!("{residuals} residuals")));
     }
+    // The proof line's refusals by type and by unassigned read, counted from its typed clauses.
+    if let Some(clauses) = response.output.proof_clauses() {
+        let types = clauses.refused_object_types().len();
+        if types > 0 {
+            let noun = if types == 1 { "type" } else { "types" };
+            refused.push((Mark::Refused, format!("{types} data object {noun} refused")));
+        }
+        for (cause, names) in clauses.unassigned() {
+            let said = format!("{} {}", names.len(), cause.spelled(names.len()));
+            refused.push((Mark::Refused, said));
+        }
+    }
     // The ledger's columns the proof line counts: refused and residual first, assumed after.
     if let Some(closed) = response
         .obligation_ledger

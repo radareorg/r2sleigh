@@ -1324,6 +1324,14 @@ impl EngineRendering {
         }
     }
 
+    /// The proof line's typed clauses, where the C tier wrote one (D621).
+    pub fn proof_clauses(&self) -> Option<&r2dec::ProofClauses> {
+        match self {
+            Self::Function(rendered) => Some(rendered.emission().proof_clauses()),
+            Self::Listing(_) => None,
+        }
+    }
+
     /// The tree behind the C, for a consumer that walks rather than parses.
     pub fn function(&self) -> Option<&r2dec::CFunction> {
         match self {

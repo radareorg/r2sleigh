@@ -143,3 +143,42 @@ fn the_painted_layout_is_the_plain_layout() {
         assert_eq!(unpainted(&painted), plain, "scr.color={depth}");
     }
 }
+
+/// Each count of the plain proof line's type and unassigned clauses, as `N words`.
+fn clause_counts(text: &str) -> Vec<String> {
+    let Some(proof) = text.lines().find(|line| line.contains("r2dec proof:")) else {
+        return Vec::new();
+    };
+    let words = [
+        "data object type refused",
+        "data object types refused",
+        "never assigned",
+        "held from entry",
+    ];
+    let clauses = proof.split("; ").filter_map(|clause| {
+        let (count, rest) = clause.split_once(' ')?;
+        count.parse::<usize>().ok()?;
+        let said = words.iter().find(|said| rest.starts_with(**said))?;
+        Some(format!("{count} {said}"))
+    });
+    clauses.collect()
+}
+
+/// The railed proof lines count every refused data object type and unassigned read the plain
+/// proof line names (D621), read from the typed response, each under the refusal mark.
+#[test]
+fn the_railed_notes_count_the_proof_lines_type_clauses() {
+    let plain = each("pdd");
+    let laid = each("e asm.rails=true; pdd");
+    let mut seen = 0;
+    for (plain, laid) in plain.iter().zip(&laid) {
+        let notes = (laid.lines())
+            .find(|line| line.contains("/* "))
+            .unwrap_or_default();
+        for clause in clause_counts(plain) {
+            assert!(notes.contains(&format!("! {clause}")), "{clause}:\n{laid}");
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "hashes states a type or unassigned clause");
+}
