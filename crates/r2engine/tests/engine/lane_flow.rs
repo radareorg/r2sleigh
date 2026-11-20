@@ -6,9 +6,8 @@ use crate::common;
 use common::{BASE, Literal};
 use r2engine::program::OpenProgram;
 
-/// `f` at `BASE + 8` is `ret`; `caller` at `BASE + 0x10` holds `caller_words`; `outer` at
-/// `BASE + 0x40` calls it and returns its x0. Rendering `outer` lifts `caller` for its register
-/// effect; rendering `f` then asks `caller`'s own fates.
+/// `f` (`ret`), `caller` (`caller_words`) and `outer` (`bl caller; ret`): rendering `outer` lifts
+/// `caller` for its register effect, then rendering `f` asks `caller`'s own fates.
 fn program(caller_words: &[(u64, u32)], format: &[u8]) -> OpenProgram<Literal> {
     let mut code = vec![0u8; 0xb0];
     let outer = [

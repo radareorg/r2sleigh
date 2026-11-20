@@ -942,3 +942,60 @@ compared, never pushed): projected bodies equal to their lift on 495 of 495
 outputs byte-identical to the base. Rows a deep read deposits whose own
 `SiteFates` is never asked stay held: r2ssa bytes live at the session's peak
 4.9 MB (4,386 rows, mean 2.2 KB, largest 114 KB), 3.2 MB on cold 0pack.
+
+## Pads in the flow (D598, round 16)
+
+A call with a landing pad has two successors: its normal return, and the
+pad the unwinder enters when the callee or a callee of it throws. The lane
+pass reads the second edge with the entry state below. Each clause carries
+its citation; a clause with none found stays open, and the edge then reads
+that register as `open`.
+
+1. The unwinder writes two registers before entering the pad. Itanium C++
+   ABI, Exception Handling, section 1.6.3 (personality routine, phase 2):
+   "it may set up registers (including IP) with suitable values for
+   entering the landing pad". Which registers: GCC 14.2.0
+   `libstdc++-v3/libsupc++/eh_personality.cc:728-731`,
+   "`_Unwind_SetGR (context, __builtin_eh_return_data_regno (0),
+   __builtin_extend_pointer (ue_header)); _Unwind_SetGR (context,
+   __builtin_eh_return_data_regno (1), handler_switch_value);`". x86-64:
+   `gcc/config/i386/i386.h:2124` "`#define EH_RETURN_DATA_REGNO(N) ((N) <=
+   DX_REG ? (N) : INVALID_REGNUM)`" with `gcc/config/i386/i386.md:408-409`
+   `(AX_REG 0)`, `(DX_REG 1)`: RAX and RDX. AArch64:
+   `gcc/config/aarch64/aarch64.h:702-704` "Use R0 through R3 to pass
+   exception handling information" and `((N) < 4 ? ((unsigned int)
+   R0_REGNUM + (N)) : INVALID_REGNUM)`; the personality sets only data
+   registers 0 and 1, so X0 and X1. The edge kills those lanes: a pad's
+   read of RAX, RDX, X0 or X1 reads the unwinder's value, never a call's.
+2. Callee-saved registers are as at the call. Itanium C++ ABI, section
+   1.6.3: "All registers specified as callee-saved by the base ABI are
+   restored". A lane is no callee-saved register on either machine, so no
+   lane value crosses the edge by this clause; `unwritten` intersects what
+   the callee keeps with the convention's callee-saved set on the edge.
+3. Every other call-clobbered register is undefined. Itanium C++ ABI,
+   section 1.6.3: "scratch (or caller-saved) registers are not preserved,
+   and their contents are undefined on transfer." The edge makes every
+   other lane doubtful, as a weak write does: a pad's read of it is `open`,
+   never `Read` (no value is stated) and never `Dead` (the read is made).
+4. The callee did not return, so it states no result on the edge: no pad
+   read is a read of the unwinding call's own result. That call's fate is
+   its normal return's.
+5. Memory is as after an unknown call: open. No clause above states memory,
+   and the pass tracks registers only.
+
+The stack pointer as at the call (the unwinder restores it from the frame's
+CFI, DWARF 5 section 6.4) is not a lane and is read by no clause here.
+
+As built (r2ssa, round 16): `CallerFlow::with_unwinds` takes each call's
+pad address and the unwinder's registers. `Graph::unwinds` holds the edges;
+the pad block is a predecessor of the call's block, so the worklist requeues
+the call when the pad's live set moves. `Pass::step` joins, before an
+unwinding call, the pad's live-in with the unwinder's lanes killed and every
+other lane's read, returned and forwarded bytes moved to `open`; a pad no
+block starts loses every lane. `LaneFlow` keeps the edges, so the projection
+and the lift give equal fates. `unwritten` keeps nothing where a pad reaches
+a return or names no block (clause 2, default-deny), and S30's `fate_from`
+answers `Other` on any body with an edge. Complexity unchanged:
+`O((B + E + U) × LANES)` per pass. The engine passes no edge yet: part 3
+(walking pads in `lift_body`, per-reader refusals) waits on D632, the next
+closed-world refusal on both unwinding images.

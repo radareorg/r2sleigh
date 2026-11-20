@@ -644,6 +644,23 @@ struct Graph {
     open: Vec<bool>,
     /// Blocks holding control flow other than one terminator at their end: no write there kills.
     irregular: Vec<bool>,
+    /// Each call that may unwind, by block and operation, ascending, and the block its landing pad
+    /// starts ([`NO_BLOCK`] where none does): an edge taken before the call ("Pads in the flow").
+    unwinds: Box<[(u32, u32, u32)]>,
+    /// The registers the unwinder writes before it enters a pad: killed on that edge.
+    unwinder: Box<[CanonicalStorageId]>,
+}
+
+/// A pad address no block of the flow starts at.
+const NO_BLOCK: u32 = u32::MAX;
+
+impl Graph {
+    /// The pad block the call at (block, op) unwinds to; `O(log u)`.
+    fn unwind(&self, block: usize, op: usize) -> Option<u32> {
+        let key = (index(block), index(op));
+        let at = (self.unwinds).binary_search_by_key(&key, |(block, op, _)| (*block, *op));
+        at.ok().map(|at| self.unwinds[at].2)
+    }
 }
 
 /// The low bytes a walked body may read of each result register before writing it (D372, D411),
@@ -892,10 +909,47 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
                 leaves,
                 open: open_blocks,
                 irregular,
+                unwinds: Box::default(),
+                unwinder: Box::default(),
             },
             modes,
             first,
         }
+    }
+
+    /// The flow with each call's (block, operation) unwind edge to a pad address, `unwinder` written
+    /// on it (doc/adr-result-side.md, "Pads in the flow"). `O((B + E + U) log U)`.
+    pub fn with_unwinds(
+        mut self,
+        unwinds: impl IntoIterator<Item = ((usize, usize), u64)>,
+        unwinder: &[CanonicalStorageId],
+    ) -> Self {
+        let graph = &mut self.graph;
+        let block_at = |address: u64| {
+            let at = (graph.starts).binary_search_by_key(&address, |(start, _)| *start);
+            at.ok().map_or(NO_BLOCK, |at| index(graph.starts[at].1))
+        };
+        let mut edges = (unwinds.into_iter())
+            .map(|((block, op), pad)| (index(block), index(op), block_at(pad)))
+            .collect::<Vec<_>>();
+        edges.sort_unstable();
+        edges.dedup_by_key(|(block, op, _)| (*block, *op));
+        // A pad's live set moving requeues the call's block, so the pad counts among its successors' readers.
+        let blocks = graph.leaves.len();
+        let mut pairs = (0..blocks)
+            .flat_map(|from| {
+                (graph.successors.of_block(from).iter()).map(move |to| (*to, index(from)))
+            })
+            .collect::<Vec<_>>();
+        pairs.extend(
+            (edges.iter())
+                .filter(|edge| edge.2 != NO_BLOCK)
+                .map(|(block, _, pad)| (*pad, *block)),
+        );
+        graph.predecessors = Edges::of(blocks, pairs);
+        graph.unwinds = edges.into();
+        graph.unwinder = unwinder.into();
+        self
     }
 
     /// Whether the operation at (block, op) is a call.
@@ -987,6 +1041,12 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
                 let from = self.graph.predecessors.of_block(at).iter();
                 returning.extend(from.map(|from| *from as usize));
             }
+        }
+        // Across an unwind edge only callee-saved registers hold (Itanium C++ ABI 1.6.3): a pad that
+        // reaches a return, or names no block, keeps nothing.
+        let unwound = |(_, _, pad): &(u32, u32, u32)| *pad == NO_BLOCK || reaching[*pad as usize];
+        if self.graph.unwinds.iter().any(unwound) {
+            return none;
         }
         let mut written = UniverseSet::empty(outermost.len());
         let mut pending = Vec::new();
@@ -1208,7 +1268,7 @@ impl<'p, F: Steps> Pass<'p, F> {
             }
             let mut live = self.out_of(block, &live_in);
             (self.flow).steps_back(block, 0..usize::MAX, &self.lanes, |step| {
-                self.step(&mut live, block, step);
+                self.step(&mut live, block, step, &live_in);
             });
             if live != live_in[block] {
                 live_in[block] = live;
@@ -1249,7 +1309,7 @@ impl<'p, F: Steps> Pass<'p, F> {
         let mut next = usize::MAX;
         for (site, op) in wanted {
             (self.flow).steps_back(block, op + 1..next, &self.lanes, |step| {
-                self.step(&mut live, block, step);
+                self.step(&mut live, block, step, live_in);
             });
             next = next.min(op + 1);
             if !self.flow.predicated(block, op) {
@@ -1258,8 +1318,8 @@ impl<'p, F: Steps> Pass<'p, F> {
         }
     }
 
-    /// Move `live` from after the step to before it.
-    fn step(&self, live: &mut Live, block: usize, step: &Step) {
+    /// Move `live` from after the step to before it; a call that may unwind joins its pad's entry.
+    fn step(&self, live: &mut Live, block: usize, step: &Step, live_in: &[Live]) {
         let call = step.call.then(|| self.call_at(block, step.op));
         // What the operation overwrites ends those bytes' liveness, ahead of what it reads.
         if !step.weak {
@@ -1294,6 +1354,41 @@ impl<'p, F: Steps> Pass<'p, F> {
             merge(&mut live.open, self.lanes.every());
         }
         merge(&mut live.read, step.reads);
+        if let Some(pad) = step
+            .call
+            .then(|| self.flow.graph().unwind(block, step.op))
+            .flatten()
+        {
+            live.join(&self.pad_entry(pad, live_in));
+        }
+    }
+
+    /// What is live before an unwinding call through its pad: the unwinder's lanes killed, the rest
+    /// open ("Pads in the flow"); a pad no block starts loses every lane.
+    fn pad_entry(&self, pad: u32, live_in: &[Live]) -> Live {
+        let every = self.lanes.every();
+        if pad == NO_BLOCK {
+            return Live {
+                open: every,
+                ..Live::default()
+            };
+        }
+        let mut entry = live_in[pad as usize];
+        let mut killed = [0; LANES];
+        for register in &self.flow.graph().unwinder {
+            let varnode = Varnode::register(register.offset, register.size);
+            merge(&mut killed, self.lanes.bytes_in(&varnode));
+        }
+        entry.kill_all(killed);
+        for lane in 0..LANES {
+            let doubt = every[lane] & !killed[lane];
+            let held = entry.read[lane] | entry.returned[lane] | entry.forwarded[lane];
+            entry.open[lane] |= held & doubt;
+            entry.read[lane] &= !doubt;
+            entry.returned[lane] &= !doubt;
+            entry.forwarded[lane] &= !doubt;
+        }
+        entry
     }
 
     /// The bytes a call overwrites, by its callee.
@@ -1335,9 +1430,8 @@ fn site_fates_of<F: Steps>(
     fates
 }
 
-/// A body's flow as its lane pass reads it, without its lift (doc/adr-result-side.md, "D589"): the
-/// graph, each step `Pass::step` does not leave as it is, and each call's count and predication.
-/// Size `O(B + E + steps)`; [`LaneFlow::site_fates`] equals [`CallerFlow::site_fates`] over the same lanes.
+/// A body's flow as its lane pass reads it, without its lift (doc/adr-result-side.md, "D589 as
+/// built"), and giving the lift's fates. Size `O(B + E + steps)`.
 pub struct LaneFlow {
     lanes: ResultLanes,
     graph: Graph,
@@ -1454,6 +1548,7 @@ impl LaneFlow {
         let graph = &self.graph;
         let edges = |edges: &Edges| 4 * (edges.starts.len() + edges.items.len());
         16 * graph.starts.len()
+            + 12 * graph.unwinds.len()
             + edges(&graph.successors)
             + edges(&graph.predecessors)
             + 3 * graph.leaves.len()
@@ -1648,6 +1743,10 @@ impl<B: Lifted> CallerFlow<'_, B> {
         register: CanonicalStorageId,
         reads: &dyn CallReadsAt,
     ) -> RegisterFate {
+        // A value reaching a pad is read by no transfer this walk follows: no proof (D598).
+        if !self.graph.unwinds.is_empty() {
+            return RegisterFate::Other;
+        }
         let mut seen = vec![false; self.blocks.len()];
         let mut pending = vec![start];
         let mut handed = Vec::new();
@@ -2621,6 +2720,108 @@ mod tests {
             vec![call(), zero_eax(), zero_extend(), ret()],
         )];
         assert_eq!(integer(fates(&plain, &[], &[])), K::Dead);
+    }
+
+    /// Calls in block 0 overwrite every lane; the pad's call (block 1, op 1) too: what reaches the
+    /// pad's entry is its first operation's read alone.
+    struct Clobbering;
+
+    impl CallEffects for Clobbering {
+        fn at(&self, _block: usize, _op: usize) -> CallEffect {
+            CallEffect {
+                takes: LaneBytes::default(),
+                counted: None,
+                overwrites: Overwrites::All,
+                kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
+            }
+        }
+    }
+
+    /// `call f; call g` (g unwinds to the pad at 0x1010); `ret`. The pad reads `read` at
+    /// `size` bytes, calls, and returns. The fates at both calls, with and without the edge.
+    fn unwinding(read: u64, size: u32, unwinder: &[CanonicalStorageId]) -> [[SiteBoundary; 2]; 2] {
+        let blocks = [
+            block(0x1000, 16, vec![call(), call(), ret()]),
+            block(0x1010, 16, vec![store(read, size), call(), ret()]),
+        ];
+        let sites = [(0, 0), (0, 1)];
+        let fates = |unwinds: &[((usize, usize), u64)]| {
+            let flow = CallerFlow::new(&blocks, [], [], Endianness::Little)
+                .with_unwinds(unwinds.iter().copied(), unwinder);
+            let fated = projected(&flow, &Clobbering, &sites);
+            [fated[0].clone(), fated[1].clone()]
+        };
+        [fates(&[]), fates(&[((0, 1), 0x1010)])]
+    }
+
+    /// The unwinding call's own fate is its normal return's: the callee returned no result to the pad.
+    #[test]
+    fn a_calls_own_fate_is_its_normal_returns_whatever_its_pad_reads() {
+        let [without, with] = unwinding(0, 8, &[RAX, RDX]);
+        assert_eq!(with[1], without[1]);
+        assert_eq!(integer(with[1].clone()), K::Returned);
+    }
+
+    /// An earlier call's RAX reaching a pad's read of RAX is the unwinder's value, not the call's.
+    #[test]
+    fn a_pads_read_of_a_register_the_unwinder_writes_reads_no_earlier_call() {
+        let [without, with] = unwinding(0, 8, &[RAX, RDX]);
+        assert_eq!(integer(without[0].clone()), K::Dead);
+        assert_eq!(integer(with[0].clone()), K::Dead);
+        // No register the unwinder writes is cited: the read is open, never dead.
+        let [_, unstated] = unwinding(0, 8, &[]);
+        assert_eq!(integer(unstated[0].clone()), K::Unknown);
+    }
+
+    /// An earlier call's XMM0 reaching a pad's read of XMM0: the ABI leaves it undefined, so open.
+    #[test]
+    fn a_pads_read_of_an_undefined_register_is_open_never_dead() {
+        let [without, with] = unwinding(0x1200, 8, &[RAX, RDX]);
+        assert_eq!(shape(without[0].fates[FLOAT_LANE]), Some(K::Dead));
+        assert_eq!(shape(with[0].fates[FLOAT_LANE]), Some(K::Unknown));
+    }
+
+    /// A pad edge to an address no block starts loses every lane before the call.
+    #[test]
+    fn a_pad_no_block_starts_loses_every_lane() {
+        let blocks = [block(0x1000, 16, vec![call(), call(), ret()])];
+        let flow = CallerFlow::new(&blocks, [], [], Endianness::Little)
+            .with_unwinds([((0, 1), 0x2000)], &[RAX, RDX]);
+        let fated = projected(&flow, &Clobbering, &[(0, 0)]);
+        assert_eq!(integer(fated[0].clone()), K::Unknown);
+    }
+
+    /// A body whose pad reaches a return keeps nothing: across the edge only callee-saved registers hold.
+    #[test]
+    fn a_pad_that_reaches_a_return_keeps_nothing_across_its_edge() {
+        let blocks = [
+            block(0x1000, 16, vec![call(), ret()]),
+            block(0x1010, 16, vec![write(0x40, 8), ret()]),
+        ];
+        let machine = machine();
+        let rsp = CanonicalStorageId {
+            offset: 0x20,
+            ..RAX
+        };
+        let clobbers = |storage: CanonicalStorageId| storage != rsp;
+        let callee = |_: usize, _: usize| Some(0x2000);
+        let by = super::KeptBy {
+            machine: &machine,
+            clobbers: Some(&clobbers),
+            never: &|_, _| false,
+            callee: &callee,
+        };
+        let kept = |unwinds: &[((usize, usize), u64)]| {
+            let flow = CallerFlow::new(&blocks, [], [], Endianness::Little)
+                .with_unwinds(unwinds.iter().copied(), &[RAX, RDX]);
+            let effect = flow
+                .register_effect(0x1000, LANES, NOTHING, &by)
+                .expect("an entry");
+            effect.unwritten_registers().count()
+        };
+        assert!(kept(&[]) > 0);
+        assert_eq!(kept(&[((0, 0), 0x1010)]), 0);
     }
 
     /// A pass that visits more blocks than its budget gives every site unknown, never a partial answer.
