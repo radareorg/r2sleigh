@@ -943,6 +943,12 @@ outputs byte-identical to the base. Rows a deep read deposits whose own
 `SiteFates` is never asked stay held: r2ssa bytes live at the session's peak
 4.9 MB (4,386 rows, mean 2.2 KB, largest 114 KB), 3.2 MB on cold 0pack.
 
+Peak RSS, the gate D589 misses (Mac, release, session): 675 MiB at the
+base, 699 to 715 MiB across head builds. The live heap peak moves 492.5 MB
+to 496.8 MB (`alloc-count`, `R2S_ALLOCATIONS=1`); the rest is freed pages
+mimalloc keeps until its next purge (`PURGE_EVERY`, 64 MB), whose phase
+moves with the 2,333 lifts removed. The exit judges it in D588's sum.
+
 ## Pads in the flow (D598, round 16)
 
 A call with a landing pad has two successors: its normal return, and the
