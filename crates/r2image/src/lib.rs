@@ -1094,9 +1094,10 @@ impl Image {
             None => vaddr != 0 && executable(vaddr),
         };
         // An entry no code backs is stated for `ie` and seeds nothing (D577).
-        // `e_entry` 0 states no entry (gABI), so it is no unbacked one either.
+        // An ELF `e_entry` no code backs (0 states none, gABI); a PE's unmapped one is pe-entry-fallback's.
+        let elf = format == Format::Elf;
         let unbacked_entry =
-            (entry.filter(|entry| *entry != 0 && !runs(*entry))).map(|vaddr| Entry {
+            (entry.filter(|entry| elf && *entry != 0 && !runs(*entry))).map(|vaddr| Entry {
                 vaddr,
                 kind: EntryKind::Main,
                 thumb,

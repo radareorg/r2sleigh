@@ -2462,3 +2462,21 @@ values = ["0xaeb4"]
 verdict = "unfilled"
 row = "D550"
 reason = "0xaeb4 `bl sym.imp.__stack_chk_fail` lies in Java_o__003dc_e past the relative table at 0xaab0 r2s does not read (D550), so no r2s walk reaches it; sampled since D530 names the stub"
+
+# round 16 surface-sweep
+[[missed]]
+command = "iS"
+binaries = ["elf_stripped"]
+values = ["0x0", "0x8", "0x18", "0x270", "0x278", "0x694", "0x8048270", "0x8048278", "0x8049694"]
+verdict = "deliberate"
+r2_line = "libr/bin/format/elf/elf.c:4266-4270"
+reason = "elf_stripped's section table (e_shoff 0x7cc, 27 entries of 40 bytes) runs past its 1,996 bytes, so r2s reads segments and the dynamic table alone and states no section (D577); radare2 makes .rel.dyn, .rela.plt and .got.plt from DT_REL, DT_JMPREL and DT_PLTGOT (get_sections_from_dt, elf.c:4266-4270), sections no header states"
+
+[[missed]]
+command = "is"
+binaries = ["elf_stripped"]
+values = ["0x2d0", "0x2e0", "0x2f0", "0x80482d0", "0x80482e0", "0x80482f0"]
+verdict = "unfilled"
+row = "D636"
+reason = "radare2 places imp.puts, imp.__gmon_start__ and imp.__libc_start_main at their PLT stubs 0x80482d0..0x80482f0; with no section table r2s names no lazy stub (x86 lazy slot words point at the stub's own push, which D530 reads as PLT0), so the imports have no address (D636)"
+
