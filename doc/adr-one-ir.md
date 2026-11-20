@@ -579,3 +579,24 @@ Gaps the reviews named, each answered:
   read of `L` where it stands; any pass that moves a statement past it sees the read.
 - A dropped copy still pays `owed` and accounts its phi in the ledger, so the proof line's
   counts do not move.
+
+### D470 step 0, review round 2: open on a counterexample
+
+The independent reviewer read the amended rules against the code: both round 1 witnesses are
+answered, and one new counterexample stands, so no r2dec edit lands (round 16).
+
+- **A dropped copy whose operand is a gapped merge.** `B0 -> B1 | B2`; `B1: a = e1 -> J`;
+  `B2 -> J` with an operand r2dec cannot spell; `J: p = phi(a, g) -> K`; `B3: b = e2 -> K`;
+  `K: q = phi(p, b); use(q)`. `C = {a, p, b, q}` passes the strict test. `B2`'s copy is a gap
+  that assigns nothing; `J -> K` drops its copy (`current_at(C, J, end) == p`), so on
+  `B0, B2, J, K` `use(L)` reads a stale value where today `read_name` prints a `NeverAssigned`
+  residual (`values.rs:1303-1321`). Candidate answer: drop a copy only where `operand_alone(o)`
+  spells the plain variable (owed 0, definition in scope); otherwise keep it with its residual.
+- Gaps to answer with it: the silent statement's form (`CStmt::Empty` is discarded by
+  `rotate::live` and `flatten`, and `latch::reads_of` counts only `CExpr::Var`; it must be
+  counted by `Scan::read` and transparent to the arm shape tests `copies_of`, `is_break`,
+  `is_empty`); reading points that are not SSA inputs (switch selectors, call-boundary
+  arguments, return values, canonical term leaves) need the build check or a reaching-definition
+  proof; the Tests rule's premise that a terminator never reads a bound member directly (shape:
+  `movsxd rax, [tbl+rax*4]; jmp rax`); an unbound phi member's role in the Lemma; the closure of
+  `arm_read` under dropped copies, asserted at class build.
