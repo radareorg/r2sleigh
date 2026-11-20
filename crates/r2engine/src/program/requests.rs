@@ -856,6 +856,16 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(self.surveyed()?.holders.at(vaddr).to_vec())
     }
 
+    /// The function `afi @ vaddr` describes, as radare2's does: one listed there, else the first
+    /// believed body holding `vaddr`, else `vaddr` itself (D576). O(log n) once surveyed.
+    pub fn function_at(&mut self, vaddr: u64) -> Result<u64, String> {
+        self.start_request();
+        let survey = self.surveyed()?;
+        let listed = (survey.functions).binary_search_by_key(&vaddr, |found| found.address);
+        let holder = survey.holders.at(vaddr).first().copied();
+        Ok(listed.map_or(holder.unwrap_or(vaddr), |_| vaddr))
+    }
+
     /// The address a spelling a listing prints names: a name the table holds, else an unnamed
     /// function's `fcn.%08x` where the survey lists that entry. O(log n) once surveyed.
     pub fn address_spelled(&mut self, spelling: &str) -> Result<Option<u64>, String> {

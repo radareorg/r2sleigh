@@ -11,7 +11,9 @@ use crate::session::Session;
 
 /// `afi`: what the function is.
 pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
+    // An address inside a function describes that function, as radare2's `afi @` does (D576).
     let entry = parse_number(session, argument)?;
+    let entry = session.program.function_at(entry)?;
     let info = session.program.function_info(entry)?;
     let names = session.program.names();
     let named = names.of(entry);
