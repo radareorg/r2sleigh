@@ -531,3 +531,51 @@ with a numeric suffix where two classes share it, ordered by smallest member id;
 **Expected cost.** One pass over phi edges and one dominance frontier per class in the
 collection; `current_at` `O(log |C|)` per read. Cause line: "D470: local classes, one pass over
 phi edges and one dominance frontier per class".
+
+### D470 step 0, review round 1 and the amended rules
+
+Two reviews (the advisor, and an independent headless reviewer reading the code) found two
+counterexamples to the section above. Witnesses and the rule that answers each:
+
+1. **A copy moved off its edge.** The latch hoist (`r2dec/src/structure/latch.rs:139-146`,
+   `:200`) prints a back edge's copies before the `do-while` tail test, so they also run on the
+   exit path. Shape (independent review): outer header `r = phi(a, p)`, inner header
+   `p = phi(r, x)`, latch `use(p); x = p + 1; if (t) -> inner else -> outer`; `C = {p, r}`, the
+   copy `p := x` kept, `r := p` dropped. Text `do { use(L); Lx = L + 1; L = Lx; } while (t);`
+   runs `L = Lx` on the exit, and the next `use(L)` reads 6 where `p = r = 5`. The hoist is
+   allowed today only where no printed read of a copied symbol lies outside the loop; a dropped
+   copy prints no read. **Rule:** a dropped copy stays in the tree as a statement that prints
+   nothing and reads `L` on its edge, so the hoist's existing count (by symbol, and "the test
+   reads none of what is written") sees it and refuses. A copy is then always on its edge.
+2. **A refused read with nothing to bind.** `interfering_lanes` is 0 for `same_content` pairs and
+   for two values of one location live at once with disjoint demanded bytes, so a member's
+   statement can overwrite `L` while an earlier member is still read at its SSA use; `current_at`
+   refuses, the reader is already bound, and the retry adds nothing (advisor: `m1`, `m2` of one
+   content, `store(m1)` after `m2`; the bound "one instruction per refused read" fails).
+   **Rule:** r2ssa joins two webs only where no member of one has a live range overlapping a
+   member of the other, with no `same_content` or lane exemption (`ValueLiveness::segments`
+   overlap, the strict test), and checks at build that each member is current at each of its
+   SSA uses and phi-edge uses. Then at every SSA reading point `current_at` returns the member
+   read, and a refusal arises only where r2dec prints an unbound value's expression after its
+   SSA position. The retry binds the innermost forwarded value holding the refused read, which
+   prints it at its SSA position: the bound set grows by one per attempt, at most
+   `|instructions|` attempts.
+
+Gaps the reviews named, each answered:
+- Classes range over all values with one location and type; "bound" is r2dec's and grows per
+  attempt. An unbound member's definition stays an element of `current_at`, so a read after it
+  of an earlier member refuses (conservative); its edge copy is kept (site 2), so `L` holds the
+  phi on that edge.
+- Each phi and operand pair is a join attempt from singletons, under rule 2; a web with an
+  interfering operand leaves that operand out (lost copy and swap stay two classes).
+- `current_at(C, b, k)` counts elements strictly before ordinal `k`: a statement's own output is
+  not current at its operands (`rdi_2 = rdi_1 + 1` reads `rdi_1`).
+- A gapped copy assigns nothing and keeps its merge owed, so every read of that phi stays
+  residual; any other member read past the join refuses, as the join is the nearer element.
+- Reading points apply to the leaves of the rewritten term (`term_reads`), not the SSA inputs.
+- Two phis of one class at one join cannot both be members: they are live at once at the join
+  entry, which rule 2's strict test refuses.
+- `tails.rs` and `guard.rs` statement motion: the same rule as the latch, a dropped copy is a
+  read of `L` where it stands; any pass that moves a statement past it sees the read.
+- A dropped copy still pays `owed` and accounts its phi in the ledger, so the proof line's
+  counts do not move.
