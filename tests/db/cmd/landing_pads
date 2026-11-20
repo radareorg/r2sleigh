@@ -47,7 +47,7 @@ FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
 CMDS=pdf @ sym._Z7guardedi
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x141f(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 12 indirect transfers unresolved
 ┌ 279: guarded(int) (arg0, ?);
 │ ; ~ at least 1 args
 │ ; ! result unproven: rax, Written
@@ -134,7 +134,7 @@ EXPECT=<<EOF
 guarded(int) 0x1397 [CALL:--x] call sym.imp.__cxa_begin_catch
 
 1 references to 0x10e0
-; covers 21 functions; 9 unresolved indirect transfers; absence is not proof
+; covers 21 functions; 12 unresolved indirect transfers; absence is not proof
 EOF
 RUN
 
@@ -270,6 +270,6 @@ EXPECT=<<EOF
 sym.guarded 0xa98 [CALL:--x] bl sym.imp._Unwind_Resume
 
 1 references to 0x860
-; covers 21 functions; 11 unresolved indirect transfers; absence is not proof
+; covers 21 functions; 12 unresolved indirect transfers; absence is not proof
 EOF
 RUN

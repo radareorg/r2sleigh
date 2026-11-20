@@ -83,6 +83,9 @@ TIMED = [("0pack", "pdd @ 0x0058e3d0"), ("0pack", "pdd @ 0x0062ecf0"),
          ("pumasim", "; ".join(f"pdd @ {address:#x}" for address in SESSION), "session: pdd of 50 functions"),
          # The chain's analysed cases (D402): `aa` walks every body, so a per-body cost shows here first.
          ("pumasim", "aa; pdd @ 0x3b6b20"), ("bash", "aa; pdd @ 0x2e630")]
+# A session holds what a later request reads again, not what one request built: its peak RSS against
+# one cold request's of the same build (D588, doc/adr-memory-model.md "Retention").
+SESSION_HELD = ("pumasim session: pdd of 50 functions", "pumasim pdd @ 0x0023fdf0", 1.3)
 # The four cases the stack's timing table grades, counted whole-process under qemu (D343).
 COUNTED = [("pumasim", "pdd @ 0x0023fdf0"), ("0pack", "pdd @ 0x0062ecf0"),
            ("bash", "aa; pdd @ 0x2e630"), ("pumasim", "aa; pdd @ 0x3b6b20")]
@@ -332,8 +335,21 @@ def measured(binary, command, executable):
             int(heap.group(1)) / (1 << 20) if heap else None)
 
 
+def session_held(peaks):
+    """Why the head's session holds too much, or None: its peak RSS over SESSION_HELD's bound times
+    the cold request's, both read from one build."""
+    session, cold, bound = SESSION_HELD
+    if session not in peaks or cold not in peaks:
+        return None
+    ratio = peaks[session] / peaks[cold]
+    if ratio <= bound:
+        return None
+    return (f"{session}: peak RSS {peaks[session]:.0f} MB is {ratio:.2f}x {cold}'s {peaks[cold]:.0f} MB; "
+            f"a session holds at most {bound}x one cold request (D588)")
+
+
 def time_cases(args):
-    failed, entries = [], causes(args.causes)
+    failed, entries, held = [], causes(args.causes), {}
     commit = base_commit(args)
     print("| case | base s | head s | ratio | base MB | head MB | ratio | base heap MB | head heap MB "
           "| ratio | allocations | output |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
@@ -355,6 +371,7 @@ def time_cases(args):
             if Path(executable).exists():
                 counted = measured(binary, commands[side], executable)
                 counts[side], heaps[side] = counted[3], counted[4]
+        held[case] = peaks["head"]
         ratio = seconds["head"] / seconds["base"]
         rss = peaks["head"] / peaks["base"]
         allocations = ""
@@ -387,6 +404,8 @@ def time_cases(args):
         print(f"| {case} | {seconds['base']:.2f} | {seconds['head']:.2f} | {ratio:.2f} | "
               f"{peaks['base']:.0f} | {peaks['head']:.0f} | {rss:.2f} | {' | '.join(heap)} | "
               f"{allocations} | {'same' if same else 'moved'} |")
+    if over := session_held(held):
+        failed.append(over)
     for line in failed:
         print(line, file=sys.stderr)
     if failed:

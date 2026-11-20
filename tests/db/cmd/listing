@@ -75,8 +75,9 @@ FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s 0x401330; pdf; s 0x401530; pdf
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 51: sym.fnv1a32 (arg0, arg1);
+│ ; * result rests on closed-world
 │           0x00401330      f30f1efa       endbr64
 │           0x00401334      4885f6         test rsi, rsi
 │       ┌─< 0x00401337      7427           je 0x401360
@@ -90,13 +91,14 @@ EXPECT=<<EOF
 │      ╎│   0x00401357      4839fe         cmp rsi, rdi
 │      └│─< 0x0040135a      75ec           jne 0x401348
 │       │   0x0040135c      c3             ret                         ; . returns rax
-│       │   ;-- 3 bytes not in this function: 0x0040135d..0x0040135f
+│       │   ;-- ? 3 bytes in no block: 0x0040135d..0x0040135f
 │       └─> 0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
 └           0x00401365      c3             ret                         ; . returns rax
 ; CALL XREF from sym.main @ 0x401134(x)
 ; CALL XREF from sym.combined @ 0x401b7d(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 76: sym.crc32_bitwise (arg0, arg1);
+│ ; * result rests on closed-world
 │           0x00401530      f30f1efa       endbr64
 │           0x00401534      4885f6         test rsi, rsi
 │       ┌─< 0x00401537      7440           je 0x401579
@@ -131,7 +133,7 @@ FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s sym.siphash24; pdf
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x4011d7(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 599: sym.siphash24 (arg0, arg1, arg2, arg3);
 │ ; ! result unproven: rax, PointerWide
 │           0x004018b0      f30f1efa       endbr64
@@ -188,7 +190,7 @@ EXPECT=<<EOF
 │      └│─< 0x00401978      758e           jne 0x401908
 │       └─> 0x0040197a      4183e007       and r8d, 0x7                ;   defines r8 in [0x0, 0x7]
 │           0x0040197e      3e42ff24c5..   jmp qword ds:[0x402020 + r8*0x8] ; ~ switch table (8 cases) at 0x402020
-│           ;-- 9 bytes not in this function: 0x00401987..0x0040198f
+│           ;-- ? 9 bytes in no block: 0x00401987..0x0040198f
 │           ;-- case 7:                                                ; from 0x0040197e
 │           0x00401990      410fb67a06     movzx edi, byte [r10 + 0x6]
 │           0x00401995      48c1e730       shl rdi, 0x30               ; ~ defines rdi in [0x0, 0xff000000000000]
@@ -348,7 +350,7 @@ FILE=tests/fixtures/code_pointer_table_O0
 CMDS=pdf @ sym._table_dispatch
 EXPECT=<<EOF
 ; CALL XREF from sym._main @ 0x1000004d0(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 1 indirect transfer unresolved
 ┌ 152: sym._table_dispatch (arg0, arg1, ?);
 │ ; ~ at least 2 args
 │ ; ! result unproven: x0, WidthUnbounded
@@ -465,8 +467,9 @@ ARGS=-e scr.utf8=false
 CMDS=pdf @ 0x401330
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 / 51: sym.fnv1a32 (arg0, arg1);
+| ; * result rests on closed-world
 |           0x00401330      f30f1efa       endbr64
 |           0x00401334      4885f6         test rsi, rsi
 |       ,=< 0x00401337      7427           je 0x401360
@@ -480,7 +483,7 @@ EXPECT=<<EOF
 |      :|   0x00401357      4839fe         cmp rsi, rdi
 |      `|=< 0x0040135a      75ec           jne 0x401348
 |       |   0x0040135c      c3             ret                         ; . returns rax
-|       |   ;-- 3 bytes not in this function: 0x0040135d..0x0040135f
+|       |   ;-- ? 3 bytes in no block: 0x0040135d..0x0040135f
 |       `-> 0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
 \           0x00401365      c3             ret                         ; . returns rax
 EOF
@@ -493,8 +496,9 @@ ARGS=-e asm.lines=false
 CMDS=pdf @ 0x401330
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 51: sym.fnv1a32 (arg0, arg1);
+│ ; * result rests on closed-world
 │           0x00401330      f30f1efa       endbr64
 │           0x00401334      4885f6         test rsi, rsi
 │           0x00401337      7427           je 0x401360
@@ -508,7 +512,7 @@ EXPECT=<<EOF
 │           0x00401357      4839fe         cmp rsi, rdi
 │           0x0040135a      75ec           jne 0x401348
 │           0x0040135c      c3             ret                         ; . returns rax
-│           ;-- 3 bytes not in this function: 0x0040135d..0x0040135f
+│           ;-- ? 3 bytes in no block: 0x0040135d..0x0040135f
 │           0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
 └           0x00401365      c3             ret                         ; . returns rax
 EOF
@@ -520,7 +524,7 @@ NAME=header of an unproven result
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=pdf @ 0x401000; afi @ 0x401000~result
 EXPECT=<<EOF
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 27: sym._init (?);
 │ ; ~ at least 0 args
 │ ; ! result unproven: rax, Written

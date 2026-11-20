@@ -80,7 +80,9 @@ pub use records::{
     Instruction, Line, Listing, Memory, Operand, Parameters, Register, Registers, Semantics,
     Standing, Stop, Trips, Unexpressed, Unlifted, WalkedBody,
 };
-pub use references::{Claimant, Coverage, Reference, References, Role, Unread};
+pub use references::{
+    Claim, Coverage, Gap, Reference, References, ReferencesTo, Referring, Role, Unread,
+};
 pub use result::ResultStanding;
 
 /// How much work a request permits.

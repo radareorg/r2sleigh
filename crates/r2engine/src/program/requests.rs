@@ -15,7 +15,7 @@ use crate::query::db::{Db, Query, Retention};
 use crate::query::references::Indexing;
 use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Instruction, Line, Listing, Memory, Proved,
-    References, Stop, Unread, WalkedBody, Work,
+    References, ReferencesTo, Referring, Stop, Unread, WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, SealedFunctionAnalysis};
 
@@ -30,6 +30,8 @@ pub struct FunctionListing {
     pub edges: Vec<FlowEdge>,
     /// What `pdf` states above the first line (D566).
     pub header: Header,
+    /// Each run of bytes between two listed lines that no line covers, in listing order (D622).
+    pub gaps: Vec<crate::query::Gap>,
 }
 
 /// A function's header: who reaches it, and the frame answer `afi` reads.
@@ -322,6 +324,8 @@ pub(super) struct Survey {
     after_exits: Vec<u64>,
     /// How many walked bodies hold a call that unwinds to a landing pad (D570).
     pub(super) unwinding: usize,
+    /// The indirect transfers no walk followed, program-wide; `None` where a body is unwalked (D619).
+    pub(super) unresolved: Option<usize>,
 }
 
 impl Survey {
@@ -427,6 +431,22 @@ fn listed_by_block(answered: &Answered<'_>, blocks: &[r2il::R2ILBlock]) -> Answe
         }
     }
     whole
+}
+
+/// The bytes between consecutive lines no line covers, each with whether a walked body holds any
+/// of it: one pass, `O(L + G log S)` for G gaps.
+fn gaps(lines: &[Line], holders: Option<&crate::discovery::Holders>) -> Vec<crate::query::Gap> {
+    let mut gaps = Vec::new();
+    let mut end = None;
+    for line in lines {
+        if let Some(end) = end.filter(|end| *end < line.address) {
+            let range = end..line.address;
+            let held = holders.is_some_and(|holders| holders.holds_any(range.clone()));
+            gaps.push(crate::query::Gap { range, held });
+        }
+        end = Some(line.address + line.bytes.len().max(1) as u64);
+    }
+    gaps
 }
 
 impl<S: Source + 'static> OpenProgram<S> {
@@ -667,9 +687,14 @@ impl<S: Source + 'static> OpenProgram<S> {
         listing.edges = flow_edges(&listing.lines.value, &shape);
         // The survey every request reads: its caller sets, never the reference index (D566). A survey
         // that fails lists no xref, and the `?` line stands: the listing does not depend on it.
-        if let Ok(survey) = self.surveyed() {
+        let survey = self.surveyed().ok();
+        if let Some(survey) = &survey {
             (listing.header.calls, listing.header.tails) = survey.xrefs_of(entry);
+            listing.header.unresolved = survey.unresolved;
         }
+        // Default-deny: with no survey, no byte is known held.
+        let holders = survey.as_ref().map(|survey| &survey.holders);
+        listing.gaps = gaps(&listing.lines.value, holders);
         Ok((listing, shape))
     }
 
@@ -754,6 +779,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                 info,
                 ..Header::default()
             },
+            gaps: Vec::new(),
         };
         Ok((listing, pads))
     }
@@ -788,6 +814,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                     }),
                     edges: Vec::new(),
                     header: Header::default(),
+                    gaps: Vec::new(),
                 };
                 let shape = shape_of(std::iter::empty(), std::iter::empty(), None);
                 return Ok((listing, shape));
@@ -823,6 +850,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             refused: Some(AnalysisRefused { reason, unresolved }),
             edges: Vec::new(),
             header: Header::default(),
+            gaps: Vec::new(),
         };
         Ok((listing, shape))
     }
@@ -967,6 +995,70 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(Answer::complete(index.0))
     }
 
+    /// Every reference to `wanted` with its line, each first owner listed again once (D612):
+    /// `O(log R + k)` into the index, then `O(sum of the first owners' bodies)`.
+    pub fn references_to(&mut self, wanted: u64) -> Result<ReferencesTo, String> {
+        let index = self.references()?.value;
+        let survey = self.surveyed()?;
+        let view = self.view();
+        // Each owner's wanted addresses: the line of a claim is its first owner's (`Indexing::read`).
+        let mut asked = BTreeMap::<u64, Vec<u64>>::new();
+        for (_, claim) in index.to(wanted).filter(|(_, claim)| !claim.word) {
+            let owner = *claim
+                .owners
+                .first()
+                .ok_or("a claimed instruction with no owner")?;
+            asked.entry(owner).or_default().push(claim.address);
+        }
+        let mut lines = Vec::new();
+        if !asked.is_empty() {
+            let walker = super::returns::Walking::new(view.clone(), true)?;
+            for (owner, mut addresses) in asked {
+                addresses.sort_unstable();
+                addresses.dedup();
+                let thumb = match survey.walked_in(owner) {
+                    Some(Ok(thumb)) => thumb,
+                    _ => return Err(format!("{owner:#x} holds a reference and was not walked")),
+                };
+                let (listed, _) =
+                    listed_lines(&view, &walker, owner, thumb)?.map_err(|(unread, _)| {
+                        format!("{owner:#x} was read and is now unread: {unread:?}")
+                    })?;
+                // A body lists an instruction once per block holding it; the index read the first that claims.
+                let mut taken = vec![false; addresses.len()];
+                for line in listed {
+                    if let Ok(at) = addresses.binary_search(&line.address)
+                        && !taken[at]
+                        && crate::query::references::claims(&line)
+                    {
+                        taken[at] = true;
+                        lines.push(line);
+                    }
+                }
+            }
+            lines.sort_by_key(|line| line.address);
+        }
+        let mut referring = Vec::new();
+        for (fact, claim) in index.to(wanted) {
+            let line = match claim.word {
+                true => None,
+                false => {
+                    let at = (lines.binary_search_by_key(&claim.address, |line| line.address))
+                        .map_err(|_| {
+                            format!("{:#x}'s line is not in its owner's listing", claim.address)
+                        })?;
+                    Some(lines[at].clone())
+                }
+            };
+            referring.push(Referring {
+                fact: *fact,
+                owners: claim.owners.to_vec(),
+                line,
+            });
+        }
+        Ok(ReferencesTo { referring, index })
+    }
+
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
     pub(super) fn surveyed(&self) -> Result<Arc<Survey>, String> {
         self.loaded()?;
@@ -1025,7 +1117,10 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     let survey = survey.as_ref().clone()?.0;
     let walked = &survey.walked;
     let mut index = Indexing::default();
-    let mut coverage = Coverage::default();
+    let mut coverage = Coverage {
+        indirect: survey.unresolved,
+        ..Coverage::default()
+    };
     let writes = &view.source().container().loader_writes;
     index.read_words(
         writes,
@@ -1038,36 +1133,58 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     }
     let walker = super::returns::Walking::new(view.clone(), true)?;
     for (&entry, thumb) in walked {
-        // `Walked`'s body, its decodes kept: the listing lifts nothing again (D162).
-        let walk = match thumb {
-            Ok(thumb) => listed_walk(view, entry, *thumb).map(|walk| (*thumb, walk)),
-            Err(refusal) => Err(refusal.clone()),
-        };
-        let (thumb, walk) = match walk {
-            Ok(walk) => walk,
+        let thumb = match thumb {
+            Ok(thumb) => *thumb,
             Err(refusal) => {
-                coverage.unread.insert(entry, Unread::Refused(refusal));
+                coverage
+                    .unread
+                    .insert(entry, Unread::Refused(refusal.clone()));
                 continue;
             }
         };
-        if !walk.body.unresolved.is_empty() {
-            coverage
-                .unresolved
-                .insert(entry, walk.body.unresolved.clone());
-        }
-        let machine = walker.machine(thumb).ok_or("no machine")?;
-        let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, entry, walk) {
-            Ok(lines) => {
+        match listed_lines(view, &walker, entry, thumb)? {
+            Ok((lines, unresolved)) => {
+                if !unresolved.is_empty() {
+                    coverage.unresolved.insert(entry, unresolved);
+                }
                 coverage.read.push(entry);
                 index.read(entry, lines);
             }
-            Err(unread) => {
+            Err((unread, unresolved)) => {
+                if !unresolved.is_empty() {
+                    coverage.unresolved.insert(entry, unresolved);
+                }
                 coverage.unread.insert(entry, unread);
             }
         }
     }
     Ok(index.finish(coverage))
+}
+
+/// One body's lines, or why it is unread, each beside where its walk stopped.
+type ListedLines =
+    Result<(Vec<Line>, Vec<crate::body::Unresolved>), (Unread, Vec<crate::body::Unresolved>)>;
+
+/// One walked body listed as the index reads it, with where its walk stopped: `O(body)`.
+fn listed_lines<S: Source + 'static>(
+    view: &View<'_, S>,
+    walker: &super::returns::Walking<'_, S>,
+    entry: u64,
+    thumb: bool,
+) -> Result<ListedLines, String> {
+    // `Walked`'s body, its decodes kept: the listing lifts nothing again (D162).
+    let walk = match listed_walk(view, entry, thumb) {
+        Ok(walk) => walk,
+        Err(refusal) => return Ok(Err((Unread::Refused(refusal), Vec::new()))),
+    };
+    let unresolved = walk.body.unresolved.clone();
+    let machine = walker.machine(thumb).ok_or("no machine")?;
+    Ok(
+        match claimed_by(view, (walker.target(thumb), machine), entry, walk) {
+            Ok(lines) => Ok((lines, unresolved)),
+            Err(unread) => Err((unread, unresolved)),
+        },
+    )
 }
 
 /// The body `Walked` holds for `entry`, its decodes kept: the same walk, refusals and tables.
@@ -1163,6 +1280,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 tail_callers: BTreeMap::new(),
                 after_exits: Vec::new(),
                 unwinding: 0,
+                unresolved: Some(0),
             })));
         }
         let walker = super::returns::Walking::new(view.clone(), true)?.recording_unwinds();
@@ -1204,6 +1322,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         let unwinding = (found.walks.values())
             .filter(|walk| walk.as_ref().is_ok_and(super::returns::BodyWalk::unwinds))
             .count();
+        // Default-deny: a body no walk read may transfer anywhere, so no count is stated.
+        let unresolved = (found.walks.values())
+            .map(|walk| {
+                walk.as_ref()
+                    .ok()
+                    .map(super::returns::BodyWalk::unresolved_transfers)
+            })
+            .sum::<Option<usize>>();
         let holders =
             crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
                 let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
@@ -1225,6 +1351,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             tail_callers,
             after_exits,
             unwinding,
+            unresolved,
         })))
     }
 }

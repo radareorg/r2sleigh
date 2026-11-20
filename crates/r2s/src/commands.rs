@@ -847,21 +847,21 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
 /// Every reference to `wanted`, a row per referring function, each about the
 /// address the reference is made from.
 pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Table, String> {
-    let index = session.program.references()?.value;
+    let answer = session.program.references_to(wanted)?;
     let names = session.program.names();
     let mut table = Table::default();
-    let mut count = 0usize;
-    for (fact, source) in index.to(wanted) {
-        count += 1;
-        let text = match &source.line.syntax {
-            Some(_) => crate::listing::spelled(&source.line, &names, session.demangle),
+    let count = answer.referring.len();
+    for referring in &answer.referring {
+        let fact = referring.fact;
+        let text = match &referring.line {
+            Some(line) => crate::listing::spelled(line, &names, session.demangle),
             // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
             None => format!("{} {wanted:#010x}", datum(session)),
         };
         // A source in no function is radare2's `(nofunc)`.
-        let owners = match source.owners.is_empty() {
+        let owners = match referring.owners.is_empty() {
             true => vec!["(nofunc)".to_owned()],
-            false => source
+            false => referring
                 .owners
                 .iter()
                 .map(|owner| names.function(*owner, session.demangle))
@@ -886,7 +886,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
             "\n; none within the functions read, which is not proof {wanted:#x} is unreferenced"
         ));
     }
-    table.foot.push_str(&coverage(&index.coverage));
+    table.foot.push_str(&coverage(&answer.index.coverage));
     Ok(table)
 }
 
@@ -937,8 +937,9 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
     if coverage.is_closed() {
         return format!("\n; covers {read} functions, every body walked to its end");
     }
-    let indirect = coverage.indirect_count();
-    let other = coverage.unresolved_count() - indirect;
+    // An unwalked body states no count; its own clause below says it is unread.
+    let indirect = coverage.indirect_count().unwrap_or(0);
+    let other = coverage.unreadable_count();
     let gaps = [
         (
             indirect,

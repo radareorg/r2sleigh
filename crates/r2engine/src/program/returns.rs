@@ -62,6 +62,11 @@ impl BodyWalk {
         self.trace.unwinds()
     }
 
+    /// How many indirect transfers the walk went past or stopped at unresolved (D619).
+    pub(super) fn unresolved_transfers(&self) -> usize {
+        self.trace.unresolved_transfers()
+    }
+
     /// The bytes the walk decoded as this body's instructions.
     pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
         self.trace.spans()
