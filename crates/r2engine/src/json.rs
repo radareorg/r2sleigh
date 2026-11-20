@@ -521,3 +521,54 @@ fn refusal_of(kind: &query::AnnotationKind) -> Option<NoteRefusalJson> {
         _ => None,
     }
 }
+
+/// `ij`: what the binary is, under radare2 6.2.4's keys (`core` and `bin`,
+/// cmd_info.inc.c:951-956; `bin_info`, cbin.c:963-1049). Only what the container states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InfoJson {
+    pub core: InfoCoreJson,
+    pub bin: InfoBinJson,
+}
+
+/// `ij`'s `core`: the file opened and the format read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InfoCoreJson {
+    pub file: String,
+    pub format: String,
+}
+
+/// `ij`'s `bin`; a key the format does not state is absent, as `i` prints no row for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InfoBinJson {
+    pub arch: String,
+    pub baddr: u64,
+    pub bits: u32,
+    pub endian: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intrp: Option<String>,
+    pub lang: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nx: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relro: Option<&'static str>,
+    #[serde(rename = "static", skip_serializing_if = "Option::is_none")]
+    pub statically_linked: Option<bool>,
+}
+
+/// One `izj` string under radare2 6.2.4's keys (cbin.c:475-482); `paddr` is absent where no
+/// file byte backs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StringJson {
+    pub vaddr: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paddr: Option<u64>,
+    pub ordinal: usize,
+    pub size: usize,
+    pub length: usize,
+    pub section: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub string: String,
+}

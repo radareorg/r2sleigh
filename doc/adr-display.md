@@ -467,3 +467,15 @@ tests whether a setter's call is the next call line.
   the function-grade JSON. So `ao` and `aoj` may differ on one address: `ao`
   reads the function, `aoj` the line. Cost: `O(1)` per instruction past the
   decode; D490's `aoj` sample reads no function.
+- D575, verbs radare2 6.2.4 spells. `aaa` runs `aa`'s handler: r2s's `aa`
+  already states everything it can. `ij` and `izj` serialise typed structs
+  (r2engine `json.rs`: `InfoJson`, `StringJson`) under radare2's keys, and `i`
+  and `iz` print the same structs, so the text and the JSON read one fact.
+  `s-` and `s+` step a seek history on `Session` (a `Vec<u64>` and a cursor,
+  `O(1)` amortised; every `s` pushes, `@` does not, as `r_io_sundo_push`
+  does). A letter more than one verb starts with (`a?`, `i?`, `p?`, `s?`,
+  `w?`) prints its group in table order; a multi-letter `pd?` keeps its
+  usage. An unknown verb names its nearest verb by Levenshtein distance, at
+  most 2 and less than the verb's length, ties by table order
+  (`O(|VERBS| x len^2)`).
+

@@ -1,0 +1,179 @@
+# D575: verbs radare2 6.2.4 spells that r2s lacked: `aaa`, `izj`, the seek history `s-` and `s+`,
+# a letter's group help, and an unknown verb's nearest verb (`ij` is crates/r2s/tests/verbs.rs).
+
+NAME=aaa is aa
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=aaa; afl~fnv1a
+EXPECT=<<EOF
+0x00401330    5     51 sym.fnv1a32
+0x00401370    4     52 sym.fnv1a64
+EOF
+RUN
+
+NAME=an unknown verb names its nearest verb
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=aaaa
+EXPECT_ERR=<<EOF
+r2s: unknown command 'aaaa'; did you mean aaa
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a verb far from every verb names none
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=zz
+EXPECT_ERR=<<EOF
+r2s: unknown command 'zz'; did you mean iz
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=pdff names pdf
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=pdff
+EXPECT_ERR=<<EOF
+r2s: unknown command 'pdff'; did you mean pdf
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=izj lists iz's strings under radare2's keys
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=izj
+EXPECT=<<EOF
+[{"vaddr":4202592,"paddr":8288,"ordinal":0,"size":62,"length":61,"section":".rodata","type":"ascii","string":"The quick brown fox jumps over the lazy dog, 0123456789abcdef"},{"vaddr":4202912,"paddr":8608,"ordinal":1,"size":18,"length":17,"section":".rodata","type":"ascii","string":"fnv1a32     %08x\n"},{"vaddr":4202930,"paddr":8626,"ordinal":2,"size":21,"length":20,"section":".rodata","type":"ascii","string":"fnv1a64     %016llx\n"},{"vaddr":4202951,"paddr":8647,"ordinal":3,"size":18,"length":17,"section":".rodata","type":"ascii","string":"djb2        %08x\n"},{"vaddr":4202969,"paddr":8665,"ordinal":4,"size":18,"length":17,"section":".rodata","type":"ascii","string":"sdbm        %08x\n"},{"vaddr":4202987,"paddr":8683,"ordinal":5,"size":18,"length":17,"section":".rodata","type":"ascii","string":"adler32     %08x\n"},{"vaddr":4203005,"paddr":8701,"ordinal":6,"size":18,"length":17,"section":".rodata","type":"ascii","string":"fletcher32  %08x\n"},{"vaddr":4203023,"paddr":8719,"ordinal":7,"size":18,"length":17,"section":".rodata","type":"ascii","string":"crc32_bit   %08x\n"},{"vaddr":4203041,"paddr":8737,"ordinal":8,"size":18,"length":17,"section":".rodata","type":"ascii","string":"crc32_tab   %08x\n"},{"vaddr":4203059,"paddr":8755,"ordinal":9,"size":18,"length":17,"section":".rodata","type":"ascii","string":"murmur3_32  %08x\n"},{"vaddr":4203077,"paddr":8773,"ordinal":10,"size":18,"length":17,"section":".rodata","type":"ascii","string":"xxhash32    %08x\n"},{"vaddr":4203095,"paddr":8791,"ordinal":11,"size":21,"length":20,"section":".rodata","type":"ascii","string":"siphash24   %016llx\n"},{"vaddr":4203116,"paddr":8812,"ordinal":12,"size":18,"length":17,"section":".rodata","type":"ascii","string":"pearson     %02x\n"},{"vaddr":4203134,"paddr":8830,"ordinal":13,"size":21,"length":20,"section":".rodata","type":"ascii","string":"combined    %016llx\n"}]
+EOF
+RUN
+
+NAME=izj on another binary
+FILE=tests/fixtures/rv_O0g
+CMDS=izj
+EXPECT=<<EOF
+[{"vaddr":8200,"paddr":8200,"ordinal":0,"size":13,"length":12,"section":".rodata","type":"ascii","string":"hello global"},{"vaddr":8248,"paddr":8248,"ordinal":1,"size":7,"length":6,"section":".rodata","type":"ascii","string":"%d %s\n"}]
+EOF
+RUN
+
+NAME=s- undoes a seek and s+ redoes it
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=<<EOF
+s 0x401330
+s 0x401370
+s-
+s
+s-
+s
+s-
+s
+s+
+s
+s 0x4013b0
+s+
+s
+EOF
+EXPECT=<<EOF
+0x401330
+0x401240
+0x401240
+0x401330
+0x4013b0
+EOF
+RUN
+
+NAME=s- n seeks n bytes back, and s- undoes it
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=s 0x401330; s- 0x10; s; s-; s
+EXPECT=<<EOF
+0x401320
+0x401330
+EOF
+RUN
+
+NAME=s+ with a count that is not a number
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=s+ many
+EXPECT_ERR=<<EOF
+r2s: unknown address or flag 'many'
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=s? lists the seek verbs
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=s?
+EXPECT=<<EOF
+Usage: s[...]  the s commands
+| s [addr]  seek to an address, or print the seek
+| s- [n]    undo a seek, or seek n bytes backward
+| s+ [n]    redo a seek, or seek n bytes forward
+EOF
+RUN
+
+NAME=a? lists the analysis verbs
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=a?
+EXPECT=<<EOF
+Usage: a[...]  the a commands
+| ao [n]      instructions as their lift states them: registers read and written, the IL
+| aoj [n]     instructions as their lift states them, as JSON
+| aa          survey the program once: later answers are faster, never different
+| aaa         as aa: r2s's aa already states everything it can
+| afl         list functions
+| aflj        list functions as JSON
+| afi [addr]  what a function is
+| afb [addr]  a function's basic blocks
+| afv [addr]  a function's arguments and variables
+| agf [addr]  a function's control-flow graph
+| ax [addr]   references from an address
+| axt [addr]  references to an address
+EOF
+RUN
+
+NAME=i? lists the info verbs
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=i?
+EXPECT=<<EOF
+Usage: i[...]  the i commands
+| i    what the binary is
+| ij   what the binary is, as JSON
+| il   libraries the program needs
+| ie   entry points
+| iee  entry points and initialisers
+| iS   sections
+| is   symbols
+| ir   relocations
+| iz   strings in data sections
+| izj  strings in data sections, as JSON
+| izz  strings anywhere in the file
+EOF
+RUN
+
+NAME=p? lists the print verbs
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=p?
+EXPECT=<<EOF
+Usage: p[...]  the p commands
+| px [n]       hexdump
+| pd [n]       disassemble
+| pdf [addr]   disassemble a function
+| pdfj [addr]  a function's listing as JSON, each line with its notes
+| pdd [addr]   decompile a function
+| pddj [addr]  decompile a function as JSON
+| pdil [addr]  the low IL tier
+| pddo [addr]  a function's source obligations
+| pdie <file>  the lift run on a recorded entry state
+EOF
+RUN
+
+NAME=a letter no verb starts with has no group
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=z?
+EXPECT_ERR=<<EOF
+r2s: unknown command 'z?'
+EOF
+EXPECT=<<EOF
+EOF
+RUN

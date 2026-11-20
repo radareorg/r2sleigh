@@ -13,6 +13,8 @@ pub struct Session {
     pub path: String,
     /// Where `pd`, `px` and the rest read from when no address is given.
     pub addr: u64,
+    /// The seeks `s-` and `s+` step through.
+    pub seeks: Seeks,
     /// How listings are painted, `scr.color`: 0 none, 1 sixteen colours, 2 256, 3 truecolor;
     /// 1 for a terminal unless `NO_COLOR` says otherwise.
     pub color: u8,
@@ -59,9 +61,16 @@ impl Session {
             rails: false,
             pdd_addr: false,
             addr: program.start().unwrap_or(0),
+            seeks: Seeks::default(),
             program,
             path: path.to_owned(),
         })
+    }
+
+    /// Seek to `to`, as `s` does: the history `s-` undoes records it.
+    pub fn seek(&mut self, to: u64) {
+        self.seeks.push(self.addr, to);
+        self.addr = to;
     }
 
     /// The depth what the running statement prints is painted at, where it is painted.
@@ -164,5 +173,47 @@ mod tests {
         assert_eq!(session.width(), None);
         assert!(!session.railed() && session.paints().is_none());
         assert_eq!(session.gutter().width, 10);
+    }
+}
+
+/// The seek history: every address `s` went to, and the one the cursor stands on. A cursor
+/// moved by other means (`@`, the visual mode) joins it at the next step. `O(1)` amortised.
+#[derive(Debug, Default)]
+pub struct Seeks {
+    visited: Vec<u64>,
+    at: usize,
+}
+
+impl Seeks {
+    /// Leaving `from` for `to`: the redo past the cursor is dropped, as `r_io_sundo_push` drops it.
+    fn push(&mut self, from: u64, to: u64) {
+        self.joined(from);
+        self.visited.truncate(self.at + 1);
+        self.visited.push(to);
+        self.at = self.visited.len() - 1;
+    }
+
+    /// The address one step back or forward from `current`, which becomes the cursor; none at an end.
+    pub fn step(&mut self, current: u64, forward: bool) -> Option<u64> {
+        self.joined(current);
+        let to = match forward {
+            true => self
+                .at
+                .checked_add(1)
+                .filter(|&to| to < self.visited.len())?,
+            false => self.at.checked_sub(1)?,
+        };
+        self.at = to;
+        Some(self.visited[to])
+    }
+
+    /// `current` as the cursor's entry: a cursor that moved without `s` is recorded where it stands.
+    fn joined(&mut self, current: u64) {
+        if self.visited.get(self.at) != Some(&current) {
+            self.visited
+                .truncate(self.at.saturating_add(1).min(self.visited.len()));
+            self.visited.push(current);
+            self.at = self.visited.len() - 1;
+        }
     }
 }
