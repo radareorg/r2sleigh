@@ -190,6 +190,9 @@ struct Frame {
     pending: Pending,
     /// The query this frame runs.
     query: &'static str,
+    /// Whether a row it deposited beside its answer differs from the row held, or none was held:
+    /// its answer then counts as changed though equal (D589).
+    deposit_moved: bool,
 }
 
 #[derive(Clone)]
@@ -506,31 +509,31 @@ impl<I: Inputs + 'static> Db<I> {
         Ok(taken)
     }
 
-    /// Hold `value` at `key`, good exactly while `P`'s answer at `owner` is: a row the running
-    /// computation of that answer derives, which shares its reads instead of copying them (D589).
+    /// Hold `value` at `key`, a row `P`'s running answer at `owner` derives, good while that answer
+    /// is; a row that moves moves that answer too, though equal (D589, doc/adr-result-side.md).
     pub fn deposit_beside<Q: Query<I>, P: Query<I>>(
         &self,
         key: Q::Key,
         value: Q::Value,
         owner: &P::Key,
     ) {
-        if self
-            .frames
-            .borrow()
-            .last()
-            .is_none_or(|frame| frame.stopped)
-        {
-            return;
-        }
-        let deps: Rc<[Dep]> = Rc::new([Dep::Query {
-            table: TypeId::of::<P>(),
-            key: Rc::new(owner.clone()),
-        }]);
         let table = self.table::<Q>();
         let typed = table
             .as_any()
             .downcast_ref::<Table<Q, I>>()
             .expect("a table is registered under its own query's type");
+        let held = typed.entries.borrow().get(&key).and_then(|entry| {
+            let held = entry.value.as_ref()?;
+            Some(**held == value)
+        });
+        match self.frames.borrow_mut().last_mut() {
+            Some(frame) if !frame.stopped => frame.deposit_moved |= held != Some(true),
+            _ => return,
+        }
+        let deps: Rc<[Dep]> = Rc::new([Dep::Query {
+            table: TypeId::of::<P>(),
+            key: Rc::new(owner.clone()),
+        }]);
         let now = self.inputs.byte_revision();
         let entry = Entry {
             value: Some(Rc::new(value)),
@@ -646,12 +649,13 @@ struct Running<'a, I: Inputs + 'static, K: Ord> {
 
 impl<I: Inputs + 'static, K: Ord> Running<'_, I, K> {
     /// What the query read, whether it read a stopped answer, and the `Newest` entries it holds.
-    fn finish(mut self) -> (Vec<Dep>, bool, Pending) {
+    fn finish(mut self) -> (Vec<Dep>, bool, Pending, bool) {
         if let Some(key) = self.key.take() {
             self.running.borrow_mut().remove(&key);
         }
         let frame = self.db.frames.borrow_mut().pop().unwrap_or_default();
-        (coalesced(frame.deps), frame.stopped, frame.pending)
+        let moved = frame.deposit_moved;
+        (coalesced(frame.deps), frame.stopped, frame.pending, moved)
     }
 }
 
@@ -813,7 +817,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             key: Some(key.clone()),
         };
         let value = Q::compute(db, key);
-        let (deps, tainted, mut pending) = frame.finish();
+        let (deps, tainted, mut pending, deposit_moved) = frame.finish();
         self.count(|stats| stats.computed += 1);
         db.stats.borrow_mut().computed += 1;
         let mut entries = self.entries.borrow_mut();
@@ -844,7 +848,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
                 value: Some(old),
                 changed_at,
                 ..
-            }) if *old == value => {
+            }) if *old == value && !deposit_moved => {
                 db.stats.borrow_mut().backdated += 1;
                 (old, changed_at)
             }
@@ -1036,6 +1040,46 @@ mod tests {
             db.deposit_beside::<Taken, Owner>(at, sum, &at);
             sum
         }
+    }
+
+    /// Whether the bytes up to `at` sum to an even number, depositing the sum beside itself.
+    struct EvenOwner;
+    impl Query<Memory> for EvenOwner {
+        type Key = u64;
+        type Value = bool;
+        const NAME: &'static str = "even owner";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> bool {
+            let sum: u64 = read(db, 0..at + 1).iter().map(|b| u64::from(*b)).sum();
+            db.deposit_beside::<Taken, EvenOwner>(at, sum, &at);
+            sum.is_multiple_of(2)
+        }
+    }
+
+    /// The row `EvenOwner` deposits, taken through its owner.
+    struct EvenReader;
+    impl Query<Memory> for EvenReader {
+        type Key = u64;
+        type Value = Option<u64>;
+        const NAME: &'static str = "even reader";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> Option<u64> {
+            db.get::<EvenOwner>(&at).expect("acyclic");
+            db.take::<Taken>(&at)
+                .expect("never computes")
+                .map(|sum| *sum)
+        }
+    }
+
+    #[test]
+    fn a_deposit_that_moves_moves_its_owner_though_the_owner_is_equal() {
+        let mut db = Db::new(Memory::new((1..=16).collect()));
+        assert_eq!(*db.get::<EvenReader>(&3).unwrap(), Some(10));
+        // 10 to 12: the owner's answer stays even, the deposited sum moves.
+        db.inputs_mut().write(1, 4);
+        let fresh = Db::new(db.inputs().clone());
+        assert_eq!(*fresh.get::<EvenReader>(&3).unwrap(), Some(12));
+        assert_eq!(*db.get::<EvenReader>(&3).unwrap(), Some(12));
     }
 
     #[test]
