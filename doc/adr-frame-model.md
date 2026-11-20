@@ -272,6 +272,24 @@ entries` before.
 - Exit for the whole of P4: one owner of frame objects, and `afv` agrees with
   `pdd` on every local's name and extent.
 
+## P4 step 0: frame agreement by class (round 16)
+
+`scripts/frame_agree.py` at 768391be5 on the committed census (`tests/coverage/pinned`,
+`tests/fixtures`; 203 functions with a disagreement, 132 refused and not compared): 0 of 582
+offsets agree. Each class with one witness and its cause:
+
+| Class | Offsets | Witness | Cause |
+|---|---|---|---|
+| `afv-only`, slot promoted | 337 | branchy_gcc_x64_O0 `gate_one` 0x401156: `afv` lists `uint32_t stack_m12 @ entry.sp-0xc`, the spill of `edi` at `[rbp - 0x4]`; `pdd` reads `arg0` and declares nothing there | slot promotion (`slot_promotion.rs`) turns the slot into values; `afv` lists the slot from the access, not from its fate |
+| `afv-only`, inside a frame array | 171 | branchy_gcc_x64_O0 `main` 0x401764: `afv` lists `stack_m552` at `entry.sp-0x228`; `pdd` declares `uint8_t frame[568]` at offset 0 | the frame is one byte array where no layout proves its objects; `afv` lists the slots the array holds |
+| `afv-only`, register save | 20 | branchy_gcc_x64_O0 `__do_global_dtors_aux` 0x401120: `afv` lists `uint64_t stack_m8 @ entry.sp-0x8`, the `push rbp` | a save of a preserved register's entry value is elided by `pdd` and listed by `afv` |
+| `pdd-only` | 54 | the same `main`: `uint8_t frame[568]` at `stack:0` | the frame array's one declaration; `afv` has no row for it |
+| `name`, `type`, `afv-twice`, `pdd-twice` | 0 | none | no offset is named by both sides, so no name or type is compared yet |
+
+Every disagreement is one side stating an object the other states as something else: no offset
+holds two objects with different names or types. The first P4 code row is D633, from the
+largest class: the frame model states each slot's fate, and `afv` lists it by that fate.
+
 ## Consequences
 
 - Equivalence and the census change at P4.3 and P4.4, and each change is read

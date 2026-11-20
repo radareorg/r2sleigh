@@ -501,3 +501,24 @@ tests whether a setter's call is the next call line.
   destructor, every template) is typed as a listing prints it:
   `'s LIEF::corrupted::~corrupted()`. A seek the line cut at an operator
   that names nothing says so and shows the form.
+
+## Round 16 as built: rails
+
+- D621: the proof line's refusal clauses are one typed value. r2dec's `ProofClauses` holds the
+  refused data object types by name and each unassigned cause with its names; the proof line is
+  spelled from it and `Emission::proof_clauses` carries it, so `pdd` under `asm.rails` prints
+  `! 55 data object types refused; ! 16 never assigned` (bash `main`) from the same struct, and
+  `pddj` carries it as `clauses`.
+- D620: r2dec records each point a line may break at (after a binary operator, after an
+  argument comma, before `?` and `:`) as `BreakPoint { line, offset, depth }`, `depth` the
+  parentheses open there. No rendering holds them: `RenderedFunction::break_points` writes the
+  held tree again on a terminal and keeps them only where its bytes equal the definition's
+  (held in `Emission` they cost the 50-function session +133 MB). On a terminal `rails::laid` wraps a line past 160 cells: greedy, each
+  cut the fitting point of lowest depth, then latest offset (Oppen, TOPLAS 1980), `O(line length)`.
+  A continuation line is the blank column, the statement's rails and 4 cells; deleting each
+  inserted newline and prefix gives the plain bytes. Plain `pdd` and a pipe never wrap.
+- Left over 160 cells: a run with no break point wider than the room. On the pinned hashes,
+  branchy and shapes (57, 12 and 41 lines over 160 at 768391be5) 2, 2 and 3 remain, each an
+  `r2dec gap` comment (a comment holds no break point). bash `main`: 91 to 48, 43 gap comments
+  and 4 cast chains at depth 18 or more, where the room is under 60 cells; one more line is
+  161 cells only by the space its cut leaves.

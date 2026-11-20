@@ -24,8 +24,9 @@ pub mod symbol;
 pub mod placement_mutants;
 
 pub use crate::codegen::RenderedFunction;
-pub use crate::codegen::{CRole, CRoles, Emission, ResidualSite, SourceLine};
+pub use crate::codegen::{BreakPoint, CRole, CRoles, Emission, ResidualSite, SourceLine};
 pub use crate::ledger::{EffectObligationAudit, EffectObligationDisposition};
+pub use crate::render::proof::{ProofClauses, UnassignedCause};
 pub use crate::render::rendered_name_of;
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::CodeGenConfig;

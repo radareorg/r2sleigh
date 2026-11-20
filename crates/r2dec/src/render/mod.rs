@@ -119,6 +119,7 @@ pub fn render(
     crate::ast::respell_nonconforming_main(&mut c, input.function().entry);
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
+    let clauses = proof::ProofClauses::of(&c, unassigned.as_deref().unwrap_or_default());
     // The proof line every rendering opens with: what became of each obligation the source owes.
     proof::note_unproven_constructs(
         &mut c,
@@ -127,7 +128,7 @@ pub fn render(
         input.declared_call_prototypes(),
         0,
         (
-            unassigned.as_deref().unwrap_or_default(),
+            &clauses,
             (
                 (input.open_second_result(), input.integer_lane_unread_only()),
                 &input.body_disputed_lanes(),
@@ -148,7 +149,9 @@ pub fn render(
         &mut crate::codegen::ObservationSealAuthority::staged(),
         crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
     );
-    let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
+    let emission = CodeGenerator::new(CodeGenConfig::default())
+        .emit(&ready, input.ptr_bits())
+        .with_clauses(clauses);
     Ok(Rendered {
         function: crate::codegen::RenderedFunction::new(emission, ready.into_function()),
         ledger,

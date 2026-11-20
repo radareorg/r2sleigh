@@ -1776,6 +1776,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let laid = match &rendering.response.output {
         r2engine::EngineRendering::Function(rendered) if session.railed() || session.pdd_addr => {
             let emission = rendered.emission();
+            let breaks = rendered.break_points();
             let residuals = emission.residuals().len();
             let notes = crate::rails::notes(session, addr, &rendering.response, residuals);
             let stated = crate::rails::Stated {
@@ -1785,6 +1786,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
                 depths: emission.depths(),
                 proof: emission.proof_line(),
                 lowest: emission.lowest_addresses(),
+                breaks: &breaks,
             };
             Some(crate::rails::laid(session, &stated, &notes))
         }
