@@ -87,7 +87,7 @@ fn claims_of(line: &Line) -> impl Iterator<Item = Reference> + '_ {
             from: line.address,
             to: annotation.kind.address()?,
             role: annotation.role()?,
-            support: annotation.support,
+            support: annotation.confidence.basis,
         })
     })
 }
@@ -183,7 +183,7 @@ impl Indexing {
                 flow: None,
                 annotations: vec![super::Annotation {
                     kind: super::AnnotationKind::Points { value },
-                    support: Basis::Stated,
+                    confidence: Basis::Stated.into(),
                     operand: None,
                     reference: true,
                 }],

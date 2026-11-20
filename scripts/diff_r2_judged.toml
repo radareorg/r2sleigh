@@ -127,14 +127,6 @@ verdict = "r2-right"
 reason = "66 66 66 66 66 66 2e 0f 1f 84 00 ...: the 0x66 prefixes make the operand 16 bits (objdump: nopw %cs:0x0(%rax,%rax,1)); Sleigh decodes dword; owner r2sleigh-lift (ROADMAP LS)"
 
 [[judged]]
-command = "pd"
-binaries = ["swift-main", "swift-main2"]
-r2 = '\[reloc\._[0-9A-F]{32}\.\.\.token\d\]$'
-r2s = '\[reloc\.globalinit_33_[0-9A-F]{32}_token\d\]$'
-verdict = "deliberate"
-reason = "radare2 elides the middle of a long flag name; r2s spells the symbol whole"
-
-[[judged]]
 command = ["px", "pd", "ie", "iS", "is"]
 binaries = "Lab01-03.exe"
 corpus = "pe"
@@ -764,14 +756,6 @@ r2 = 'j\w+ try\.0x[0-9a-f]+\.0x[0-9a-f]+\.to$'
 r2s = 'j\w+ 0x[0-9a-f]+$'
 verdict = "unfilled"
 reason = "radare2 flags each LSDA call-site range (try.*); r2s states no landing pads yet (owner r2image, ROADMAP I: LSDA landing pads as statements)"
-
-[[judged]]
-command = "pd"
-binaries = "ls-toybox"
-r2 = 'b sym\.\w+$'
-r2s = 'b 0x[0-9a-f]+$'
-verdict = "unfilled"
-reason = "_start_main is named only in .gnu_debugdata (MiniDebugInfo, an xz-packed .symtab), which radare2 reads and r2s does not (owner r2image symbols, ROADMAP I)"
 
 [[judged]]
 command = "is"
@@ -1565,6 +1549,58 @@ r2s = '^static false$'
 verdict = "r2s-right"
 reason = "radare2 prints static when the image needs no library (an empty DT_NEEDED); a shared object or a memory image that holds a PT_DYNAMIC is relocated by another image's loader, so it is not statically linked. r2s says static for an image with neither PT_INTERP nor PT_DYNAMIC, the one nothing else relocates (the permanence rule reads it)"
 
+# ── D570: landing pads radare2 does not walk (radare2 6.2.4 libr/core/canal.c:684) ──
+
+[[judged]]
+command = "afb"
+binaries = "pumasim"
+corpus = "elf"
+r2s = '^0x002fa752 0x002fa76a 24$'
+r2 = '^<missing>$'
+verdict = "r2s-right"
+upstream = "anal.trycatch walks a catch handler but skips a cleanup pad (canal.c:684 `if (tc->kind == R_BIN_TRYCATCH_CLEANUP ...) return true;`), so the cleanup's blocks are in no function"
+reason = "class D570: pumasim 0x2fa700's FDE (pc=2fa700..2fa76a, LSDA 0x778ce9) states [0x2fa73c,0x2fa741) pad 0x2fa752 action 0, a cleanup; r2s lists the pad's block 0x2fa752..0x2fa76a, radare2 skips cleanups (libr/core/canal.c:684 at 6.2.4)"
+
+[[judged]]
+command = "axt"
+binaries = "demangle-test-cpp"
+corpus = "elf"
+lacking = "r2"
+r2s = '^sym\.main 0x123c \[CALL:--x\] call '
+verdict = "r2s-right"
+upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
+reason = "class D570: demangle-test-cpp main's FDE (pc=11c9..1258) states [0x1209,0x120e) pad 0x1232 action 0, a cleanup; the pad's `call _ZNSt6vectorIiSaIiEED2Ev` at 0x123c is in no radare2 function (libr/core/canal.c:684 at 6.2.4)"
+
+[[judged]]
+command = "axt"
+binaries = "pumasim"
+corpus = "elf"
+lacking = "r2"
+r2s = '^\S+ 0x(29cae1|29cae9|29caf2|29e1ee|2a1818|2a19eb|2a1e8d|2a1eb8|2a2451|2a2459|2a2788|2a2790|2a27a2|2a27af|2a35bb|2a35c3|2a35cb|2a378e|2a3a4c|2a44d7|2a4b3e|2a4b58|2a4b6b|2a4f60|2a4f75|2a4f88|2a88b1|2b16a6|2b77a7|2b92ba|2b9f1b|2ba000|2ba0e0|2bf64e|2c309a|2c3d60|2c3db0|2c3dd0|2c3dd8|2c3e15|2c3e1d|2c52d4|2c5314|2c531f|2c5329|2c60df|2c7956|2c7986|2c7990|2c7da2|2c7daa|2c7dbf|2c7f1a|2d3bfd|2d3c05|2d3c0d|2d421c|2d42be|2d42d1|2d42d9|2d5491|2db61f|2db629|2db633|2db63d|2dcd09|2debdf|2dfca2|2e0915|2e091e|2e0931|2e093b|354ffd|3551dd|3aa843|3aa868|3ca9f8|3cba4e|3dafab|3db03c|3f4460|401889|401c20|403373|40475e|40599a|4059c7|4063c9|407947|409399|4095d3|44adca|452160|452168|452174|452180|4522fb|452303|452363|454af0|454af8|455d89|4636e9|4636f1|47c77f|47c78b|47cb15|48af91|4c0da2|4c2992|4f389e|50b1a7|50b82f|54ba1c|54ed9c|54f6ef|54fea0|551e32|5545f2|5545fa|554602|55460a|5559bf|58b15b|58b2a9|59189a|591a77|592044) \[CALL:--x\] call '
+verdict = "r2s-right"
+upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
+reason = "class D570: 128 calls made only in pumasim's cleanup pads (each absent from the parent's axt, which lists the normal flow's calls; the nearest stated pad at or below each states action 0 in every record that names it), e.g. 0x2a44d7 `call _ZdaPvm` in QDragManager's pad; radare2 6.2.4 skips cleanup pads (libr/core/canal.c:684); every pad an instruction start, 0 refused tables"
+
+[[judged]]
+command = "axt"
+binaries = "pumasim"
+corpus = "elf"
+lacking = "r2"
+r2s = '^\S+ 0x(28e4ee|290644|290a67|29b5a0|29b5a9|29b5b2|29fc67|2a0c75|2a0eff|2a145f|2a1625|2a1638|2a17e3|2a17eb|2a17f3|2a19ac|2a19bf|2a1e39|2a1e41|2a1f42|2a2289|2a2439|2a2441|2a2e4a|2a3b80|2a4ac9|2a4ad6|2a4ee9|2a4ef3|2a5907|2a5924|2a8585|2b0fb5|2b1edb|2b1efe|2b1f14|2b1f1c|2b5af6|2b8b02|2b8bf7|2bff09|2bff1b|2bff2d|2c3ee6|2c3eee|2c3f01|2c4653|2c465b|2c466e|2c5290|2c761d|2d3dc7|2d3dd7|2d3ddf|2d3de7|2d41ee|2d41f7|2d41ff|2d628a|2d6294|2db5c2|2dcf3a|2dd1b2|2dde7f|2debac|2debb4|2debc9|2fb83f|2fccc5|326515|355121|365345|37bc82|37bd6a|37f64d|37f655|37f88d|3cab48|3cae81|3cb000|3cba6d|3cc1da|3cc1ed|3cc200|3cd28d|3cd32c|3cd3cc|3da492|3da5f2|3e20cb|3f42d2|3f89ac|3f979a|3f99ad|3fb94c|3ff050|3ff3b3|3ffd51|4014ca|40267b|402b60|402b73|402ea4|402f91|406394|407be9|408a7b|408b65|408f46|409b73|4477ac|4520ba|4520c6|4520d2|4520de|4520ea|452100|452108|452110|45211c|452128|452134|452140|452148|463956|463969|48dbf1|48dcda|4b1d7f|4b20bb|4b20c3|4cba45|4f9353|4ffcbc|50b170|50be34|543c3f|54dfb4|54e114|550ec5|551022|55117a|555426|566dbf|566dc9|5677f7|567801|57ecd3|57ece6|58ed4d) \[CALL:--x\] call '
+verdict = "r2s-right"
+upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
+reason = "class D570, found by the round 14 exit's CI run (radare2 6.2.4, testbins 3bc992e70): 150 more calls made only in pumasim's cleanup pads; each call's block is reached from its function's entry only through an unwind (`u`) edge in `afb` (150 of 150), and the nearest stated pad at or below each states action 0 in every record (150 of 150 cleanup-only); e.g. 0x3cba6d `call _ZdaPvm` in QDir::readDirEntries (radare2 lists 0x3cb020 without it); radare2 6.2.4 skips cleanup pads (libr/core/canal.c:684)"
+
+[[judged]]
+command = "axt"
+binaries = "libhermes.so"
+corpus = "elf"
+lacking = "r2"
+r2s = '^\S+ 0x(9e0b0|9e0d0|a527c|a5458|a556c) \[CALL:--x\] bl '
+verdict = "r2s-right"
+upstream = "anal.trycatch skips a cleanup pad (canal.c:684), so a call made only there has no reference"
+reason = "class D570 on AArch64, found by the round 14 exit's CI run: 5 `bl operator delete` calls in libhermes.so's pads (getExecutedFunctions 0x9e0b0 and 0x9e0d0, hardenedHermesRuntimeConfig 0xa527c, makeHermesRuntime 0xa5458, makeThreadSafeHermesRuntime 0xa556c); each call's block is reached from its function's entry only through an unwind (`u`) edge in `afb` (5 of 5); radare2 lists each function and not the call, as it skips cleanup pads (libr/core/canal.c:684 at 6.2.4)"
+
 # ── The analysis verbs (ROADMAP D490): afl entries, afb blocks, afi noreturn, afv frame, axt references ──
 #
 # lacking   the side that does not state the fact: `r2` (r2s states it alone) or `r2s`
@@ -1804,15 +1840,6 @@ reason = "class A: r2s's aa follows each direct call and each code address hande
 
 [[judged]]
 command = "afl"
-binaries = "fedora_32_bin_ls"
-corpus = "elf"
-lacking = "r2s"
-r2 = ' sym\.[A-Za-z_]+\.cold$'
-verdict = "unfilled"
-reason = "class A: fedora_32_bin_ls carries its symbols in .gnu_debugdata (LZMA MiniDebugInfo, 0xe9c bytes); radare2 reads it and lists sym.main.cold (0x4e15, `e876f9ffff call sym.imp.abort`) and twelve more; r2s's `is` states none of them. Owner ROADMAP I (.gnu_debugdata symbols)"
-
-[[judged]]
-command = "afl"
 binaries = "x86_64-pie-memimg"
 corpus = "elf"
 lacking = "r2s"
@@ -1860,16 +1887,6 @@ r2 = ' entry0$'
 verdict = "r2s-right"
 upstream = "ie invents a program entry for an ELF whose e_entry is 0 (aarch64-relative-linkbase.so 0x502c8)"
 reason = "class A: objdump -f: aarch64-relative-linkbase.so `start address: 0x0`; radare2's ie prints a program entry at 0x502c8 (a `c0035fd6 ret`) and makes entry0 there, r2s states no entry"
-
-[[judged]]
-command = "afl"
-binaries = ["fedora_32_bin_ls", "vim"]
-corpus = "elf"
-lacking = "r2s"
-r2 = ' sym\.register_tm_clones$'
-r2s = '^<missing> refs=JUMP:jmp'
-verdict = "deliberate"
-reason = "class A: vim 0x55ab0 is reached only by frame_dummy's tail `jmp` and no symbol, FDE or call states it; r2s keeps a jmp target nothing else states in the jumping body, radare2 names it register_tm_clones by its crtstuff heuristic"
 
 [[judged]]
 command = "afl"
@@ -1936,6 +1953,16 @@ corpus = "elf"
 r2s = '^refused: under the golang_abi0 convention'
 verdict = "unfilled"
 reason = "class F: dwarf_go_tree 0x401000 runtime.text is Go ABI0, which returns results on the stack; r2s refuses its afv (`refused: under the golang_abi0 convention: Go ABI0 returns results on the stack, which no call boundary states`), radare2 lists rsp slots. Owner ROADMAP LP (Go assembly ABIs)"
+
+[[judged]]
+command = "afv"
+binaries = "fedora_32_bin_ls"
+corpus = "elf"
+function = '^0x000122e0 '
+lacking = "r2"
+r2s = '^var uint64_t stack_m72 @ entry\.sp-0x48$'
+verdict = "r2s-right"
+reason = "class E, sampled once D572 named fedora_32_bin_ls's functions from .gnu_debugdata: sym.ambsalign 0x122e0 stores realloc's size at [rsp] (`48890424 mov qword [rsp], rax` at 0x12305) and reads it back (`488b0424 mov rax, qword [rsp]` at 0x1232a), entry.sp-0x48 after six pushes and `sub rsp, 0x18`; radare2 makes no variable of a zero displacement unless the return address lives in a register (libr/anal/var.c:1232-1233 at 5a1d380d5f, `zero_ok`)"
 
 [[judged]]
 command = "afv"
@@ -2195,10 +2222,10 @@ binaries = ["go-cdetect"]
 corpus = "elf"
 function = '^(0x00401000|0x0042d700|0x00458aa0|0x00458b40|0x0047a880) '
 lacking = "r2"
-r2s = '^(arg r2sleigh_word_u64 arg0 @ rax|arg r2sleigh_word_u64 arg1 @ rbx|arg r2sleigh_word_u64\* arg0 @ rax|arg void\* arg1 @ rbx)$'
+r2s = '^(arg r2sleigh_word_u64 arg0 @ rax|arg r2sleigh_word_u64 arg1 @ rbx|arg r2sleigh_word_u64\* arg0 @ rax|arg void\* arg1 @ rbx|arg r2sleigh_unproven_u64 arg0 @ rax)$'
 verdict = "r2s-right"
 upstream = "afv applies the amd64 SysV registers to Go ABIInternal functions (Go 1.17+: integer arguments in rax, rbx, rcx, rdi, rsi, r8..r11)"
-reason = "class F: go-cdetect 0x47a880 syscall.Getenv(key string) spills its string's pointer and length from rax and rbx (`mov qword [rsp+0x60], rax`, `mov [rsp+0x68], rbx`); r2s states rax, rbx under Go ABIInternal, radare2 lists neither; go-cdetect 0x458aa0 reflect.mapiternext saves rax across morestack (0x458ac3) and hands it to runtime.mapiternext (sampled since D506)"
+reason = "class F: go-cdetect 0x47a880 syscall.Getenv(key string) spills its string's pointer and length from rax and rbx (`mov qword [rsp+0x60], rax`, `mov [rsp+0x68], rbx`); r2s states rax, rbx under Go ABIInternal, radare2 lists neither; go-cdetect 0x458aa0 reflect.mapiternext saves rax across morestack (0x458ac3) and hands it to runtime.mapiternext (sampled since D506); since D610 its type is `r2sleigh_unproven_u64`, the callee accessing through it at widths that do not agree"
 
 [[judged]]
 command = "afv"

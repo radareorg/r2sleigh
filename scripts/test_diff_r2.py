@@ -171,6 +171,14 @@ class Judged(unittest.TestCase):
         self.assertTrue(script.endswith("s entry0;pd 8"))
         self.assertEqual(argv[-1], "bin")
 
+    def test_both_tools_name_by_flag_spellings(self):
+        theirs = diff_r2.radare2_argv("/usr/bin/radare2", "afl", "bin")
+        for key in ("asm.demangle=false", "bin.demangle=false"):
+            self.assertEqual(theirs[theirs.index(key) - 1], "-e")
+        ours = diff_r2.r2s_argv("r2s", "afl", "bin")
+        self.assertEqual(ours[ours.index("asm.demangle=false") - 1], "-e")
+        self.assertEqual(ours[-3:], ["-c", "afl", "bin"])
+
     def test_two_different_invalid_bytes_stay_different(self):
         def out(byte):
             script = "import sys; sys.stdout.buffer.write(bytes([{}]))".format(byte)
@@ -530,6 +538,26 @@ verdict = "r2s-right"
 reason = "0x45c60c lies inside runtime.duffzero (FUNC 0x45c5d0, 305 bytes)"
 r2_line = "libr/core/canal.c:552-554"
 """
+
+
+class Notes(unittest.TestCase):
+    """A note row is analysis, dropped on both sides whatever rail or flow lane draws before it (D581)."""
+
+    def test_a_rail_prefixed_note_row_drops_on_both_sides(self):
+        ours = "\u2502   ;-- 7 bytes in no block ; ? 0x00400fb2..\n            0x00400f43      4883ec18       sub rsp, 0x18\n"
+        theirs = "\u2502 ;-- case 0:                ; from 0x00400f75\n\u2502           0x00400f43      4883ec18       sub rsp, 0x18\n"
+        listing = diff_r2.normalise("            0x00400f43      4883ec18       sub rsp, 0x18\n", strip_trailing=True)
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(diff_r2.normalise(ours, strip_trailing=True), listing)
+        self.assertEqual(diff_r2.normalise(theirs, strip_trailing=True), listing)
+        lanes = "\u2502 ; CODE XREF from main @ 0x400e72(x)\n| ;-- case 1:\n"
+        self.assertEqual(diff_r2.normalise(lanes, strip_trailing=True), [])
+
+    def test_an_instruction_with_a_marked_note_keeps_its_instruction(self):
+        line = "            0x00400f5b      e890fcffff     call sym.imp.__isoc99_sscanf ; ! args: the import has no declaration\n"
+        bare = "            0x00400f5b      e890fcffff     call sym.imp.__isoc99_sscanf\n"
+        self.assertEqual(diff_r2.normalise(line, strip_trailing=True), diff_r2.normalise(bare, strip_trailing=True))
+        self.assertEqual(len(diff_r2.normalise(line, strip_trailing=True)), 1)
 
 
 class Missed(unittest.TestCase):

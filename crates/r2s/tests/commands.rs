@@ -131,19 +131,14 @@ fn every_discovered_address_says_why_it_is_believed() {
     assert!(rows.len() >= defined, "{}", run.out);
 }
 
-/// The stripped `rv` binary's `fcn_12ef` writes RAX and XMM0, and its one caller reads XMM0: a
-/// fresh `pdd` reads the body alone, which leaves the result open; after `aa`, the call decides it.
+/// The stripped `rv` binary's `fcn_12ef` writes RAX and XMM0, and its one caller reads XMM0: the
+/// call decides the result in a fresh `pdd` as after `aa`, which prints nothing (D573).
 #[test]
-fn aa_reads_each_functions_callers() {
+fn every_request_reads_each_functions_callers() {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/rv_O0g_stripped");
     let alone = on(fixture.clone(), "pdd @ 0x12ef");
     assert!(alone.ok, "{}", alone.out);
-    assert!(
-        alone.out.contains("return r2sleigh_residual_"),
-        "{}",
-        alone.out
-    );
     let analysed = on(fixture.clone(), "aa; pdd @ 0x12ef");
     assert!(analysed.ok, "{}", analysed.out);
     assert!(
@@ -156,6 +151,7 @@ fn aa_reads_each_functions_callers() {
         "{}",
         analysed.out
     );
+    assert_eq!(alone.out, analysed.out);
     assert_eq!(on(fixture, "aa").out, "");
 }
 
@@ -876,7 +872,7 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
 fn pdd_writes_from_the_sealed_facts() {
     let staged = r2s(&format!("pdd @ {FNV1A32}"));
     for line in [
-        "return r2sleigh_carrier_u32((uint32_t)0x811c9dc5U);",
+        "return (uint32_t)0x811c9dc5U;",
         "r2sleigh_load_u8((void*)rdi_1)",
         "* (uint64_t)0x1000193U",
     ] {
@@ -894,7 +890,15 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
     assert_eq!(
         run.out,
         "asm.bytes = true\n\
+         asm.demangle = true\n\
+         asm.proof = false\n\
+         asm.lines = true\n\
+         asm.lines.width = 10\n\
+         asm.cmt.col = 71\n\
+         asm.rails = false\n\
+         asm.pdd.addr = false\n\
          scr.color = 0\n\
+         scr.utf8 = true\n\
          \x20           0x00401330      endbr64\n\
          false\n\
          r2s: asm.bytes takes true or false, not 'maybe'\n",
@@ -1048,10 +1052,10 @@ mod listing {
         )
     }
 
-    /// The listing radare2 cannot write: no range that is one value the instruction fixes or only the width it wrote, each note ending in its rung.
+    /// The listing radare2 cannot write: no range that is one value the instruction fixes or only the width it wrote, each note ending in its rung under `asm.proof`.
     #[test]
     fn what_the_engine_proved_is_pinned() {
-        let run = super::r2s("s 0x401330; pdf; s 0x401530; pdf");
+        let run = super::r2s("e asm.proof=true; s 0x401330; pdf; s 0x401530; pdf");
         assert!(run.ok, "{}", run.out);
         // A move of a constant fixes its one value, so a range would only restate the operand.
         for restated in ["defines rax = 0x811c9dc5", "defines rdx = 0x8"] {
@@ -1060,7 +1064,7 @@ mod listing {
         // The mask bounds the value by evaluating the and alone, so the instruction's own bound is decoded.
         assert!(
             run.out
-                .contains("and eax, 0x1 ; defines rax in [0x0, 0x1] (decoded)"),
+                .contains("and eax, 0x1                ;   defines rax in [0x0, 0x1] (decoded)"),
             "{}",
             run.out
         );
@@ -1068,6 +1072,7 @@ mod listing {
         let header = run.out.lines().find(|line| line.contains("0x00401348"));
         let header = header.unwrap_or_default();
         for said in [
+            // A closed answer's premises rest on its result fact, which no loop note reads (D592).
             "induction rdi = rdi@entry, +0x1 per trip (certified)",
             "trips rsi@entry (solved)",
         ] {
@@ -1078,7 +1083,7 @@ mod listing {
     /// Each arm of siphash24's tail switch is labelled with the cases the dispatch sends there, as radare2 labels them.
     #[test]
     fn every_case_the_decompiler_renders_is_a_label_in_the_listing() {
-        let listed = super::r2s("s sym.siphash24; pdf");
+        let listed = super::r2s("e asm.proof=true; s sym.siphash24; pdf");
         assert!(listed.ok, "{}", listed.out);
         let rendered = super::r2s("s sym.siphash24; pdd");
         let cases = rendered.out.lines().filter_map(|line| {
@@ -1089,24 +1094,21 @@ mod listing {
         assert_eq!(cases.len(), 8, "{}", rendered.out);
         for case in cases {
             let label = format!(";-- case {case}:");
-            let label = listed
-                .out
-                .lines()
-                .find(|line| line.trim_start().starts_with(&label));
+            let label = listed.out.lines().find(|line| line.contains(&label));
             assert!(
                 label.is_some_and(|line| line.ends_with("; from 0x0040197e")),
                 "case {case}: {}",
                 listed.out
             );
         }
-        let dispatch = "; switch table (8 cases) at 0x402020 (solved)";
+        let dispatch = "; ~ switch table (8 cases) at 0x402020 (solved)";
         assert!(listed.out.contains(dispatch), "{}", listed.out);
     }
 
     /// A line that hands a string to a call says the text beside the address, on the rung the address stands on.
     #[test]
     fn a_line_says_the_text_at_an_address_it_hands_on() {
-        let run = super::r2s("s main; pd 8");
+        let run = super::r2s("e asm.proof=true; s main; pd 8");
         assert!(run.ok, "{}", run.out);
         let format = run
             .out
@@ -1115,8 +1117,9 @@ mod listing {
             .unwrap_or_default();
         // `__printf_chk` is declared to take its format as a pointer, and the number stays put.
         assert!(
-            format
-                .ends_with(r#"mov esi, str.fnv1a32______08x_n ; "fnv1a32     %08x\n" (declared)"#),
+            format.ends_with(
+                r#"mov esi, str.fnv1a32______08x_n ; ^ "fnv1a32     %08x\n" (declared)"#
+            ),
             "{}",
             run.out
         );
@@ -1131,7 +1134,12 @@ mod listing {
         let run = super::r2s("s 0x401330; pdf");
         assert!(run.ok, "{}", run.out);
         assert!(run.out.contains("0x0040135c"), "{}", run.out);
-        assert!(!run.out.contains("0x0040135d"), "{}", run.out);
+        // The padding is a gap row, never a line of its own (D566).
+        assert!(!run.out.contains("0x0040135d      "), "{}", run.out);
+        assert!(
+            run.out
+                .contains(";-- 3 bytes not in this function: 0x0040135d..0x0040135f")
+        );
         assert!(run.out.contains("0x00401360"), "{}", run.out);
     }
 
@@ -1155,9 +1163,9 @@ mod listing {
     #[test]
     fn the_aarch64_function_listing_folds_each_block() {
         let fixture = "tests/fixtures/code_pointer_table_O0";
-        let run = at(fixture, "pdf @ sym._table_dispatch");
+        let run = at(fixture, "e asm.proof=true; pdf @ sym._table_dispatch");
         assert!(run.ok, "{}", run.out);
-        let page = "add x8, x8, 0x0 ; defines x8 = 0x100004000 (folded)";
+        let page = "add x8, x8, 0x0            ;   defines x8 = 0x100004000 (folded)";
         assert!(run.out.contains(page), "{}", run.out);
         // The word is a chained fixup dyld rebases to 0x100000400: what the
         // file holds there is the fixup's encoding, and what the container
@@ -1166,8 +1174,7 @@ mod listing {
             .out
             .lines()
             .find(|line| line.contains("ldr x8, [x8, 0x10]"));
-        let loaded =
-            "ldr x8, [x8, 0x10] ; [0x100004010:8] loaded 0x100000400 sym._table_op_mul (folded)";
+        let loaded = "ldr x8, [x8, 0x10]         ;   [0x100004010:8]=0x100000400 sym._table_op_mul after relocation (folded)";
         assert!(
             load.is_some_and(|line| line.ends_with(loaded)),
             "{}",
@@ -1187,12 +1194,12 @@ mod listing {
     #[test]
     fn a_call_to_a_stub_says_no_text_at_it() {
         let fixture = "tests/fixtures/manual_limits_O0";
-        let listed = at(fixture, "pdf @ sym._main");
+        let listed = at(fixture, "e asm.proof=true; pdf @ sym._main");
         assert!(listed.ok, "{}", listed.out);
         let mut lines = listed.out.lines();
-        let call = lines.find(|line| line.trim_start().starts_with("0x100000e18"));
-        let certified =
-            "bl sym.imp.memcpy ; sym.imp.memcpy(arg1@x0, arg2=0x100004008, arg3=0x50) (certified)";
+        let call = lines.find(|line| line.contains(" 0x100000e18      "));
+        // An import's arity is its name-found declaration's (D579).
+        let certified = "bl sym.imp.memcpy          ; ^ (x0, 0x100004008, 0x50) (declared)";
         assert!(
             call.is_some_and(|line| line.ends_with(certified)),
             "{}",
@@ -1200,7 +1207,9 @@ mod listing {
         );
         // No transfer's target is text, whichever function it goes to.
         for line in listed.out.lines() {
-            let mnemonic = line.split_whitespace().nth(2).unwrap_or_default();
+            // From the address on: the rail and lanes are layout (D565).
+            let listed = line.find("0x").map_or("", |at| &line[at..]);
+            let mnemonic = listed.split_whitespace().nth(2).unwrap_or_default();
             if matches!(mnemonic, "b" | "bl") || mnemonic.starts_with("b.") {
                 assert!(!line.contains(r#"; ""#), "{line}");
             }
@@ -1301,7 +1310,7 @@ mod dispatch_table {
             "cyclomatic-complexity: 2",
             "is-lineal: true",
             "locals: 5",
-            "args: 2",
+            "args: 2 ; ~ at least 2 args",
         ] {
             assert!(
                 run.out.lines().any(|out| out == line),

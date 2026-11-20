@@ -55,10 +55,9 @@ fn a_caller_reading_the_integer_register_decides_the_result() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
-/// Before `aa`, the calls are not read: a fresh open renders the body alone, whose result stays
-/// open, and `aa` decides it in the same session.
+/// Before `aa`, the calls are read all the same: `aa` moves no answer in the session (D573).
 #[test]
-fn before_aa_a_function_reads_no_callers() {
+fn before_aa_a_function_reads_its_callers() {
     let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x08)];
     let mut open = OpenProgram::of(Literal::of_code(READ_AS_INTEGER, &functions));
     let before = open
@@ -67,12 +66,12 @@ fn before_aa_a_function_reads_no_callers() {
         .response
         .output
         .into_text();
-    assert!(before.contains("return r2sleigh_residual_"), "{before}");
-    open.analyse_program().expect("it surveys");
-    assert_eq!(
-        rendered(Literal::of_code(READ_AS_INTEGER, &functions)),
-        fresh(open)
+    assert!(
+        before.contains("a call reads the result (assuming closed-world)"),
+        "{before}"
     );
+    open.analyse_program().expect("it surveys");
+    assert_eq!(before, fresh(open));
 }
 
 /// The same body with no call to it: nothing says which register is its result.
@@ -440,10 +439,8 @@ fn a_value_in_two_registers_is_one_result_where_callers_read_the_second() {
         alone.contains(open),
         "no call read decides the high half: {alone}"
     );
-    // Before `aa`, the calls are not read: the low half alone, and the high half is open.
-    let unread = fresh(OpenProgram::of(program(&both)));
-    assert!(unread.starts_with("r2sleigh_result_u64 f("), "{unread}");
-    assert!(unread.contains(open), "{unread}");
+    // Before `aa`, the calls are read all the same (D573).
+    assert_eq!(fresh(OpenProgram::of(program(&both))), f);
 }
 
 /// `mov rax, rdi; xor edx, edx; ret` writes RDX on every return, and `call f; ret` reads only RAX:
@@ -736,7 +733,10 @@ fn a_call_in_a_switch_arm_reads_the_result_as_any_call_does() {
         &[("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x52)],
     );
     let text = rendered(program);
-    assert!(text.starts_with("r2sleigh_word_u32 f("), "{text}");
+    // Code at 0x1061 no body holds may call `f` too: no read bounds the width (D610).
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
+    assert!(text.contains("a call reads the result"), "{text}");
+    assert!(text.contains("unproven (WidthUnbounded)"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
@@ -777,6 +777,7 @@ fn a_result_another_way_in_may_read_stays_a_residual() {
             table: None,
             dynamic: Some(1),
             directory: None,
+            minidebug: None,
         },
         ..r2abi::statement::Symbol::default()
     });
@@ -846,10 +847,9 @@ fn a_conditional_tail_jump_returns_nothing_from_before_the_branch() {
     assert!(f.contains("r2sleigh refused f"), "{f}");
 }
 
-/// Cold, `f` of `ONLY_XMM0_WRITTEN` is unproven, and its calls take its integer carrier alone (D62):
-/// no site decides the callee's result, so the caller's read of XMM0 is a residual.
+/// Cold, the caller's read of XMM0 decides `f`'s result as under `aa` (D573): the call assigns it.
 #[test]
-fn a_cold_caller_reads_no_float_result_the_callee_does_not_state() {
+fn a_cold_caller_reads_the_float_result_its_read_decides() {
     let program = Literal::of_code(
         ONLY_XMM0_WRITTEN,
         &[("f", BASE, 5), ("caller", BASE + 0x10, 0x0a)],
@@ -860,8 +860,8 @@ fn a_cold_caller_reads_no_float_result_the_callee_does_not_state() {
         .response
         .output
         .into_text();
-    assert!(!text.contains("double f("), "{text}");
-    assert!(text.contains("r2sleigh_residual"), "{text}");
+    assert!(text.contains("double f("), "{text}");
+    assert!(text.contains("r2sleigh_float_to_bits_64(f("), "{text}");
 }
 
 /// AArch64 `f`: `ldr d0, [x0]; ret`, which hands back x0 (its argument) untouched and writes d0;
@@ -1126,4 +1126,109 @@ fn a_forwarder_returning_a_value_beside_its_tail_keeps_its_result_type() {
     let result = |line: &str| line.trim().split_once(" h(").expect("a name").0.to_owned();
     assert_eq!(result(header), result(extern_), "{caller}\n{h}");
     assert!(header.starts_with("r2sleigh_result_u"), "{h}");
+}
+
+/// hashes -O0 `pearson`'s shape: `f` is `movzx eax, byte [rdi]; ret`; the caller at 0x1010 reads AL
+/// alone, and, from 0x1020, a second caller may read EAX (`mov [rsi], eax`).
+const READ_AS_BYTE: &[u8] = &[
+    0x0f, 0xb6, 0x07, // 1000 movzx eax, byte [rdi]
+    0xc3, // 1003 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1004 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x88, 0x06, // 1015 mov [rsi], al
+    0xc3, // 1017 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0x89, 0x06, // 1025 mov [rsi], eax
+    0xc3, // 1027 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1028 padding
+];
+
+/// `READ_AS_BYTE`'s first caller alone, which reads AL: hashes -O0 `pearson` and its `main`.
+const READ_AS_BYTE_ONCE: &[u8] = &[
+    0x0f, 0xb6, 0x07, // 1000 movzx eax, byte [rdi]
+    0xc3, // 1003 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1004 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x88, 0x06, // 1015 mov [rsi], al
+    0xc3, // 1017 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1018 padding
+];
+
+/// `f`'s header line, rendered after `aa`.
+fn header_of_f(program: Literal) -> String {
+    let text = rendered(program);
+    let header = text
+        .lines()
+        .find(|line| line.contains(" f("))
+        .map(str::to_owned);
+    header.unwrap_or(text)
+}
+
+/// D610: every way in reads AL of a body that writes EAX. A `uint8_t` and an `int` truncated by its
+/// callers compile alike, so the width lies between them: unproven, never the body's 32 bits.
+#[test]
+fn a_result_read_narrower_than_its_body_writes_it_is_unproven() {
+    let functions = [("f", BASE, 0x04), ("caller", BASE + 0x10, 0x08)];
+    let text = rendered(Literal::of_code(READ_AS_BYTE_ONCE, &functions));
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
+    assert!(text.contains("unproven (WidthBetween)"), "{text}");
+}
+
+/// D610: one way in reads all of EAX, which the body writes: every read and the body agree.
+#[test]
+fn the_widest_read_of_every_way_in_bounds_the_result() {
+    let functions = [
+        ("f", BASE, 0x04),
+        ("caller", BASE + 0x10, 0x08),
+        ("other", BASE + 0x20, 0x08),
+    ];
+    let header = header_of_f(Literal::of_code(READ_AS_BYTE, &functions));
+    assert!(header.starts_with("r2sleigh_word_u32 f("), "{header}");
+}
+
+/// The byte read, then `lea rax, [rip + f]; mov [rdx], rax`: a way in other than a call may read more.
+const READ_AS_BYTE_AND_TAKEN: &[u8] = &[
+    0x0f, 0xb6, 0x07, // 1000 movzx eax, byte [rdi]
+    0xc3, // 1003 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1004 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x88, 0x06, // 1015 mov [rsi], al
+    0x48, 0x8d, 0x05, 0xe2, 0xff, 0xff, 0xff, // 1017 lea rax, [rip - 0x1e]
+    0x48, 0x89, 0x02, // 101e mov [rdx], rax
+    0xc3, // 1021 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1022 padding
+];
+
+/// D610: where a way in is not a call the program shows, no read bounds the width: unproven.
+#[test]
+fn a_result_whose_ways_in_are_not_all_known_keeps_its_width_unproven() {
+    let functions = [("f", BASE, 0x04), ("caller", BASE + 0x10, 0x12)];
+    let text = rendered(Literal::of_code(READ_AS_BYTE_AND_TAKEN, &functions));
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
+    assert!(text.contains("unproven (WidthUnbounded)"), "{text}");
+}
+
+/// `f` is `lea rax, [rdi + 8]; ret`, and its one caller stores all of RAX.
+const READ_AS_WORD: &[u8] = &[
+    0x48, 0x8d, 0x47, 0x08, // 1000 lea rax, [rdi + 8]
+    0xc3, // 1004 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1005 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x48, 0x89, 0x06, // 1015 mov [rsi], rax
+    0xc3, // 1018 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1019 padding
+];
+
+/// D610: a pointer-wide result no caller dereferences may be a pointer or an integer: unproven.
+#[test]
+fn a_pointer_wide_result_no_evidence_types_stays_unproven() {
+    let functions = [("f", BASE, 0x05), ("caller", BASE + 0x10, 0x09)];
+    let text = rendered(Literal::of_code(READ_AS_WORD, &functions));
+    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(text.contains("unproven (PointerWide)"), "{text}");
 }

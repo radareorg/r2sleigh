@@ -1,8 +1,10 @@
 //! A load at a literal address of bytes the capture holds read-only reads them on every run, so it
 //! becomes a copy of the constant (ROADMAP P5): one pass over the operations, one search per load.
 
+use std::collections::BTreeMap;
+
 use crate::function::{EditPlan, SSAFunction};
-use crate::machine_context::SourceMachineContext;
+use crate::machine_context::{MachineMemoryEndianness, SourceMachineContext};
 use crate::op::SSAOp;
 use crate::value_table::Minting;
 use r2il::SpaceId;
@@ -41,4 +43,32 @@ pub(crate) fn fold_loads(func: &mut SSAFunction, context: &SourceMachineContext)
         func.apply_edits(plan);
     }
     folded
+}
+
+/// What a `size`-byte load at `address` reads of `windows`, where one holds every byte and they fit
+/// a constant, in `endian` order: one search. The seal's fold and the handed reader read it (D590).
+pub(crate) fn bits_in(
+    windows: &BTreeMap<u64, Box<[u8]>>,
+    address: u64,
+    size: u32,
+    endian: MachineMemoryEndianness,
+) -> Option<u64> {
+    let (start, bytes) = windows.range(..=address).next_back()?;
+    let from = usize::try_from(address - start).ok()?;
+    let window = bytes.get(from..from.checked_add(usize::try_from(size).ok()?)?)?;
+    if window.len() > 8 {
+        return None;
+    }
+    let ordered = window.iter().copied();
+    match endian {
+        MachineMemoryEndianness::Little => Some(
+            ordered
+                .rev()
+                .fold(0u64, |bits, byte| (bits << 8) | u64::from(byte)),
+        ),
+        MachineMemoryEndianness::Big => {
+            Some(ordered.fold(0u64, |bits, byte| (bits << 8) | u64::from(byte)))
+        }
+        _ => None,
+    }
 }

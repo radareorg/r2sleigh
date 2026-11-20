@@ -134,11 +134,13 @@ pub fn render(
             ),
             input.inferred_aggregates().len(),
             &tags.conflicting(),
+            &input.unproven_parameters(),
         ),
         (input.return_type())
             .filter(|fact| fact.is_unproven())
             .map(r2types::ReturnTypeFact::unproven_cause),
         input.arity_floor(),
+        input.artifact().landing_pads(),
     );
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
@@ -268,9 +270,33 @@ fn structured(
     let body = stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
     });
-    stage("noreturn guards", body, marks, &certified, |body, marks| {
+    let body = stage("noreturn guards", body, marks, &certified, |body, marks| {
         crate::structure::guard::guard(body, evidence, marks) != 0
+    });
+    stage("equality chains", body, marks, &certified, |body, marks| {
+        let block_of = |id| marks.block_of(id);
+        crate::structure::chain::switch(body, &|block| tested(input, block), &block_of, 0) != 0
     })
+}
+
+/// The value a test block compares for equality and the constant its other operand is proven to
+/// be, as r2types states the branch (D474); a block whose fact says less tests nothing.
+fn tested(input: &RenderInput<'_>, block: u64) -> Option<(r2ssa::ValueId, u64)> {
+    let fact = input.control()?.branch_for_block(block)?;
+    let comparison = fact.render_comparison.or(fact.comparison)?;
+    if !matches!(
+        comparison.kind,
+        r2ssa::CompareKind::Equal | r2ssa::CompareKind::NotEqual
+    ) {
+        return None;
+    }
+    let artifact = input.artifact();
+    let (lhs, rhs) = (comparison.lhs, comparison.rhs);
+    match (artifact.proven_constant(lhs), artifact.proven_constant(rhs)) {
+        (None, Some(constant)) => Some((lhs, constant)),
+        (Some(constant), None) => Some((rhs, constant)),
+        _ => None,
+    }
 }
 
 /// SD's §3 certificate over a body.
@@ -394,7 +420,7 @@ fn drop_unmentioned_locals(c: &mut CFunction) {
 /// What became of each obligation: D2's account, or every one a gap where D2 did not run.
 fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) -> ObligationLedger {
     let mut ledger = ObligationLedger::open(input.obligations(), input.graph())
-        .with_premises(input.function().premises().clone())
+        .with_premises(input.function().premises_with_result())
         .with_result_premises(
             (input.artifact().machine_context().function_interface())
                 .map_or(&[], r2source::SourceFunctionInterface::closed_premises),

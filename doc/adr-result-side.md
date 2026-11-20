@@ -851,9 +851,53 @@ The open part, built 2026-11-16 (rd10-load-base): `resolved_alone` asks first to
 - `forwarded_carriers`: `float_unwritten` is `written_at_returns` over the float live-out with the tail blocks kept as exits. `integer_undefined` holds only where `direct_returns_beside_void_tails` answers `(Void, None)`; elsewhere the integer lane is stated open, no negative fact: the tails leave it undefined, a direct return leaves data, and undefined joined with data is data (doc/adr-scratch-result.md, "As built"). grep O2-noinline `fcn_9670` is that case: `0x96a2` returns `lseek`'s RAX. The ruling's other reading, no carriers there, keeps `0x9d30`'s wrong extern.
 - Gate: DecBench moves the 50 functions round 12 listed, 4 of them in C (grep `0x9670`, `0x9d30`; xmlwf `0x3a30`; bzip2 `0xee90`), each extern equal to its callee header's result type.
 
+## D610 as built (2026-11-18, rd15-d610)
+
+A closed-world read proves a result exists. Its type needs the width pinned and, at a pointer's width, the kind.
+
+- Fact. A caller compiled against the declaration reads at most the declared width before it extends, and the body writes at least it, so the declared width lies between the widest read and the width the body writes. It is pinned where they agree, and only where every read is known.
+- Owners. r2ssa `site_boundary`: `LaneFate::Read { bytes, returned, lost }` states the bytes another path hands back to the caller's callers or loses. r2engine `fates.rs`: `every_read` walks the callers a lane is returned to, read lanes included (`Direct.read_returned`), and fails on an `unknown`, `cycle` or `unbounded` lane or on a function whose reads are not every read (`reads_known`: `only_called`, or every take into a cited slot by `DeclaredSlot`); `bounded` states `SourceReadLanes::Integer { widest }`. r2types `decided_from` (`read_width`): decided at the body's width where the widest read equals it and it is below a pointer's; otherwise `Unproven` with `WidthUnbounded`, `WidthBetween` or `PointerWide`, carried through `r2sleigh_carrier_uN`.
+- Refuted: deciding at the widest read alone. gclib `used_c`, statics `g_1` and `s_8` have callers that truncate (`(int)used_c(v, 2)`, source `long`); source-gold read 3 new silent widths and 3 `bool` results as bytes.
+- Cost: one walk per decided integer read, each function pushed only when its mask grows, at most 128 times: `O((V + E) x 128)` over the returners it reaches, typically itself alone. A session deciding every member of a chain of k forwarders walks `O(k^2)`; a held per-lane answer over the forwarder components would make it `O(V + E)`, and no measured binary needs it (census `stats` held exactly; contabo +0.093% at most). `Escapes` and `DeclaredSlot` are held program queries.
+- Open: the two parameter lines of D610 (`combined` p0, clones `main` p1) are stop facts. A read is an instruction's input width, so `mov r11, rax; shl r11, 32` reads 8 bytes of a 32-bit result (hashes O2 `djb2`, `WidthBetween`): demanded bytes would decide it.
+
+## D610 parameters as built (2026-11-19)
+
+A parameter handed whole to callees that load or store through it is an address; the pointee is what every access through it reads.
+
+- Fact. r2ssa's callee summary states, per argument, the width of each load and store whose address is the argument plus an offset (`AccessWidths`, a bit per width), and opens the argument where an access it does not state may reach it: handed to a call, exposed through the frame, stored, accessed at no argument region, or read by an operation nothing describes (`argument_access_widths`).
+- Owners. r2engine records each read callee's widths beside its reach (`Callees`, `CalleeEvidence::dereferenced`, `MachineContext::callee_dereferenced`). r2types `handed_dereferenced` joins, for each parameter entry value, the widths of every callee it is handed whole at the site's integer position (D365's numbering), and opens it where a call states no arguments, a callee has no read body, a stack or indirect slot takes it, or the body's own accesses at no argument region reach it (`own_unstated_access_formals`). The row: one stated width is `r2sleigh_word_uN *` (`Basis::Dereferenced`, sign unstated); any other join is `r2sleigh_unproven_uN` with `PointerRefusal::PointeeWidths` on the proof line. A declared slot (D262) and the body's own certified access still decide first.
+- Grader. `scripts/differential_truth.py` reads `r2sleigh_unproven_uN` as it reads D201's result carrier: a typedef that claims no C type. The baseline is unchanged.
+- Source-gold (gcc 13): hashes `combined` p0 is unproven (four callees, `murmur3_32` reads 4 and 1 bytes), the step exits 0 against the baseline, 13 silent; shapes 31 to 30 (clones `use_part` p0 is `r2sleigh_word_u64 *`, source `int64_t *`, the sign unstated).
+- Cost: `O(arguments)` per body over facts the summary already walks; the body's own pass runs only where a parameter is handed to an accessing callee.
+- Refuted for results: `tail`'s one caller reads 8 bytes at offset 8, which states nothing of the pointee at offset 0 (source `struct node *`); a result a caller dereferences stays `Unproven` until accesses at offset 0 state a pointee.
+- Open: clones `main` p1 (`r2sleigh_word_u64 *` for `char **`): the pointee is pointer-wide and handed to a reading callee, so its own kind is the same question one level down.
+
 ## Open questions
 
 1. The register effect is computed on ask or deposited by `SiteFates` ("S31b as built", ruled). pumasim `0x3b6b20` does not meet the note's gate (-0.07 G against -0.08 G, run spread 0.014 G); the next lever is D354.
 2. The loader-write refusal (`Unknown` writes) costs no census or DecBench binary once r2image states `Reserved` and `Copy` (S31a as built); MIPS's whole reserved table and undecoded Mach-O chain formats still refuse.
 3. A cold `pdd` prepares a function twice where an owner's statement moves its result (D226). The step is S36's f57e1cb57 ("The cold step, bisected"). No output-identical one-preparation design was found: the raw walk has no accept check, and SSA reuse saves at most 1.3 G of the 4.75 G. Open for the maintainer: keep the bound of two and regrade D226 against #366 (24.46 G), or fund a design that states a callee's float lane without its resolved body. Owner `resolved.rs`.
 4. Row numbers come from ROADMAP's "Reserved rows" table. This ADR holds D310 to D313.
+
+## D589 as measured (round 15): the relifts' price, and what a projection must state
+
+A probe kept the walk `RegisterEffects` lifted until the popped `SiteFates`
+read it, and freed it there (never pushed). Only the counted relifts went:
+`walked.computed` fell by 497, 1,794 and 408 against 495, 1,792 and 407
+relifts (the rest are walks `Walked`'s newest entry then reused). Contabo
+`instructions:u`, median of 3: cold 0pack `pdd @ 0x62ecf0` -2.135%, cold
+pumasim `pdd @ 0x23fdf0` -3.721%, bash `pdf @ 0x1e1d0` -2.066%, outputs
+byte-identical. That is the most a lane-flow projection can save.
+
+The ruled projection keeps, per block, the events the site-fate pass reads:
+result-lane reads and overwrites, call sites, returns. The deep read reads
+more. `Reading::effects` folds each printf-format call's format register
+with `BlockOrigins` over every operation of its block (D218), and where that
+leaves the format unknown it asks `ConventionSeal`, which lifts the body
+again and seals it; `count_of` reads the last write of the count register
+the deep effect names before each counting call. A `COPY` into the format
+register is no result-lane event, so the projection drops it. A projection
+that serves the deep read states, per call site and at the lift, the folded
+format address and the count register's last write. That widens the ruled
+event set, so the build stopped there (ROADMAP D589).

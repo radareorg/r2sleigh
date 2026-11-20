@@ -12,7 +12,7 @@ type Stated = (
     bool,
     Binding,
     Visibility,
-    usize,
+    u32,
 );
 
 fn dynamic(bytes: &[u8]) -> Vec<Stated> {

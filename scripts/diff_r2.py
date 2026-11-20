@@ -149,8 +149,9 @@ FENCE = "aoj-fence"
 
 HEX = re.compile(r"0x[0-9a-fA-F]+")
 NOISE = re.compile(r"^\s*(WARN|ERROR|INFO):")
-# radare2 annotates the listing from analysis the engine does not have yet.
-ANNOTATION = re.compile(r"^\s*;")
+# radare2 annotates the listing from analysis the engine does not have yet; a note row may follow
+# the rails and flow lanes either tool draws (doc/adr-display.md, D581).
+ANNOTATION = re.compile(r"^[\s│┌└├┐┘─<>|,`+]*;")
 # A trailing annotation on a disassembly line. Only applied to the listing,
 # where a semicolon never belongs to the instruction itself.
 TRAILING = re.compile(r"\s+;.*$")
@@ -647,10 +648,18 @@ RESTORE = "e asm.arch=`i~^arch[1]`;e asm.bits=`i~^bits[1]`"
 
 def radare2_argv(r2, script, binary):
     """radare2 answering `script`, loading `binary` as an x86-64 host does; with no script, a
-    session that reads its commands on stdin, RESTORE first."""
+    session that reads its commands on stdin, RESTORE first. Names stay flag spellings
+    (demangling off), so every name count compares flags (ROADMAP D574)."""
     script = [] if script is None else ["-c", RESTORE + ";" + script]
     return [str(r2), "-N", "-q", "-e", "asm.arch=x86", "-e", "asm.bits=64", "-e", "scr.color=0",
-            *script, str(binary)]
+            "-e", "asm.demangle=false", "-e", "bin.demangle=false", *script, str(binary)]
+
+
+def r2s_argv(r2s, script, binary):
+    """r2s answering `script` on `binary`, its names flag spellings as radare2's are; with no
+    script, a session that reads its commands on stdin."""
+    script = [] if script is None else ["-c", script]
+    return [str(r2s), "-e", "asm.demangle=false", "-q", *script, str(binary)]
 
 
 ANALYSIS_MODES = {mode for _, mode in ANALYSIS}
@@ -661,7 +670,7 @@ def answers(binary, commands, r2, r2s, timeout, corpus=None):
     analysis verbs share one session per tool, on a graded corpus and architecture only."""
     # A refusal to open is a capability gap, not a disagreement about a
     # binary both tools read, so it is counted and reported separately.
-    opened, opened_error, opened_code = run([str(r2s), "-q", "-c", "i", str(binary)], timeout)
+    opened, opened_error, opened_code = run(r2s_argv(r2s, "i", binary), timeout)
     if opened_code != 0:
         reason = opened_error.strip().splitlines()[-1] if opened_error.strip() else "failed"
         return reason.replace("r2s: ", ""), {}
@@ -685,7 +694,7 @@ def answers(binary, commands, r2, r2s, timeout, corpus=None):
             continue
         script = "s entry0;{}".format(command)
         right, _, right_code = run(radare2_argv(r2, script, binary), timeout)
-        left, _, left_code = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
+        left, _, left_code = run(r2s_argv(r2s, script, binary), timeout)
         said[command] = None if right_code is None or left_code is None else (left, right)
     return None, said
 
@@ -693,7 +702,7 @@ def answers(binary, commands, r2, r2s, timeout, corpus=None):
 def sampled_instructions(binary, r2, r2s, timeout):
     """(r2s's sample, radare2's rows for the same addresses) as JSON; (None, None) where r2s lists
     no function to sample; None on a timeout."""
-    listed, _, code = run([str(r2s), "-q", "-c", "i~^arch;ie;is", str(binary)], timeout)
+    listed, _, code = run(r2s_argv(r2s, "i~^arch;ie;is", binary), timeout)
     if code is None:
         return None
     entries = sampled_entries(listed.splitlines())
@@ -701,7 +710,7 @@ def sampled_instructions(binary, r2, r2s, timeout):
         return None, None
     arch = next((line.split()[1] for line in listed.splitlines() if line.split()[:1] == ["arch"]), "")
     script = ";".join("aoj {} @ {:#x}".format(SAMPLED_INSTRUCTIONS, entry) for entry in entries)
-    left, _, code = run([str(r2s), "-q", "-c", script, str(binary)], timeout)
+    left, _, code = run(r2s_argv(r2s, script, binary), timeout)
     if code is None:
         return None
     ours = [row for line in left.splitlines() if line.startswith("[") for row in json.loads(line)]
@@ -1225,7 +1234,7 @@ class Session:
 
 def analysed(binary, r2, r2s, timeout):
     """Both sessions' fenced answers after one `aa` each, or None, and each session's end."""
-    ours = Session([str(r2s), "-q", str(binary)], timeout)
+    ours = Session(r2s_argv(r2s, None, binary), timeout)
     theirs = Session(radare2_argv(r2, None, binary), timeout)
     ours.send([fence("ie"), "ie", fence("is"), "is", fence("iS"), "iS", "aa", fence("afl"), "afl", fence("aflj"), "aflj"])
     theirs.send([RESTORE, "aa", fence("afl"), "afl"])

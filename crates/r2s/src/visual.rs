@@ -18,7 +18,11 @@ pub(crate) fn open(session: &mut Session) -> Result<String, String> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Err("visual mode needs a terminal on stdin and stdout".to_owned());
     }
-    r2s_tui::run(&mut Visual { session }).map_err(|error| format!("visual mode: {error}"))?;
+    // `z` starts at the reader's notes and leaves `asm.proof` as the session had it.
+    let proof = std::mem::replace(&mut session.proof, false);
+    let ran = r2s_tui::run(&mut Visual { session });
+    session.proof = proof;
+    ran.map_err(|error| format!("visual mode: {error}"))?;
     Ok(String::new())
 }
 
@@ -52,6 +56,8 @@ fn graph_of(session: &mut Session, entry: u64) -> Result<Graph, String> {
                     Edge::NotTaken => EdgeKind::NotTaken,
                     Edge::Case => EdgeKind::Case,
                     Edge::Default => EdgeKind::Default,
+                    // The visual graph draws normal flow; an unwind edge waits on a style (D570).
+                    Edge::Unwind => continue,
                 };
                 edges.push(GraphEdge { from, to, kind });
             }
@@ -133,8 +139,8 @@ impl Visual<'_> {
     /// A line's roles where `scr.color` paints, and none where it does not.
     fn painted(&self, roles: r2s_tui::theme::Roles) -> r2s_tui::theme::Roles {
         match self.session.color {
-            true => roles,
-            false => r2s_tui::theme::Roles::default(),
+            0 => r2s_tui::theme::Roles::default(),
+            _ => roles,
         }
     }
 }
@@ -210,10 +216,7 @@ impl Host for Visual<'_> {
         // that body rather than one starting where the cursor is.
         let entry = containing_entry(self.session, address)?;
         let rendering = self.session.program.rendered(entry)?;
-        let name = self.session.program.names().of(entry).map_or_else(
-            || format!("fcn.{entry:08x}"),
-            r2engine::names::Name::spelled,
-        );
+        let name = self.session.program.names().function(entry, false);
         let answer = rendering.answer(&name, entry);
         // What each part of the unit is, as the renderer wrote it, cut at its
         // lines: the code is the emission's unit.
@@ -412,7 +415,7 @@ mod tests {
     #[test]
     fn scr_color_off_paints_no_role_in_the_visual_mode() {
         let mut session = fixture();
-        for color in [true, false] {
+        for color in [1, 0] {
             session.color = color;
             let mut host = Visual {
                 session: &mut session,
@@ -421,7 +424,7 @@ mod tests {
             let decompiled = host.decompile(0x120a).expect("it decompiles");
             let painted = listed.iter().any(|line| !line.roles.is_empty())
                 || decompiled.iter().any(|line| !line.roles.is_empty());
-            assert_eq!(painted, color, "scr.color={color}");
+            assert_eq!(painted, color != 0, "scr.color={color}");
         }
     }
 
@@ -470,5 +473,58 @@ mod tests {
             functions.iter().any(|entry| entry.address == 0x1549),
             "{functions:?}"
         );
+    }
+
+    /// `z` cycles the text after each `;`: the reader's words, then the proof's basis beside them,
+    /// then none; the instruction text before the `;` never moves (D582).
+    fn cycle_the_note_layer(mut driver: Driver) {
+        driver
+            .handle(Msg::Resize(120, 30))
+            .expect("the engine is there");
+        driver.settle().expect("the engine answers");
+        let row = |driver: &Driver| {
+            let shown = screen(driver);
+            let row = shown.lines().find(|line| line.contains("0x0040106c"));
+            row.map(str::to_owned).unwrap_or_else(|| panic!("{shown}"))
+        };
+        let reader = row(&driver);
+        assert!(
+            reader.contains(" ; ") && !reader.contains("(declared)"),
+            "{reader}"
+        );
+        press(&mut driver, KeyCode::Char('z'));
+        let proof = row(&driver);
+        assert!(proof.contains("(declared)"), "{proof}");
+        press(&mut driver, KeyCode::Char('z'));
+        let none = row(&driver);
+        assert!(!none.contains(" ; "), "{none}");
+        let instruction = |row: &str| {
+            let text = row.split(" ; ").next().unwrap_or_default();
+            text.trim_end_matches([' ', '│']).to_owned()
+        };
+        assert_eq!(instruction(&none), instruction(&reader));
+        press(&mut driver, KeyCode::Char('z'));
+        assert_eq!(row(&driver), reader);
+    }
+
+    #[test]
+    fn z_cycles_the_note_layer_reader_proof_none() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/coverage/pinned/hashes_gcc_x64_O2"
+        );
+        let mut session = Session::open(path).expect("the fixture opens");
+        session.addr = 0x401050;
+        let mut host = Visual {
+            session: &mut session,
+        };
+        let (driver, engine) = r2s_tui::connect();
+        std::thread::scope(|scope| {
+            let ui = scope.spawn(move || cycle_the_note_layer(driver));
+            engine.serve(&mut host);
+            if let Err(panic) = ui.join() {
+                std::panic::resume_unwind(panic);
+            }
+        });
     }
 }

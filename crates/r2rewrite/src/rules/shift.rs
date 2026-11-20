@@ -1,6 +1,9 @@
 //! Group F: shifts by literal counts.
 
-use r2ssa::{MachineBitVector, MachineOvershiftBehavior, MachineShiftKind};
+use r2ssa::{
+    MachineArithmeticOp, MachineBitVector, MachineBitwiseOp, MachineOvershiftBehavior,
+    MachineShiftKind, MachineSignedness, MachineType,
+};
 
 use super::literal::{lit, unsigned};
 use super::{DEFAULT_PROOF_WIDTHS, Measure, Rule, RuleGroup, literal_like, literal_of};
@@ -166,4 +169,146 @@ shift_rule!(
     "shift.lshr_overwidth",
     |arena, id| overwidth(arena, id, MachineShiftKind::LogicalRight),
     &[|a, w, l| overwidth_template(MachineShiftKind::LogicalRight)(a, w, l)]
+);
+
+/// `x << k` with a literal `0 < k < w`, or `x * 2^k` as the affine form spells it inside a sum.
+fn shifted_left(arena: &TermArena, id: TermId, w: u32, sum: bool) -> Option<(TermId, u64)> {
+    let k = match arena.term(id).kind {
+        TermKind::Shift {
+            kind: MachineShiftKind::Left,
+            value,
+            count,
+            ..
+        } => (value, literal_of(arena, count)?),
+        TermKind::Arithmetic {
+            op: MachineArithmeticOp::Multiply,
+            left,
+            right,
+        } if sum => {
+            let factor = literal_of(arena, right)?;
+            (
+                left,
+                u64::from(factor.is_power_of_two().then(|| factor.trailing_zeros())?),
+            )
+        }
+        _ => return None,
+    };
+    (0 < k.1 && k.1 < u64::from(w)).then_some(k)
+}
+
+/// `x` and `k` where `high` is `x << k` and `low` is `x >> (w - k)` over one value of `ty`; the
+/// two reads are two leaves, so the value is matched by what it reads, and the left read is kept.
+fn complementary(
+    arena: &TermArena,
+    (high, low): (TermId, TermId),
+    ty: MachineType,
+    sum: bool,
+) -> Option<(TermId, u64)> {
+    let w = ty.width_bits();
+    let (x, k) = shifted_left(arena, high, w, sum)?;
+    let TermKind::Shift {
+        kind: MachineShiftKind::LogicalRight,
+        value: y,
+        count,
+        ..
+    } = arena.term(low).kind
+    else {
+        return None;
+    };
+    let same_type = [x, y, high, low].iter().all(|id| arena.term(*id).ty == ty);
+    (same_type && literal_of(arena, count)? == u64::from(w) - k && arena.same_value(x, y))
+        .then_some((x, k))
+}
+
+/// The two shifted halves share no set bit, so `|`, `^` and `+` join them alike.
+fn rotate(arena: &mut TermArena, id: TermId) -> Option<TermId> {
+    let term = arena.term(id);
+    let (left, right, sum) = match term.kind {
+        TermKind::Bitwise {
+            op: MachineBitwiseOp::Or | MachineBitwiseOp::Xor,
+            left,
+            right,
+        } => (left, right, false),
+        TermKind::Arithmetic {
+            op: MachineArithmeticOp::Add,
+            left,
+            right,
+        } => (left, right, true),
+        _ => return None,
+    };
+    let MachineType::Integer {
+        width_bits: 8 | 16 | 32 | 64,
+        signedness: MachineSignedness::Unsigned,
+    } = term.ty
+    else {
+        return None;
+    };
+    let (value, k) = complementary(arena, (left, right), term.ty, sum)
+        .or_else(|| complementary(arena, (right, left), term.ty, sum))?;
+    let count = literal_like(arena, id, k);
+    Some(arena.intern(term.ty, TermKind::Rotate { value, count }))
+}
+
+fn rotate_template(
+    join: fn(&mut TermArena, u32, TermId, TermId) -> TermId,
+    k: fn(u32) -> u64,
+    swapped: bool,
+) -> impl Fn(&mut TermArena, u32, &[TermId]) -> TermId {
+    move |arena, w, l| {
+        let (high, low) = (lit(arena, 8, k(w)), lit(arena, 8, u64::from(w) - k(w)));
+        let high = shift(arena, MachineShiftKind::Left, l[0], high);
+        let low = shift(arena, MachineShiftKind::LogicalRight, l[0], low);
+        match swapped {
+            true => join(arena, w, low, high),
+            false => join(arena, w, high, low),
+        }
+    }
+}
+
+fn bitwise(op: MachineBitwiseOp) -> impl Fn(&mut TermArena, u32, TermId, TermId) -> TermId {
+    move |arena, w, left, right| arena.intern(unsigned(w), TermKind::Bitwise { op, left, right })
+}
+
+fn add(arena: &mut TermArena, w: u32, left: TermId, right: TermId) -> TermId {
+    let op = MachineArithmeticOp::Add;
+    arena.intern(unsigned(w), TermKind::Arithmetic { op, left, right })
+}
+
+shift_rule!(
+    ROTATE,
+    "shift.rotate",
+    rotate,
+    &[
+        |a, w, l| rotate_template(
+            |a, w, x, y| bitwise(MachineBitwiseOp::Or)(a, w, x, y),
+            |_| 3,
+            false
+        )(a, w, l),
+        |a, w, l| rotate_template(
+            |a, w, x, y| bitwise(MachineBitwiseOp::Or)(a, w, x, y),
+            |w| u64::from(w) - 1,
+            true
+        )(a, w, l),
+        |a, w, l| rotate_template(
+            |a, w, x, y| bitwise(MachineBitwiseOp::Xor)(a, w, x, y),
+            |_| 1,
+            true
+        )(a, w, l),
+        |a, w, l| rotate_template(add, |w| u64::from(w / 2), false)(a, w, l),
+        // The affine form spells `x << 5` inside a sum as `x * 32`.
+        |arena, w, l| {
+            let factor = lit(arena, w, 32);
+            let count = lit(arena, 8, u64::from(w) - 5);
+            let high = arena.intern(
+                unsigned(w),
+                TermKind::Arithmetic {
+                    op: MachineArithmeticOp::Multiply,
+                    left: l[0],
+                    right: factor,
+                },
+            );
+            let low = shift(arena, MachineShiftKind::LogicalRight, l[0], count);
+            add(arena, w, high, low)
+        },
+    ]
 );

@@ -1,10 +1,10 @@
 //! One resolved body per function, as queries (doc/adr-resolved-bodies.md, P6 and P7).
 //!
-//! A function whose result a callee's statement could prove is resolved again against that callee
-//! resolved, bottom-up over the components of those demands; under `aa`, so is one whose arity
-//! a callee's could make exact; a cycle's arities and results are their least fixpoint.
+//! A function whose result or arity a callee's statement could prove or make exact is resolved
+//! again against that callee resolved, bottom-up over the components of those owner edges; a
+//! cycle's arities and results are their least fixpoint.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use r2source::{
@@ -12,9 +12,9 @@ use r2source::{
     SourceResultSeed, SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall,
 };
 
-use super::analysis::{CalleeReads, Shared, built_read, callee_built, callee_read};
+use super::analysis::{CalleeReads, Shared, callee_read};
 use super::{ProgramInputs, Source, View};
-use crate::native::{Built, CalleeRead, Stated, Unreadable};
+use crate::native::{CalleeRead, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
 use r2ssa::call_reads::StackWrites;
 use r2ssa::dense::Reached;
@@ -22,18 +22,8 @@ use r2ssa::dense::Reached;
 /// A function by its entry and whether it is Thumb.
 type Node = (u64, bool);
 
-/// Which owners a resolution waits on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum Demand {
-    /// The callees whose stated result could prove a function's: every request.
-    Result,
-    /// Those, and the callees whose stated arity could make a floor exact: the closure over them
-    /// is paid only once `aa` surveyed the program (doc/adr-resolved-bodies.md, "Arity").
-    Arity,
-}
-
-/// The strongly connected component a function is in, over the edges to the owners its demand
-/// names. SM's summaries reuse it (ROADMAP P7, SM).
+/// The strongly connected component a function is in, over the edges to its owners. SM's
+/// summaries reuse it (ROADMAP P7, SM).
 pub(super) struct Component;
 
 /// A component's members in address order, shared by every member's answer: O(k) for k members.
@@ -43,16 +33,16 @@ pub(super) struct Members {
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Component {
-    type Key = (Node, Demand);
+    type Key = Node;
     type Value = Members;
     const NAME: &'static str = "component";
     const RETENTION: Retention = Retention::Held;
 
     /// r2ssa's one condensation of what `root` reaches over owner edges, O(V + E); every
     /// component it closes is deposited.
-    fn compute(db: &Db<ProgramInputs<S>>, &(root, demand): &(Node, Demand)) -> Members {
+    fn compute(db: &Db<ProgramInputs<S>>, &root: &Node) -> Members {
         let view = View::new(db, true);
-        let reached = Reached::from(root, |node| owners(db, &view, node, demand));
+        let reached = Reached::from(root, |node| owners(db, &view, node));
         let condensation = reached.condensation();
         db.note_condensed(condensation.visits());
         let own = condensation.component(reached.root());
@@ -67,7 +57,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Component {
                 continue;
             }
             let each = members.members.iter();
-            answers.extend(each.map(|node| ((*node, demand), members.clone())));
+            answers.extend(each.map(|node| (*node, members.clone())));
         }
         db.deposit::<Component>(answers);
         held.expect("the root is in a component")
@@ -80,24 +70,19 @@ fn owners<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     view: &View<'_, S>,
     node: Node,
-    demand: Demand,
 ) -> Vec<Node> {
     let read = db
         .get::<CalleeReads>(&node)
-        .expect("a read asks for no demand");
-    bodies(view, &read.0, demand)
+        .expect("a read asks for no resolution");
+    bodies(view, &read.0)
 }
 
-/// The bodies among the owners a read's demand names, in address order, each in the instruction
-/// set it is entered in.
-fn bodies<S: Source + 'static>(view: &View<'_, S>, read: &CalleeRead, demand: Demand) -> Vec<Node> {
-    let arity = match demand {
-        Demand::Result => BTreeSet::new(),
-        Demand::Arity => arity_owners(read),
-    };
+/// The bodies among a read's owners, in address order, each in the instruction set it is entered
+/// in.
+fn bodies<S: Source + 'static>(view: &View<'_, S>, read: &CalleeRead) -> Vec<Node> {
     let owners = result_owners(read.interface.as_ref())
         .into_iter()
-        .chain(arity);
+        .chain(arity_owners(read));
     owned_bodies(view, owners.collect())
 }
 
@@ -162,16 +147,16 @@ fn result_owners(interface: Option<&SourceFunctionInterface>) -> BTreeSet<u64> {
 pub(super) struct Resolved;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
-    type Key = (Node, Demand);
+    type Key = Node;
     type Value = Shared<CalleeRead>;
     const NAME: &'static str = "resolved";
     const RETENTION: Retention = Retention::Held;
 
     /// Work: one preparation per function whose result or arity an owner outside its component
     /// could prove, and a cycle's arity fixpoint (`least_fixpoint`).
-    fn compute(db: &Db<ProgramInputs<S>>, &(node, demand): &(Node, Demand)) -> Shared<CalleeRead> {
+    fn compute(db: &Db<ProgramInputs<S>>, &node: &Node) -> Shared<CalleeRead> {
         // A closed seal may read a held decision; a decision never reads a closed seal.
-        if demand == Demand::Arity && db.running("call-boundary") > 0 {
+        if db.running("call-boundary") > 0 {
             db.defect(format_args!(
                 "call-boundary reached resolved {:#x} at arity",
                 node.0
@@ -184,28 +169,21 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
                 node.0
             ));
         }
-        // A result is resolved from one build of each function below it, where no cycle is known.
-        if demand == Demand::Result
-            && !in_held_cycle(db, node)
-            && let Some(read) = built_resolved(db, node)
-        {
-            return read;
-        }
         let alone = db
             .get::<CalleeReads>(&node)
             .expect("a read asks for no resolution");
         let view = View::new(db, true);
-        let owners = bodies(&view, &alone.0, demand);
+        let owners = bodies(&view, &alone.0);
         if owners.is_empty() {
-            return closed_alone(db, &view, node, &alone, demand);
+            return closed_alone(db, &view, node, &alone);
         }
         let cycle = db
-            .get::<Component>(&(node, demand))
+            .get::<Component>(&node)
             .expect("a component asks for no resolution");
-        if member_owned(&alone.0, &cycle.members, demand) {
-            return least_fixpoint(db, &view, &cycle.members, node, demand);
+        if member_owned(&alone.0, &cycle.members) {
+            return least_fixpoint(db, &view, &cycle.members, node);
         }
-        outside_resolved(db, node, &alone, &cycle.members, demand)
+        outside_resolved(db, node, &alone, &cycle.members)
     }
 
     fn hold(value: &Shared<CalleeRead>) -> Hold {
@@ -214,12 +192,6 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
             _ => Hold::Held,
         }
     }
-}
-
-/// Whether a held component of more than one member holds `node`: its fixpoint decides it.
-fn in_held_cycle<S: Source + 'static>(db: &Db<ProgramInputs<S>>, node: Node) -> bool {
-    let held = db.held::<Component>(&(node, Demand::Result));
-    matches!(held, Ok(Some(component)) if component.members.len() > 1)
 }
 
 /// Whether an owner's read states its result or an exact arity: what resolving again against it
@@ -232,182 +204,6 @@ fn proves(read: &CalleeRead) -> bool {
     read.facts.is_ok() && (returns || interface.arity().is_exact())
 }
 
-/// One function of the build search: built alone, the owners its build names, the next to visit.
-struct Open {
-    node: Node,
-    built: Built,
-    owners: Vec<Node>,
-    next: usize,
-}
-
-/// `root`'s result from one build of each function its owners reach, or `None` where a cycle or
-/// another owner set leaves it to the component (doc/adr-callee-builds.md). O(V + E) builds.
-fn built_resolved<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    root: Node,
-) -> Option<Shared<CalleeRead>> {
-    let view = View::new(db, true);
-    let key = |node| (node, Demand::Result);
-    let mut answers = BTreeMap::<Node, Shared<CalleeRead>>::new();
-    let mut path = Vec::<Open>::new();
-    if let Some(read) = enter(db, &view, root, &mut path) {
-        return Some(read);
-    }
-    // Terminates: each function enters the path once, and each frame visits each owner once.
-    while let Some(open) = path.last_mut() {
-        let owner = open.owners.get(open.next).copied();
-        open.next += 1;
-        let Some(owner) = owner else {
-            let open = path.pop().expect("the frame just read");
-            let node = open.node;
-            let read = close(db, &view, open, &answers)?;
-            if node == root {
-                return Some(read);
-            }
-            held(db, node, &read);
-            answers.insert(node, read);
-            continue;
-        };
-        if answers.contains_key(&owner) {
-            continue;
-        }
-        if path.iter().any(|open| open.node == owner) {
-            r2il::refusal_evidence!(
-                "resolved-build",
-                "{:#x}: its owners close a cycle at {:#x}, left to the component",
-                root.0,
-                owner.0
-            );
-            return None;
-        }
-        // A member of a held cycle is its component's to resolve.
-        let known = match in_held_cycle(db, owner) {
-            true => Some(db.get::<Resolved>(&key(owner)).ok()?),
-            false => db.held::<Resolved>(&key(owner)).ok().flatten(),
-        };
-        let read = match known {
-            Some(known) => (*known).clone(),
-            None => match enter(db, &view, owner, &mut path) {
-                Some(read) => held(db, owner, &read),
-                None => continue,
-            },
-        };
-        answers.insert(owner, read);
-    }
-    None
-}
-
-/// A function's resolution found beside the root's, held unless the request stopped it.
-fn held<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    node: Node,
-    read: &Shared<CalleeRead>,
-) -> Shared<CalleeRead> {
-    if !stopped(&read.0) {
-        db.deposit::<Resolved>([((node, Demand::Result), read.clone())]);
-    }
-    read.clone()
-}
-
-/// A function entering the build search: its answer where its build names no owner, else its
-/// frame pushed.
-fn enter<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    view: &View<'_, S>,
-    node: Node,
-    path: &mut Vec<Open>,
-) -> Option<Shared<CalleeRead>> {
-    let built = match callee_built(db, node) {
-        Ok(built) => built,
-        Err(reason) => {
-            let unread = CalleeRead {
-                interface: None,
-                facts: Err(reason),
-            };
-            return Some(alone_read(db, node, unread));
-        }
-    };
-    let owners = owned_bodies(view, result_owners(built.interface()));
-    if owners.is_empty() {
-        return Some(alone_read(db, node, built_read(db, node, built, &[]).0));
-    }
-    path.push(Open {
-        node,
-        built,
-        owners,
-        next: 0,
-    });
-    None
-}
-
-/// A function's alone read, held as `CalleeReads` answers it.
-fn alone_read<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    node: Node,
-    read: CalleeRead,
-) -> Shared<CalleeRead> {
-    let read = Shared(Arc::new(read));
-    if !stopped(&read.0) {
-        db.deposit::<CalleeReads>([(node, read.clone())]);
-    }
-    read
-}
-
-/// A built function whose owners are all resolved: its build updated by their statements where
-/// one proves something, else sealed alone. `None` where its alone read names other owners.
-fn close<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    view: &View<'_, S>,
-    open: Open,
-    answers: &BTreeMap<Node, Shared<CalleeRead>>,
-) -> Option<Shared<CalleeRead>> {
-    let Open {
-        node,
-        built,
-        owners,
-        ..
-    } = open;
-    let resolved = owners.iter().map(|owner| {
-        let read = answers.get(owner).expect("every owner is visited");
-        (owner.0, Arc::clone(&read.0))
-    });
-    let resolved = resolved.collect::<Vec<_>>();
-    // An owner the request stopped decides nothing, and no answer standing on the stop is held.
-    if resolved.iter().any(|(_, read)| stopped(read)) {
-        return Some(stopped_read());
-    }
-    if !resolved.iter().any(|(_, read)| proves(read)) {
-        let alone = alone_read(db, node, built_read(db, node, built, &[]).0);
-        // The alone read is the first build's unless it restated text or failed past the build.
-        let same = stopped(&alone.0) || bodies(view, &alone.0, Demand::Result) == owners;
-        return same.then_some(alone);
-    }
-    let restatable = built.restatable();
-    let (read, again) = built_read(db, node, built, &resolved);
-    r2il::refusal_evidence!(
-        "resolved-build",
-        "{:#x}: resolved from its build against {} owners, restatable {restatable}",
-        node.0,
-        resolved.len()
-    );
-    // The owners a build names are its alone read's unless the alone read is another seal than
-    // its build's: paid for where this resolution was, and in a debug build.
-    if (again || cfg!(debug_assertions)) && !stopped(&read) {
-        let alone = callee_read(db, node, Stated::default());
-        if !stopped(&alone) && bodies(view, &alone, Demand::Result) != owners {
-            if !again {
-                db.defect(format_args!(
-                    "{:#x}: its build names other owners than its alone read",
-                    node.0
-                ));
-            }
-            alone_read(db, node, alone);
-            return None;
-        }
-    }
-    Some(Shared(Arc::new(read)))
-}
-
 /// A function resolved against its owners outside its component, or alone where none of them
 /// states its result or an exact arity.
 fn outside_resolved<S: Source + 'static>(
@@ -415,15 +211,14 @@ fn outside_resolved<S: Source + 'static>(
     node: Node,
     alone: &Shared<CalleeRead>,
     members: &[Node],
-    demand: Demand,
 ) -> Shared<CalleeRead> {
-    let outside = bodies(&View::new(db, true), &alone.0, demand).into_iter();
+    let outside = bodies(&View::new(db, true), &alone.0).into_iter();
     let outside = outside.filter(|owner| members.binary_search(owner).is_err());
     let mut resolved = Vec::new();
     for owner in outside {
         let read = db
-            .get::<Resolved>(&(owner, demand))
-            .expect("demands below a cycle close");
+            .get::<Resolved>(&owner)
+            .expect("components below a cycle close");
         resolved.push((owner.0, Arc::clone(&read.0)));
     }
     // An owner the request stopped decides nothing, and no answer standing on the stop is held.
@@ -433,26 +228,18 @@ fn outside_resolved<S: Source + 'static>(
     // Resolving again pays only where some owner now states its result or an exact arity, or the
     // closed world decides it.
     if !resolved.iter().any(|(_, read)| proves(read)) {
-        return closed_alone(db, &View::new(db, true), node, alone, demand);
+        return closed_alone(db, &View::new(db, true), node, alone);
     }
-    let decided = (demand == Demand::Arity && alone.0.interface.is_some())
+    let decided = (alone.0.interface.is_some())
         .then(|| crate::native::Program::closed_result(&View::new(db, true), node.0));
     let stated = Stated {
         owners: &resolved,
         assumed: &[],
-        world: world_of(demand),
+        world: super::World::Closed,
         asks: true,
         decided,
     };
-    Shared(Arc::new(callee_read(db, node, stated)))
-}
-
-/// The world a demand reads results in: `aa`'s arity closure is the closed world's.
-fn world_of(demand: Demand) -> super::World {
-    match demand {
-        Demand::Arity => super::World::Closed,
-        Demand::Result => super::World::Open,
-    }
+    Shared(Arc::new(resealed(alone, callee_read(db, node, stated))))
 }
 
 /// A function read alone, again in the closed world where its `CallBoundary` decides its result.
@@ -461,9 +248,8 @@ fn closed_alone<S: Source + 'static>(
     view: &View<'_, S>,
     node: Node,
     alone: &Shared<CalleeRead>,
-    demand: Demand,
 ) -> Shared<CalleeRead> {
-    let decided = (demand == Demand::Arity && alone.0.interface.is_some())
+    let decided = (alone.0.interface.is_some())
         .then(|| crate::native::Program::closed_result(view, node.0))
         .flatten();
     if decided.is_none() {
@@ -476,7 +262,14 @@ fn closed_alone<S: Source + 'static>(
         asks: true,
         decided: Some(decided),
     };
-    Shared(Arc::new(callee_read(db, node, stated)))
+    Shared(Arc::new(resealed(alone, callee_read(db, node, stated))))
+}
+
+/// A read made again against what is stated of it: its mapping is the alone read's witness (D592).
+fn resealed(alone: &Shared<CalleeRead>, mut read: CalleeRead) -> CalleeRead {
+    let alone = (alone.0.interface.as_ref(), alone.0.premises);
+    read.mapping = crate::native::mapping_premises(alone, (read.interface.as_ref(), read.premises));
+    read
 }
 
 fn stopped(read: &CalleeRead) -> bool {
@@ -487,6 +280,8 @@ fn stopped_read() -> Shared<CalleeRead> {
     Shared(Arc::new(CalleeRead {
         interface: None,
         facts: Err(Unreadable::Stopped),
+        premises: r2source::Premises::from_iter([r2source::Premise::ClosedWorld]),
+        mapping: r2source::Premises::from_iter([r2source::Premise::ClosedWorld]),
     }))
 }
 
@@ -508,9 +303,9 @@ fn is_member(members: &[Node], owner: u64) -> bool {
     members.binary_search_by_key(&owner, |(at, _)| *at).is_ok()
 }
 
-/// Whether a read's arity or result, as `demand` asks, is one a member of its component owns.
-fn member_owned(read: &CalleeRead, members: &[Node], demand: Demand) -> bool {
-    result_open(read, members) || (demand == Demand::Arity && arity_open(read, members))
+/// Whether a read's arity or result is one a member of its component owns.
+fn member_owned(read: &CalleeRead, members: &[Node]) -> bool {
+    result_open(read, members) || arity_open(read, members)
 }
 
 /// What a read states that a cycle's fixpoint moves: its parameters' count and whether that is a
@@ -674,9 +469,8 @@ fn least_fixpoint<S: Source + 'static>(
     view: &View<'_, S>,
     members: &[Node],
     node: Node,
-    demand: Demand,
 ) -> Shared<CalleeRead> {
-    let mut cycle = Cycle::new(db, members, demand);
+    let mut cycle = Cycle::new(db, members);
     let mut pending = (0..members.len())
         .filter(|at| cycle.open[*at])
         .collect::<BTreeSet<_>>();
@@ -706,7 +500,6 @@ fn least_fixpoint<S: Source + 'static>(
                 members[*at],
                 &cycle.alone[*at],
                 members,
-                demand,
             ));
         }
     }
@@ -716,7 +509,7 @@ fn least_fixpoint<S: Source + 'static>(
         let read = read.expect("every open member is answered");
         match members[at] == node {
             true => own = Some(read),
-            false => deposited.push(((members[at], demand), read)),
+            false => deposited.push((members[at], read)),
         }
     }
     db.deposit::<Resolved>(deposited);
@@ -727,7 +520,6 @@ fn least_fixpoint<S: Source + 'static>(
 /// open, seeded at what it reads alone; every other member an open one calls is stated as resolved.
 struct Cycle<'m> {
     members: &'m [Node],
-    demand: Demand,
     alone: Vec<Shared<CalleeRead>>,
     open: Vec<bool>,
     /// Whether an open member's result is the one it owns.
@@ -742,11 +534,7 @@ struct Cycle<'m> {
 }
 
 impl<'m> Cycle<'m> {
-    fn new<S: Source + 'static>(
-        db: &Db<ProgramInputs<S>>,
-        members: &'m [Node],
-        demand: Demand,
-    ) -> Self {
+    fn new<S: Source + 'static>(db: &Db<ProgramInputs<S>>, members: &'m [Node]) -> Self {
         let alone = members.iter().map(|member| {
             db.get::<CalleeReads>(member)
                 .expect("a read asks for no resolution")
@@ -754,19 +542,18 @@ impl<'m> Cycle<'m> {
                 .clone()
         });
         let alone = alone.collect::<Vec<_>>();
-        let open = (alone.iter()).map(|read| member_owned(&read.0, members, demand));
+        let open = (alone.iter()).map(|read| member_owned(&read.0, members));
         let open = open.collect::<Vec<_>>();
         let tracked = alone.iter().map(|read| result_open(&read.0, members));
         let tracked = tracked.collect::<Vec<_>>();
         let assumed = alone.iter().zip(&open).zip(&tracked);
         let assumed = assumed.map(|((read, open), track)| {
-            let exact = demand == Demand::Arity && arity_open(&read.0, members);
+            let exact = arity_open(&read.0, members);
             open.then(|| Assumed::of(&read.0, exact, *track)).flatten()
         });
         let k = members.len();
         Self {
             members,
-            demand,
             assumed: assumed.collect(),
             stated: open.clone(),
             tracked,
@@ -801,12 +588,12 @@ impl<'m> Cycle<'m> {
         });
         let stated = stated.collect::<Vec<_>>();
         // A member is read in the world of the seal that consumes it, as one read alone is.
-        let decided = (self.demand == Demand::Arity && self.alone[at].0.interface.is_some())
+        let decided = (self.alone[at].0.interface.is_some())
             .then(|| crate::native::Program::closed_result(view, self.members[at].0));
         let stated = Stated {
             owners: &self.outside[at],
             assumed: &stated,
-            world: world_of(self.demand),
+            world: super::World::Closed,
             asks: true,
             decided,
         };
@@ -826,21 +613,17 @@ impl<'m> Cycle<'m> {
         view: &View<'_, S>,
         at: usize,
     ) -> Option<()> {
-        let owners = bodies(view, &self.alone[at].0, self.demand).into_iter();
+        let owners = bodies(view, &self.alone[at].0).into_iter();
         for owner in owners.filter(|owner| self.members.binary_search(owner).is_err()) {
-            let read = resolved(db, owner, self.demand)?;
+            let read = resolved(db, owner)?;
             self.outside[at].push((owner.0, read.0));
         }
         // The members it calls are the callees its causes name, so no walk finds them.
         let members = self.members;
         let alone = &self.alone[at].0;
-        let arity = match self.demand {
-            Demand::Result => BTreeSet::new(),
-            Demand::Arity => arity_owners(alone),
-        };
         let named = result_owners(alone.interface.as_ref())
             .into_iter()
-            .chain(arity);
+            .chain(arity_owners(alone));
         let named = named.collect::<BTreeSet<_>>().into_iter();
         let calls =
             named.filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());
@@ -848,7 +631,7 @@ impl<'m> Cycle<'m> {
             self.callees[at].push(callee);
             self.callers[callee].push(at);
             if !self.stated[callee] {
-                let read = resolved(db, members[callee], self.demand)?;
+                let read = resolved(db, members[callee])?;
                 self.assumed[callee] = Assumed::resolved(&read.0);
                 self.stated[callee] = true;
             }
@@ -866,15 +649,14 @@ impl<'m> Cycle<'m> {
     }
 }
 
-/// A function as `Resolved` answers it for `demand`, or `None` where the request stopped.
+/// A function as `Resolved` answers it, or `None` where the request stopped.
 fn resolved<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     node: Node,
-    demand: Demand,
 ) -> Option<Shared<CalleeRead>> {
     let read = db
-        .get::<Resolved>(&(node, demand))
-        .expect("demands below a cycle close");
+        .get::<Resolved>(&node)
+        .expect("components below a cycle close");
     (!stopped(&read.0)).then(|| (*read).clone())
 }
 
@@ -908,6 +690,8 @@ mod tests {
         CalleeRead {
             interface: Some(interface),
             facts: Err(Unreadable::NotWalked),
+            premises: r2source::Premises::new(),
+            mapping: r2source::Premises::new(),
         }
     }
 

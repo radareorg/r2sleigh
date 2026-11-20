@@ -625,7 +625,7 @@ mod tests {
             .find(|annotation| matches!(annotation.kind, AnnotationKind::Target { call: true, .. }))
             .expect("a direct call encodes its target");
         assert_eq!(call.kind.address(), Some(BASE + 0x10));
-        assert_eq!(call.support, Basis::Decoded);
+        assert_eq!(call.confidence, Basis::Decoded.into());
         let body = &line.syntax.as_ref().expect("decoded").body;
         let span = call.operand.expect("one operand spells that address");
         assert_eq!(&body[span.start..span.end], "0x1010");
@@ -680,7 +680,7 @@ mod tests {
                     address: 0x1234,
                     width: 4,
                 }
-                && annotation.support == Basis::Decoded
+                && annotation.confidence == Basis::Decoded.into()
         }));
     }
 

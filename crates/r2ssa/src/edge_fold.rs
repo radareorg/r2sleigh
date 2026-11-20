@@ -208,12 +208,12 @@ fn block_fold(graph: &SsaGraph, id: BlockId) -> BlockFold {
         .filter(|inst| matches!(graph.op(**inst), Some(SSAOp::Select(_))))
         .map(|inst| (*inst, graph.inputs(*inst)[0]));
     fold.selects = selects.clone().map(|(inst, _)| (inst, ALL, ALL)).collect();
-    for edge in 0..edges {
+    for (edge, &pred) in block.predecessors.iter().enumerate() {
         let mut under = Under {
             graph,
             block: id,
             edge,
-            held: held_on_edge(graph, block.predecessors[edge], id),
+            held: held_on_edge(graph, pred, id),
             fuel: 0,
         };
         if let (Some((_, cond, _)), Some((_, taken, not))) = (conditional, fold.branch.as_mut()) {

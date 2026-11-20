@@ -16,7 +16,8 @@
                                                    alloc-count builds; fails when HEAD exceeds a
                                                    budget x BASE, an allocation rise only without
                                                    a cause line for the base commit, or a case's
-                                                   binary is missing
+                                                   binary is missing; a `twin` line times and counts
+                                                   its case against the base's `PREFIX; command`
   census.py count --r2s BASE --r2s HEAD --qemu QEMU [--runs N] [--budget R] [--causes FILE]
                   [--base-commit SHA] --bins DIR   every guest instruction of an `r2s` process per
                                                    counted case under a `--enable-plugins`
@@ -89,6 +90,9 @@ COUNTED = [("pumasim", "pdd @ 0x0023fdf0"), ("0pack", "pdd @ 0x0062ecf0"),
 # commit, with the head/base ratio as printed for a ceiling, so it excuses no later rise (D401, D439).
 CAUSES = ROOT / "scripts/cost_causes.txt"
 CAUSE = re.compile(r"^(allocations|instructions) \| (.+?) \| ([0-9a-f]{40}) \| (\d+\.\d{4}) \| (D\d+) \| (\S.*)$")
+# A case whose answer equals the base's `PREFIX; command` is timed and counted against that twin on
+# the base: `twin | case | base commit | prefix | Dnnn | cause`, budgets unchanged (D573).
+TWIN = re.compile(r"^twin \| (.+?) \| ([0-9a-f]{40}) \| (\S[^|]*?) \| (D\d+) \| (\S.*)$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # What a counted process sees: no host variable, and mimalloc's host-dependent options stated, so the
 # count reads no runner's settings (D439; libmimalloc-sys 0.1.49, v2 src/options.c).
@@ -266,12 +270,24 @@ def causes(path=CAUSES):
     for number, line in enumerate(Path(path).read_text().splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
+        if twin := TWIN.match(line):
+            case, commit, prefix, row, cause = twin.groups()
+            entries[("twin", case, commit)] = (prefix, row, cause)
+            continue
         found = CAUSE.match(line)
         if not found:
-            sys.exit(f"{path}:{number}: not `metric | case | base commit | head/base ceiling | Dnnn | cause`")
+            sys.exit(f"{path}:{number}: not `metric | case | base commit | head/base ceiling | Dnnn | cause`"
+                     " or `twin | case | base commit | prefix | Dnnn | cause`")
         metric, case, commit, ceiling, row, cause = found.groups()
         entries[(metric, case, commit)] = (ceiling, row, cause)
     return entries
+
+
+def twinned(case, command, entries, commit):
+    """The command the base runs for this case: its twin's `PREFIX; command` where a line binds the
+    base commit, else the case's own (D573)."""
+    prefix, *_ = entries.get(("twin", case, commit), (None,))
+    return f"{prefix}; {command}" if prefix else command
 
 
 def printed_ratio(base, head):
@@ -328,15 +344,16 @@ def time_cases(args):
             failed.append(f"{case}: no {binary}; every timed case runs (D402)")
             continue
         seconds, peaks, digests, counts, heaps = {}, {}, {}, {}, {}
+        commands = {"base": twinned(case, command, entries, commit), "head": command}
         for side, executable in zip(("base", "head"), args.r2s):
-            runs = [measured(binary, command, executable) for _ in range(args.runs)]
+            runs = [measured(binary, commands[side], executable) for _ in range(args.runs)]
             seconds[side] = statistics.median(run[0] for run in runs)
             peaks[side] = max(run[1] for run in runs)
             digests[side] = hashlib.sha256(runs[-1][2].encode()).hexdigest()[:12]
         # A base built before the count existed has no counting build; head's count stands alone.
         for side, executable in zip(("base", "head"), args.count_r2s or ()):
             if Path(executable).exists():
-                counted = measured(binary, command, executable)
+                counted = measured(binary, commands[side], executable)
                 counts[side], heaps[side] = counted[3], counted[4]
         ratio = seconds["head"] / seconds["base"]
         rss = peaks["head"] / peaks["base"]
@@ -365,6 +382,8 @@ def time_cases(args):
         if rss > args.rss_budget:
             failed.append(f"{case}: {rss:.2f}x the base's peak RSS")
         same = digests["base"] == digests["head"]
+        if commands["base"] != command:
+            case = f"{case} (base: {commands['base'][:-len(command)]}…)"
         print(f"| {case} | {seconds['base']:.2f} | {seconds['head']:.2f} | {ratio:.2f} | "
               f"{peaks['base']:.0f} | {peaks['head']:.0f} | {rss:.2f} | {' | '.join(heap)} | "
               f"{allocations} | {'same' if same else 'moved'} |")
@@ -421,10 +440,13 @@ def count_cases(args):
             if not binary.exists():
                 failed.append(f"{case}: no {binary}; every counted case runs")
                 continue
+            twin = twinned(case, command, entries, commit)
+            sides = ((args.r2s[0], twin), (args.r2s[1], command), (args.r2s[0], twin))
             base, head, again = (statistics.median_low(
-                guest_instructions(args.qemu, plugin, binary, command, executable, workdir)
-                for _ in range(args.runs)) for executable in (*args.r2s, args.r2s[0]))
-            print(f"| {case} | {base:,} | {head:,} | {printed_ratio(base, head)} | {again:,} | {again - base:+,} |",
+                guest_instructions(args.qemu, plugin, binary, run, executable, workdir)
+                for _ in range(args.runs)) for executable, run in sides)
+            label = case if twin == command else f"{case} (base: {twin[:-len(command)]}…)"
+            print(f"| {label} | {base:,} | {head:,} | {printed_ratio(base, head)} | {again:,} | {again - base:+,} |",
                   flush=True)
             if rise := counted_rise("instructions", case, base, head, args.budget, entries, commit):
                 failed.append(rise)
@@ -692,9 +714,10 @@ def order_answers(args, order, binary):
     sys.path.insert(0, str(ROOT / "tests" / "equiv"))
     import r2s_batch
 
-    listing = r2s(binary, "aa; afl", args.r2s)
-    addresses = [int(line.split()[0], 16) for line in listing.splitlines()
-                 if line.startswith("0x") and not line.split()[3].startswith(("sym.imp", "sym._"))]
+    # `aflj` names by flag spelling, which `asm.demangle` leaves alone (D574).
+    listing = r2s(binary, "aa; aflj", args.r2s)
+    rows = json.loads(listing[listing.index("["):listing.rindex("]") + 1])
+    addresses = [row["addr"] for row in rows if not row["name"].startswith(("sym.imp", "sym._"))]
     env = {**os.environ, "R2SLEIGH_WRITE_ORDER": order}
     report = r2s_batch.run_batch(args.r2s, binary, addresses, function_timeout=120, startup_timeout=600, env=env)
     answers = {}

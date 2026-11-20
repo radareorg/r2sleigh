@@ -2236,10 +2236,12 @@ impl FunctionFacts {
                 .filter(|basis| basis.states_type())
                 .unwrap_or(interface.types().basis);
             let pointer_wide = declaration_type_width_bits(&ty, ptr_bits) == Some(ptr_bits);
-            let declared = (!basis.states_type())
+            let entry = (!basis.states_type())
                 .then(|| source.facts().boundaries.parameters.get(&(index as u32)))
                 .flatten()
-                .and_then(|parameter| evidence.declared_bound(parameter.value()?));
+                .and_then(|parameter| parameter.value());
+            let declared = entry.and_then(|entry| evidence.declared_bound(entry));
+            let handed = entry.and_then(|entry| evidence.handed_dereferenced(entry));
             let certified = (certified_pointers.as_ref()).and_then(|pointers| pointers.get(&index));
             let integer = |basis| {
                 let sign = formal_sign(source, &solved.signedness, index, &ty);
@@ -2272,7 +2274,10 @@ impl FunctionFacts {
                     );
                     crate::ParameterType::stated(integer(basis))
                 }
-                (_, None) => crate::ParameterType::stated(integer(basis)),
+                (_, None) => match handed.filter(|_| pointer_wide) {
+                    Some(widths) => handed_pointer(widths, ptr_bits),
+                    None => crate::ParameterType::stated(integer(basis)),
+                },
             };
             let ty = row.ty.spelled();
             rows.set(index, row);
@@ -2453,6 +2458,25 @@ impl FunctionFacts {
 
     pub fn prepared_interproc_summary(&self) -> Option<&r2ssa::PreparedInterprocSummarySet> {
         self.interproc_summary.as_ref()
+    }
+}
+
+/// A parameter handed whole to callees that load or store through it (D610): a pointer to the
+/// one width they all access at, its sign unstated, else unproven with the cause named.
+fn handed_pointer(widths: r2ssa::AccessWidths, ptr_bits: u32) -> crate::ParameterType {
+    let basis = r2source::Basis::Dereferenced;
+    match widths.only().map(|bytes| bytes * 8) {
+        Some(bits @ (8 | 16 | 32 | 64)) => {
+            let pointee = crate::unstated_word(bits);
+            let pointer = CTypeLike::Pointer(Box::new(pointee));
+            crate::ParameterType::stated(crate::SlotType::Pointer(pointer, basis))
+        }
+        _ => {
+            let carrier = crate::unproven_parameter(ptr_bits);
+            r2il::refusal_evidence!("handed-pointer", "{widths:?}: no one pointee width");
+            let row = crate::SlotType::Carrier(carrier, basis);
+            crate::ParameterType::refused(row, crate::PointerRefusal::PointeeWidths)
+        }
     }
 }
 

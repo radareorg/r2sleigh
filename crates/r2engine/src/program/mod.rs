@@ -26,7 +26,7 @@ use view::View;
 
 pub use fates::World;
 pub use requests::{
-    AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge,
+    AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge, Header,
     RenderedResponse, Rendering, Syscall,
 };
 
@@ -385,8 +385,6 @@ pub struct OpenProgram<S: Source + 'static> {
     /// The control a caller set for the next request, which that request
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
-    /// Whether a function's analysis reads the program's calls to it: `aa` asks once.
-    callers: World,
 }
 
 impl<S: Source + 'static> OpenProgram<S> {
@@ -398,7 +396,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             .collect();
         Self {
             next: None,
-            callers: World::Open,
             db: Db::new(ProgramInputs {
                 extents: r2types::ProgramExtents::new(
                     container
@@ -542,10 +539,11 @@ impl<S: Source + 'static> OpenProgram<S> {
         View::new(&self.db, true)
     }
 
-    /// The key of one function's analysis, sealing and rendering: its entry, its mode, and
-    /// whether it reads its callers.
+    /// One function's analysis key; the survey is asked first, outside any frame, as `aa` does (D573).
     fn analysis_key(&self, entry: u64) -> analysis::Key {
-        (entry, self.view().thumb_at(entry), self.callers)
+        // A survey that fails or panics does so again inside the analysis, which refuses saying why.
+        let _ = crate::isolation::isolated(|| self.surveyed());
+        (entry, self.view().thumb_at(entry))
     }
 
     /// One function's analysis, done once per state of what it read (the `Analysed` query).
@@ -722,6 +720,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
+    }
+
+    fn landing_pad(&self, last: u64) -> Option<u64> {
+        crate::body::Program::landing_pad(&self.view(), last)
     }
 }
 

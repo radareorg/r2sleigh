@@ -25,6 +25,9 @@ pub struct FunctionInfo {
     pub arguments: Vec<Argument>,
     /// Whether arguments continue past `arguments`: a variadic tail the interface states.
     pub variadic: bool,
+    /// Where the interface states only a floor of parameters, why: `arguments` are then at least
+    /// the parameters (D37).
+    pub floor: Option<r2source::SourceArityFloor>,
     pub locals: Vec<Local>,
     /// What a definition of it declares it returns, and what that rests on: the decided type, or
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
@@ -52,8 +55,7 @@ pub struct UnprovenResult {
 impl UnprovenResult {
     /// The cause as the proof line spells it.
     pub fn cause_name(self) -> &'static str {
-        self.cause
-            .map_or("no return reached", r2types::UnprovenCause::name)
+        crate::query::ResultStanding::cause_name(self.cause)
     }
 }
 
@@ -124,6 +126,8 @@ impl FunctionInfo {
             arguments: arguments(artifact, sealed),
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),
+            floor: (artifact.machine_context().function_interface())
+                .and_then(|interface| interface.arity_floor().cloned()),
             returns: returns(artifact, sealed),
             unproven: (sealed.return_type())
                 .filter(|fact| fact.is_unproven())
@@ -138,6 +142,41 @@ impl FunctionInfo {
             locals: locals(artifact, sealed, &entities),
             noreturn,
             refused: None,
+        }
+    }
+
+    /// The same function with its landing pads' blocks and each call's unwind edge, as `afb` lists
+    /// them (D570); the analysis reads neither. O((b + p) log b).
+    pub(crate) fn hold_pads(&mut self, pads: &crate::body::Pads) {
+        let starts = (self.blocks.iter().map(|block| block.addr))
+            .chain(pads.blocks.iter().map(|block| block.lifted.addr))
+            .collect::<BTreeSet<_>>();
+        // An edge to no block's start is none `afb` lists: a pad rejoining inside a normal block (D598).
+        self.blocks.extend(pads.blocks.iter().map(|block| {
+            Block {
+                addr: block.lifted.addr,
+                size: u64::from(block.lifted.size),
+                instructions: block.lifted.instructions.iter().count(),
+                successors: (block.successors.iter())
+                    .filter(|(_, target)| starts.contains(target))
+                    .count(),
+            }
+        }));
+        self.blocks.sort_unstable_by_key(|block| block.addr);
+        for &(call, pad) in &pads.unwinds {
+            if self
+                .blocks
+                .binary_search_by_key(&pad, |block| block.addr)
+                .is_err()
+            {
+                continue;
+            }
+            let at = self.blocks.partition_point(|block| block.addr <= call);
+            if let Some(block) = at.checked_sub(1).map(|at| &mut self.blocks[at])
+                && call < block.addr + block.size
+            {
+                block.successors += 1;
+            }
         }
     }
 
@@ -163,6 +202,7 @@ impl FunctionInfo {
             convention: None,
             arguments: Vec::new(),
             variadic: false,
+            floor: None,
             locals: Vec::new(),
             returns: None,
             unproven: None,

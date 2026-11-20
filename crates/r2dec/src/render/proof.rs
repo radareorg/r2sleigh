@@ -82,12 +82,28 @@ type Clauses<'a> = (
     ((bool, bool), &'a [Disputed]),
     usize,
     &'a [String],
+    &'a [(usize, r2types::PointerRefusal)],
 );
 
 /// The frame-isolation clause, where an indirect call's promotion rests on it (D471).
 fn note_frame_isolation(detail: &mut String, ledger: Option<&crate::ledger::ObligationLedger>) {
     if ledger.is_some_and(|ledger| ledger.premises().contains(&Premise::FrameIsolation)) {
         detail.push_str("; an indirect call writes no frame slot this function did not expose (assuming frame-isolation)");
+    }
+}
+
+/// The pads the walk held apart: their flow enters no analysis until D598.
+fn note_landing_pads(detail: &mut String, landing_pads: u32) {
+    let noun = if landing_pads == 1 {
+        "landing pad"
+    } else {
+        "landing pads"
+    };
+    if landing_pads > 0 {
+        let _ = write!(
+            detail,
+            "; {landing_pads} {noun} not rendered: exceptional flow, a store read only there may be elided"
+        );
     }
 }
 
@@ -99,11 +115,10 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting): Clauses<
-        '_,
-    >,
+    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting, parameters): Clauses<'_>,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
+    landing_pads: u32,
 ) {
     let rendered_nothing = func.body.is_empty();
     // Each residual is a construct the rendering says it did not prove, and
@@ -192,6 +207,7 @@ pub(crate) fn note_unproven_constructs(
     }
     note_floor(&mut detail, floor);
     note_frame_isolation(&mut detail, ledger);
+    note_landing_pads(&mut detail, landing_pads);
     if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
         && !premises.is_empty()
     {
@@ -209,6 +225,7 @@ pub(crate) fn note_unproven_constructs(
     if let Some(cause) = unproven {
         note_unproven(&mut detail, func, cause);
     }
+    note_unproven_parameters(&mut detail, parameters);
     note_disputed(&mut detail, disputed);
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
     // A tag two graphs state as different kinds has no one declaration: its pointers are words.
@@ -254,8 +271,13 @@ fn closed_world(
         Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
             Some("; a call returns the result on through a cycle")
         }
-        // A value no body proves, decided only by its reading calls.
+        // A value no body proves, decided only by its reading calls, or one whose width they leave open.
         None if func.ret_type != crate::ast::CType::Void => Some("; a call reads the result"),
+        Some(Some(
+            r2types::UnprovenCause::WidthUnbounded
+            | r2types::UnprovenCause::WidthBetween
+            | r2types::UnprovenCause::PointerWide,
+        )) => Some("; a call reads the result"),
         _ if integer_lane => None,
         _ => Some("; no call reads the result"),
     };
@@ -283,6 +305,13 @@ fn note_disputed(detail: &mut String, disputed: &[Disputed]) {
             detail,
             "; the declared result is kept against the body: {found} the {lane} result register"
         );
+    }
+}
+
+/// A parameter spelled at its carrier names why no type is proven (D610).
+fn note_unproven_parameters(detail: &mut String, parameters: &[(usize, r2types::PointerRefusal)]) {
+    for (index, cause) in parameters {
+        let _ = write!(detail, "; parameter {index} is unproven ({})", cause.name());
     }
 }
 

@@ -276,7 +276,7 @@ fn a_cold_request_proves_a_cycle_through_a_floor_its_result() {
 }
 
 /// The base path returns the caller's `rax` (D200 case 1), so both results stay a residual whose
-/// cause is the entry value handed back: neither member writes `rax`, so the pair keeps it (D413).
+/// causes are the entry value handed back and the cycle no member states (D413, D573).
 #[test]
 fn a_pair_with_no_path_of_its_own_stays_unproven() {
     for at in [UNTOUCHED[0].1, UNTOUCHED[1].1] {
@@ -284,7 +284,11 @@ fn a_pair_with_no_path_of_its_own_stays_unproven() {
         assert!(text.contains("r2sleigh_residual_u64"), "{text}");
     }
     let cause = result_cause(Literal::of_code(MUTUAL_UNTOUCHED_BASE, &UNTOUCHED), BASE);
-    assert_eq!(cause, Some(vec![SourceResultCause::HandedBack]));
+    let causes = [
+        SourceResultCause::HandedBack,
+        SourceResultCause::ForwardCycle,
+    ];
+    assert_eq!(cause, Some(causes.to_vec()));
 }
 
 /// `odd` returns what an indirect call returns, which no statement of a callee can prove: it
@@ -496,17 +500,17 @@ fn a_tail_jump_to_signal_returns_the_previous_handler() {
 }
 
 /// One condensation answers the whole pair (D412, D413): each member's component is deposited, so
-/// asking each after adds no visit; `aa` adds the forwarder graph's and `CallRanks`' (D354).
+/// asking each after adds no visit, beside the forwarder graph's and `CallRanks`' (D354).
 #[test]
 fn one_condensation_answers_every_member_of_a_cycle() {
     let mut open = OpenProgram::of(Literal::of_code(MUTUAL_U64, &U64));
     open.rendered(U64[2].1).expect("it renders");
-    assert_eq!(open.analysis_stats().condensed, (2 + 2) + (2 + 2));
+    let first = open.analysis_stats().condensed;
     for (_, at, _) in U64 {
         open.rendered(at).expect("it renders");
     }
     let stats = open.analysis_stats();
-    assert_eq!(stats.condensed, (2 + 2) + (2 + 2), "{stats:?}");
+    assert_eq!(stats.condensed, first, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
     let mut open = OpenProgram::of(Literal::of_code(MUTUAL_U64, &U64));
     open.analyse_program().expect("it surveys");

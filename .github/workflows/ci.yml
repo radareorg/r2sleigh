@@ -325,7 +325,7 @@ jobs:
     name: radare2 Differential Gate
     runs-on: ubuntu-24.04
     needs: build
-    timeout-minutes: 25
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -361,6 +361,14 @@ jobs:
           python3 scripts/diff_r2.py --no-build --r2 /usr/bin/radare2 --r2s target/ci/r2s \
             --bins "$RUNNER_TEMP/testbins/elf" "$RUNNER_TEMP/testbins/mach0" "$RUNNER_TEMP/testbins/pe" \
             --jobs 4 --timeout 90 --verbose
+      # `pdd`, `pdf` and `afi` alone, after `aa`, after `afl` and in one session forward and reversed
+      # print the same bytes: no earlier command moves an answer (ROADMAP D573).
+      - name: An answer is the same whatever ran before it
+        if: always()
+        timeout-minutes: 30
+        run: |
+          python3 scripts/test_history_gate.py
+          python3 scripts/history_gate.py --r2s target/ci/r2s --bins "$RUNNER_TEMP/testbins/elf" --jobs 4
 
   # ── Hostile input (ROADMAP H, D18) ───────────────────────────────
   #
@@ -411,7 +419,8 @@ jobs:
     needs: [plan, build, aarch64-toolchain]
     # A scheduled or manual run has no base to time against.
     if: needs.plan.outputs.full == 'true' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
-    timeout-minutes: 60
+    # The cold cases pay the survey and caller closure on both sides (D573): 62 minutes on #417, 30 before.
+    timeout-minutes: 90
     # A cause line names the base commit, so the timing and count steps read it too (D439).
     env:
       BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -520,12 +529,17 @@ jobs:
         run: cargo build --profile ci -p r2s --features sleigh,work-meter
       - name: Install valgrind
         run: |
-          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
-          for attempt in 1 2 3; do
-            timeout -k 10 60 $apt update -qq &&
-              timeout -k 10 120 $apt install --no-install-recommends -y valgrind &&
+          # `sudo timeout` stops apt itself, so a stalled try leaves no apt holding the lock the next waits on.
+          opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o DPkg::Lock::Timeout=60"
+          hosts=(azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org)
+          for attempt in 1 2 3 4 5 6; do
+            host=${hosts[$(( (attempt - 1) % 3 ))]}
+            echo "try $attempt from $host"
+            sudo sed -i -E "s#(mirror\+file:/etc/apt/apt-mirrors\.txt|https?://(([a-z]+\.)?(archive|security)\.ubuntu\.com|mirrors\.edge\.kernel\.org)/ubuntu/?)#http://$host/ubuntu/#g" /etc/apt/sources.list.d/*.sources
+            sudo timeout -k 10 60 apt-get $opts update -qq &&
+              sudo timeout -k 10 120 apt-get $opts install --no-install-recommends -y valgrind &&
               break
-            [ "$attempt" = 3 ] && exit 1
+            [ "$attempt" = 6 ] && exit 1
           done
       - name: Scaling
         run: |

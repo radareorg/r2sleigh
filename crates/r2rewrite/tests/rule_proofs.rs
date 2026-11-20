@@ -236,7 +236,7 @@ fn every_rule_is_a_proven_equivalence() {
                 for hypothesis in encoder.hypotheses() {
                     solver.assert(hypothesis.clone());
                 }
-                solver.assert(lhs.eq(rhs.clone()).not());
+                solver.assert(lhs.eq(rhs).not());
                 let verdict = solver.check();
                 if verdict != SatResult::Unsat {
                     let mut witness = String::new();
@@ -491,6 +491,49 @@ fn check_normaliser(
             let solver = Solver::new();
             solver.assert(lhs.eq(rhs).not());
             assert_eq!(solver.check(), SatResult::Unsat, "shape {index} at {width}");
+        }
+    }
+}
+
+/// D473: the lifted `IntLeft`, `IntRight`, `IntOr` sequence `r2il::eval` runs equals the `Rotate`
+/// term and the prelude's `r2sleigh_rotl8` body for every 8-bit value and every count 1 to 7.
+#[test]
+fn a_rotate_is_the_lifted_shift_pair_at_eight_bits() {
+    use r2il::eval::{Operation, Word, apply};
+    let machine = |x: u8, k: u8| {
+        let word = |value: u8| Word::new(u128::from(value), 1).expect("a byte");
+        let left = apply(Operation::Left, &[word(x), word(k)], 1).expect("a value");
+        let right = apply(Operation::Right, &[word(x), word(8 - k)], 1).expect("a value");
+        let (left, right) = (word(left as u8), word(right as u8));
+        apply(Operation::Or, &[left, right], 1).expect("a value") as u8
+    };
+    // `(uint8_t)(x << k) | (uint8_t)(x >> (8u - k))`, with C's promotion to `int`.
+    let prelude = |x: u8, k: u8| {
+        let (x, k) = (u32::from(x), u32::from(k));
+        ((x << k) as u8) | ((x >> (8 - k)) as u8)
+    };
+    for k in 1..8u8 {
+        let mut arena = TermArena::new();
+        let x = arena.intern(unsigned(8), TermKind::Variable(0));
+        let count = arena.intern(
+            unsigned(8),
+            TermKind::Literal(r2ssa::MachineBitVector::new(8, u64::from(k)).unwrap()),
+        );
+        let rotate = arena.intern(unsigned(8), TermKind::Rotate { value: x, count });
+        for value in 0..=u8::MAX {
+            let term = eval(&arena, rotate, &mut |_, _| u128::from(value)) as u8;
+            let lifted = machine(value, k);
+            assert_eq!(term, lifted, "rotl8({value}, {k})");
+            assert_eq!(
+                prelude(value, k),
+                lifted,
+                "the prelude's rotl8({value}, {k})"
+            );
+            assert_eq!(
+                value.rotate_left(u32::from(k)),
+                lifted,
+                "u8::rotate_left({value}, {k})"
+            );
         }
     }
 }

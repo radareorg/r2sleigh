@@ -317,7 +317,7 @@ pub(crate) fn process_call_result_flow_block(
                     (object, offset),
                     CallResultCertificate {
                         owner: Some(ValueOwner::StackSlot { object, offset }),
-                        ..source.clone()
+                        ..source
                     },
                 );
                 if let Some(cert) = sink

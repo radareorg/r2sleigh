@@ -89,9 +89,46 @@ pub fn exits(name: &str) -> bool {
         })
 }
 
+/// A personality routine whose language-specific data area is GCC's call-site table: header, then
+/// records of start, length, landing pad and action (doc/adr-radare2-function-walk.md, "Unwind edges as built").
+#[derive(Debug, PartialEq, Eq)]
+pub struct Personality {
+    pub name: &'static str,
+    pub citation: &'static str,
+}
+
+/// The routines that read that table, one cited row each.
+pub const PERSONALITIES: [Personality; 2] = [
+    Personality {
+        name: "__gcc_personality_v0",
+        citation: "GCC 14.2.0 libgcc/unwind-c.c, PERSONALITY_FUNCTION: \"p = read_encoded_value (0, \
+                   info.call_site_encoding, p, &cs_start); ... if (cs_lp) landing_pad = info.LPStart + cs_lp;\"",
+    },
+    Personality {
+        name: "__gxx_personality_v0",
+        citation: "GCC 14.2.0 libstdc++-v3/libsupc++/eh_personality.cc, parse_lsda_header and \
+                   PERSONALITY_FUNCTION: \"if (ip < info.Start + cs_start + cs_len) { if (cs_lp) \
+                   landing_pad = info.LPStart + cs_lp;\"",
+    },
+];
+
+/// The row of the personality an import binds, its symbol version taken off; the name is a declaration.
+pub fn personality(import: &str) -> Option<&'static Personality> {
+    let name = import.split('@').next().unwrap_or(import);
+    PERSONALITIES.iter().find(|row| row.name == name)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{exits, reenters_caller};
+    use super::{exits, personality, reenters_caller};
+
+    #[test]
+    fn only_a_cited_personality_states_a_call_site_table() {
+        assert!(personality("__gxx_personality_v0@CXXABI_1.3").is_some());
+        assert!(personality("__gcc_personality_v0").is_some());
+        assert!(personality("__gxx_personality_seh0").is_none());
+        assert!(personality("rust_eh_personality").is_none());
+    }
 
     #[test]
     fn go_s_compiler_ends_a_block_after_a_runtime_panic() {

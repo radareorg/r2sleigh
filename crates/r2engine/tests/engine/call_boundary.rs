@@ -17,21 +17,19 @@ const READ: &[u8] = &[
 ];
 
 /// A closed-world read makes a written result a value at `Solved`, and the premise is stated on the
-/// proof line and in the response, apart from "no call reads"; a cold `pdd` keeps it unproven.
+/// proof line and in the response, apart from "no call reads"; a cold `pdd` is the same (D573).
 #[test]
-fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
+fn a_closed_world_read_states_its_premise_and_a_cold_render_is_the_same() {
     let program = || Literal::of_code(READ, &[("f", BASE, 0x06), ("caller", BASE + 0x10, 0x08)]);
     let cold = OpenProgram::of(program())
         .rendered(BASE)
         .expect("it renders");
-    let text = cold.response.output.into_text();
-    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
     assert!(
-        !cold
-            .response
+        cold.response
             .premises
             .contains(&r2source::Premise::ClosedWorld)
     );
+    let cold = cold.response.output.into_text();
     let mut open = OpenProgram::of(program());
     open.analyse_program().expect("it surveys");
     let analysed = open.rendered(BASE).expect("it renders");
@@ -52,6 +50,7 @@ fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
     );
     assert!(!text.contains("refused, a call"), "{text}");
     assert!(!text.contains("no call reads the result"), "{text}");
+    assert_eq!(cold, text);
 }
 
 /// AArch64 `keep` (`mov x2, #0x2000; str x1, [x2]; ret`) hands back x0; `caller` is `bl keep;
@@ -465,8 +464,8 @@ fn analysed(program: Literal) -> String {
     rendered.response.output.into_text()
 }
 
-/// D213: an entry-input lane every call leaves dead is void under `aa`, with the premise; a read of
-/// RAX or RDX, which the body defines nothing in, reads the caller's own bytes. Cold, EntryInput.
+/// D213: an entry-input lane every call leaves dead is void, with the premise; a read of RAX or
+/// RDX, which the body defines nothing in, reads the caller's own bytes. Cold, the same (D573).
 #[test]
 fn an_entry_input_lane_every_call_leaves_dead_is_void_under_the_closed_world() {
     let program = || {
@@ -478,11 +477,11 @@ fn an_entry_input_lane_every_call_leaves_dead_is_void_under_the_closed_world() {
     let cold = OpenProgram::of(program())
         .rendered(BASE)
         .expect("it renders");
-    let text = cold.response.output.into_text();
-    assert!(text.contains("EntryInput"), "{text}");
+    let cold = cold.response.output.into_text();
     let text = analysed(program());
     assert!(text.starts_with("void f("), "{text}");
     assert!(text.contains("(assuming closed-world)"), "{text}");
+    assert_eq!(cold, text);
 }
 
 /// A call that reads the XMM0 bytes `f` hands back keeps the result unproven.
@@ -647,6 +646,7 @@ fn each_way_in() -> Vec<(&'static str, Literal)> {
             table: None,
             dynamic: Some(1),
             directory: None,
+            minidebug: None,
         },
         ..r2abi::statement::Symbol::default()
     });
@@ -1075,7 +1075,7 @@ fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0x97ff_fffa]); // bl f
     assert!(text.contains(r#"printf("%d\n", (uint64_t)7U);"#), "{text}");
     assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
-    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("the format is no literal"), "{text}");
     assert!(!text.contains("frame + 16U"), "{text}");
 }
 
@@ -1095,7 +1095,7 @@ fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
 #[test]
 fn a_format_reloaded_past_an_indirect_call_is_its_literal_under_frame_isolation() {
     let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
-    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("the format is no literal"), "{text}");
     assert!(!text.contains("frame + 16U"), "{text}");
     assert!(text.contains("(assuming frame-isolation)"), "{text}");
 }
@@ -1137,7 +1137,7 @@ fn a_format_spilled_on_one_path_only_bounds_no_write() {
     open.source_mut().write(FORMAT, b"%d\n\0");
     let rendered = open.rendered(BASE + 0x10).expect("it renders");
     let text = rendered.response.output.into_text();
-    assert!(text.contains("format_argument_not_literal"), "{text}");
+    assert!(text.contains("the format is no literal"), "{text}");
     assert!(text.contains("frame + 28U"), "{text}");
 }
 
@@ -1226,21 +1226,21 @@ fn a_counted_printf_reads_only_its_placed_registers() {
 #[test]
 fn a_printf_whose_format_the_program_may_write_bounds_no_stack() {
     let text = printing_twice(b"%d\n\0", true);
-    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+    assert!(text.contains("(the format is no literal)"), "{text}");
 }
 
 /// A `long double` operand takes no 8-byte slot this rule places: the reload stays memory.
 #[test]
 fn a_printf_whose_format_reads_a_long_double_bounds_no_stack() {
     let text = printing_twice(b"%Lf\n\0", false);
-    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+    assert!(text.contains("(the format is no literal)"), "{text}");
 }
 
 /// Ten operands put three on the stack, the third at the slot: the reload stays memory.
 #[test]
 fn a_printf_whose_counted_tail_covers_the_slot_keeps_it_a_load() {
     let text = printing_twice(b"%d%d%d%d%d%d%d%d%d%d\0", false);
-    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+    assert!(text.contains("(the format is no literal)"), "{text}");
 }
 
 /// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
@@ -1349,7 +1349,9 @@ fn a_lane_forwarded_through_a_caller_whose_result_is_read_is_decided_per_lane() 
     open.analyse_program().expect("it surveys");
     let mid = open.rendered(BASE + 0x10).expect("it renders");
     let mid = mid.response.output.into_text();
-    assert!(mid.starts_with("r2sleigh_word_u64 mid("), "{mid}");
+    // x0 is read and written whole: a pointer's width, its kind unproven (D610).
+    assert!(mid.starts_with("r2sleigh_result_u64 mid("), "{mid}");
+    assert!(mid.contains("unproven (PointerWide)"), "{mid}");
     let text = open.rendered(F).expect("it renders");
     let text = text.response.output.into_text();
     assert!(text.starts_with("void f("), "{text}");
@@ -1387,12 +1389,11 @@ fn a_termination_function_the_loader_alone_calls_is_void() {
         text.contains("; no call reads the result (assuming closed-world)"),
         "{text}"
     );
-    // A cold render joins no call, so the entry RAX stays an unproven result.
+    // A cold render joins the same calls (D573).
     let cold = OpenProgram::of(entered(EntryKind::FiniHook))
         .rendered(BASE)
         .expect("it renders");
-    let cold = cold.response.output.into_text();
-    assert!(cold.contains("return r2sleigh_residual_"), "{cold}");
+    assert_eq!(cold.response.output.into_text(), text);
     // A library no container evidence names states no initialiser row (D240).
     let init = analysed(entered(EntryKind::InitHook));
     assert!(init.contains("return r2sleigh_residual_"), "{init}");
@@ -1532,7 +1533,9 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         &[0xe8, 0xeb, 0xff, 0xff, 0xff, 0x48, 0x89, 0x07, 0xc3],
     );
     let text = analysed(read);
-    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
+    // The call reads all of RAX and `f` writes EAX: a `long` and an `int` compile alike (D610).
+    assert!(text.starts_with("r2sleigh_result_u32 f(void)"), "{text}");
+    assert!(text.contains("unproven (WidthBetween)"), "{text}");
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
@@ -1540,7 +1543,7 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
 }
 
 /// dyld hands `main`'s `int` to `exit` (r2abi `loader_call`, D227): a Mach-O `LC_MAIN` body
-/// writing EAX and XMM0 returns its integer lane under `aa`; cold, both stay a residual.
+/// writing EAX and XMM0 returns its integer lane, cold or under `aa` (D573).
 #[test]
 fn dyld_reads_the_integer_lane_of_the_main_a_mach_o_names() {
     use r2abi::statement::EntryKind;
@@ -1563,13 +1566,15 @@ fn dyld_reads_the_integer_lane_of_the_main_a_mach_o_names() {
         .rendered(BASE)
         .expect("it renders");
     let cold = cold.response.output.into_text();
-    assert!(cold.contains("unproven"), "{cold}");
     let text = analysed(program(true));
-    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
+    // Its exported symbol is a way in another image may take: no read bounds the width (D610).
+    assert!(text.starts_with("r2sleigh_result_u32 f(void)"), "{text}");
+    assert!(text.contains("unproven (WidthUnbounded)"), "{text}");
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
     );
+    assert_eq!(cold, text);
     // No ELF row states a `CMain`: nothing reads either lane.
     let elf = analysed(program(false));
     assert!(elf.contains("unproven"), "{elf}");
@@ -1753,7 +1758,7 @@ fn handler_answer(
 }
 
 /// A handler whose address only reaches `atexit`'s cited `void (*)(void)` slot returns nothing
-/// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
+/// under the closed world, though its RAX is written; cold, the same (S30, D205, D573).
 #[test]
 fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
     let (closed, premises) = handler_answer(at_exit(TAKES_HANDLER, "atexit"), true);
@@ -1768,7 +1773,7 @@ fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
         "{premises:?}"
     );
     let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
-    assert!(!cold.contains("void handler("), "{cold}");
+    assert_eq!(cold, closed);
 }
 
 /// A slot no cited row types `void` (`qsort`'s comparator returns `int`), or a take a call
@@ -1907,7 +1912,7 @@ fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
         "{premises:?}"
     );
     let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
-    assert!(cold.contains("the result is unproven"), "{cold}");
+    assert_eq!(cold, closed);
 }
 
 /// A non-PIE `_start` forms the address as an immediate, `mov edi, 0x1010`: the word inside that
@@ -2039,11 +2044,12 @@ fn a_main_a_wrapper_branches_to_returns_the_int_the_slot_reads() {
     open.analyse_program().expect("it surveys");
     let rendered = open.rendered(BASE + 0x40).expect("it renders");
     let text = rendered.response.output.into_text();
-    // A word, no residual: the decision is `Read(Integer)` (cold, the result is unproven).
+    // No residual: the decision is `Read(Integer)`; `main` hands back `helper`'s whole x0 (D610).
     assert!(
-        text.starts_with("r2sleigh_word_u64 fcn_1040(void)"),
+        text.starts_with("r2sleigh_result_u64 fcn_1040(void)"),
         "{text}"
     );
+    assert!(text.contains("unproven (WidthBetween)"), "{text}");
     assert!(
         text.contains("reads the result (assuming closed-world, ub-free)"),
         "{text}"
@@ -2113,7 +2119,8 @@ fn slotted_cycle_rendered(start: &[u8]) -> Vec<String> {
 #[test]
 fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
     for text in slotted_cycle_rendered(STARTS_HANDLER) {
-        assert!(text.starts_with("r2sleigh_word_u"), "{text}");
+        // Each tail hands back the next member's whole RAX: the width is unproven (D610).
+        assert!(text.starts_with("r2sleigh_result_u"), "{text}");
         assert!(
             text.contains("a call reads the result (assuming closed-world, ub-free)"),
             "{text}"

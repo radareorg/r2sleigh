@@ -159,25 +159,19 @@ def leaked_sections(binary: Path) -> list[str]:
 
 
 def discover(executable: Path, binary: Path, timeout: float) -> tuple[list[tuple[str, int]], str]:
-    """What ``afl`` lists: ``(name, address)``, with a placeholder for an unnamed one."""
+    """What ``aflj`` lists: ``(name, address)``, the name a flag spelling ``asm.demangle`` leaves alone."""
     try:
         proc = subprocess.run(  # noqa: S603
-            [str(executable), "-q", "-c", "afl", str(binary)],
+            [str(executable), "-q", "-c", "aflj", str(binary)],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
         return [], f"harness: r2s afl timed out after {timeout:g}s"
-    functions: list[tuple[str, int]] = []
-    for line in proc.stdout.splitlines():
-        fields = line.split()
-        if not fields or not fields[0].startswith("0x"):
-            continue
-        try:
-            address = int(fields[0], 16)
-        except ValueError:
-            continue
-        name = fields[-1] if len(fields) > 1 else "-"
-        functions.append((f"sub_{address:x}" if name == "-" else name, address))
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        rows = []
+    functions = [(row["name"], row["addr"]) for row in rows]
     ending = "" if proc.returncode == 0 else f"r2s afl exited {proc.returncode}"
     return functions, ending
 

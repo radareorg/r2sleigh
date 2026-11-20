@@ -387,3 +387,137 @@ fn comment_body(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// One note of a listing line, as `pdfj` carries it (D582, doc/adr-display.md): the text
+/// `pdf` prints and the fact's standing as typed fields. A refusal or an unknown has no basis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteJson {
+    pub kind: &'static str,
+    pub text: String,
+    /// The cell `pdf` writes after `;`.
+    pub mark: String,
+    pub basis: Option<&'static str>,
+    pub grade: Option<&'static str>,
+    pub premises: Vec<&'static str>,
+    pub refusal: Option<NoteRefusalJson>,
+    /// The cited row or document the fact stands on, where it carries one.
+    pub citation: Option<String>,
+}
+
+/// Why a note refuses its fact: the refusal's kind and its words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteRefusalJson {
+    pub kind: &'static str,
+    pub reason: String,
+}
+
+impl NoteJson {
+    /// One annotation as a note whose text the shell spelled.
+    pub fn of(annotation: &query::Annotation, text: String) -> Self {
+        let refusal = refusal_of(&annotation.kind);
+        Self::with(
+            kind_of(&annotation.kind),
+            annotation.mark(),
+            &annotation.confidence,
+            text,
+        )
+        .refused(annotation.kind.standing(), refusal)
+    }
+
+    /// A note no annotation is, as the callee's `noreturn` beside its call: a fact on `confidence`.
+    pub fn fact(
+        kind: &'static str,
+        confidence: &r2source::confidence::Confidence,
+        text: String,
+    ) -> Self {
+        Self::with(kind, confidence.mark(), confidence, text)
+    }
+
+    fn with(
+        kind: &'static str,
+        mark: query::Mark,
+        confidence: &r2source::confidence::Confidence,
+        text: String,
+    ) -> Self {
+        Self {
+            kind,
+            text,
+            mark: mark.cell().to_string(),
+            basis: Some(confidence.basis.spelled()),
+            grade: Some(confidence.basis.grade().spelled()),
+            premises: confidence
+                .premises
+                .iter()
+                .map(r2source::Premise::spelled)
+                .collect(),
+            refusal: None,
+            citation: None,
+        }
+    }
+
+    /// A refusal or an unknown stands on no basis, so none is stated.
+    fn refused(mut self, standing: query::Standing, refusal: Option<NoteRefusalJson>) -> Self {
+        if standing != query::Standing::Fact {
+            (self.basis, self.grade) = (None, None);
+            self.premises.clear();
+            self.refusal = refusal;
+        }
+        self
+    }
+}
+
+/// Each kind's name, one exhaustive match, so a kind added elsewhere is spelled before it compiles.
+fn kind_of(kind: &query::AnnotationKind) -> &'static str {
+    use query::AnnotationKind as K;
+    match kind {
+        K::Target { .. } => "target",
+        K::Reads { .. } => "reads",
+        K::Writes { .. } => "writes",
+        K::Computes { .. } => "computes",
+        K::Bounds { .. } => "bounds",
+        K::Holds { .. } => "holds",
+        K::Loaded { .. } => "loaded",
+        K::Points { .. } => "points",
+        K::Text { .. } => "text",
+        K::TextIfAddress { .. } => "text-if-address",
+        K::Call { .. } => "call",
+        K::ArgumentOf { .. } => "argument",
+        K::Switch { .. } => "switch",
+        K::Case { .. } => "case",
+        K::Default { .. } => "default",
+        K::Unresolved => "unresolved",
+        K::Loop { .. } => "loop",
+        K::Induction { .. } => "induction",
+        K::Trips(_) => "trips",
+        K::Returns { .. } => "returns",
+    }
+}
+
+/// A refusal kind's reason in the words its owner spells; none for a fact or an unknown.
+fn refusal_of(kind: &query::AnnotationKind) -> Option<NoteRefusalJson> {
+    use query::{AnnotationKind as K, ResultStanding as R};
+    match kind {
+        K::Call {
+            arguments: Err(refusal),
+            ..
+        } => Some(NoteRefusalJson {
+            kind: "call-boundary",
+            reason: refusal.to_string(),
+        }),
+        K::Returns {
+            standing: R::Unproven(cause),
+            ..
+        } => Some(NoteRefusalJson {
+            kind: "result-unproven",
+            reason: R::cause_name(*cause).to_owned(),
+        }),
+        K::Returns {
+            standing: R::Refused(refusal),
+            ..
+        } => Some(NoteRefusalJson {
+            kind: "result-refused",
+            reason: R::refusal_name(*refusal).to_owned(),
+        }),
+        _ => None,
+    }
+}

@@ -43,8 +43,9 @@ fn a_call_to_a_body_that_hands_on_its_argument_passes_it() {
         .response
         .output
         .into_text();
+    // `g` reads a dword through the slot, so it is a pointer to one (D610).
     assert!(
-        text.contains("f(5)") || text.contains("f((uint64_t)5U)"),
+        text.contains("f((r2sleigh_word_u32*)(uint64_t)5U)"),
         "{text}"
     );
     assert!(!text.contains("f()"), "{text}");
@@ -130,9 +131,8 @@ fn a_callee_with_an_unproven_result_still_states_its_arity() {
     .output
     .into_text();
     assert_eq!(text.matches("stash(").count(), 3, "{text}");
-    // No call reads its result, so no return type is claimed for it.
-    // The extern is the callee's own header: an unproven result, never `void` (W46).
-    assert!(text.contains("r2sleigh_result_u64 stash("), "{text}");
+    // `stash` hands back x0 untouched and no call reads it: void under the closed world (D213).
+    assert!(text.contains("void stash("), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains(", 0)"), "{text}");
 }

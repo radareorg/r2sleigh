@@ -47,8 +47,9 @@ fn functions(binary: &Path) -> Vec<u64> {
 /// The instruction starts `pdf` lists for the function at `addr`.
 fn instructions(binary: &Path, addr: u64) -> BTreeSet<u64> {
     let (out, _) = shell(binary, &format!("pdf @ {addr:#x}"));
+    // From the address on: the rail and lanes before it are layout (D565).
     out.lines()
-        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|line| line[line.find("0x")?..].split_whitespace().next())
         .filter_map(|word| word.strip_prefix("0x"))
         .filter_map(|hex| u64::from_str_radix(hex, 16).ok())
         .collect()
@@ -456,9 +457,9 @@ fn unassigned_reads_at_o2(definition: &str, answer: &Value) -> Option<String> {
     } else {
         (
             // The stack-protector check is compiler-inserted, so the canary's reads are gone; the
-            // result of `dispatch`, a call past its floor (audit W7), is never assigned too.
-            vec!["never-assigned", "never-assigned"],
-            named.contains("2 never assigned, read as residuals (rax_19, xmm0_4)")
+            // result of `dispatch` is never assigned, while `avg`'s call decides its double (D573).
+            vec!["never-assigned"],
+            named.contains("1 never assigned, read as residuals (rax_19)")
                 && !code.contains("FS_OFFSET"),
         )
     };

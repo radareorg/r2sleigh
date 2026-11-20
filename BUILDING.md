@@ -3,7 +3,7 @@ Building r2sleigh
 
 | Dependency | Version | Notes |
 |------------|---------|-------|
-| Rust | 1.99 | edition 2024, via [rustup](https://rustup.rs/); `rust-toolchain.toml` pins it |
+| Rust | 1.100 | edition 2024, via [rustup](https://rustup.rs/); `rust-toolchain.toml` pins it |
 | radare2 | 5.9+ | optional; only the differential harnesses run it |
 | Z3 | 4.8+ | optional |
 

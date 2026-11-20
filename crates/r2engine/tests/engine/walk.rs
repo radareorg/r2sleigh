@@ -165,7 +165,7 @@ const NESTED: &[u8] = &[0xff, 0xe0, 0xff, 0xe1, 0xc3];
 #[test]
 fn a_trace_follows_a_dispatch_an_arm_reaches_from_the_same_tables() {
     let (disasm, program) = (x86_64(), reader(NESTED));
-    let mut trace = r2engine::body::Trace::start(BASE, &disasm, &program).expect("trace");
+    let mut trace = r2engine::body::Trace::start(BASE, &disasm, &program, false).expect("trace");
     let arms = BTreeMap::from([(BASE, vec![0x1002]), (0x1002, vec![0x1004])]);
     trace.dispatch(&arms, &disasm, &program);
     assert_eq!(trace.dispatches().collect::<Vec<_>>(), Vec::<u64>::new());

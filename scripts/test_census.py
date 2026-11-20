@@ -268,6 +268,33 @@ class CountedBudget(unittest.TestCase):
         census.causes()
 
 
+class Twins(unittest.TestCase):
+    """D573: a cold case whose answer is its base's `aa; X` is timed and counted against that twin."""
+
+    def ledger(self, text):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as ledger:
+            ledger.write(text)
+        return census.causes(ledger.name)
+
+    def test_a_twin_line_runs_the_base_with_its_prefix_for_its_base_commit_only(self) -> None:
+        entries = self.ledger(f"twin | pumasim pdd @ 0x0023fdf0 | {GE_BASE} | aa | D573 | one world\n")
+        case, command = "pumasim pdd @ 0x0023fdf0", "pdd @ 0x0023fdf0"
+        self.assertEqual(census.twinned(case, command, entries, GE_BASE), "aa; pdd @ 0x0023fdf0")
+        self.assertEqual(census.twinned(case, command, entries, "1" * 40), command)
+        self.assertEqual(census.twinned("0pack afl", "afl", entries, GE_BASE), "afl")
+
+    def test_a_twin_line_raises_no_ceiling(self) -> None:
+        entries = self.ledger(f"twin | pumasim pdd @ 0x0023fdf0 | {GE_BASE} | aa | D573 | one world\n")
+        rise = census.counted_rise("instructions", "pumasim pdd @ 0x0023fdf0", 100, 102, 1.01, entries, GE_BASE)
+        self.assertIn("1.0200x", rise)
+
+    def test_a_twin_line_without_a_row_or_a_prefix_is_refused(self) -> None:
+        for line in (f"twin | pumasim afl | {GE_BASE} | aa | because | x\n",
+                     f"twin | pumasim afl | {GE_BASE} |  | D573 | x\n"):
+            with self.assertRaises(SystemExit):
+                self.ledger(line)
+
+
 class CountedInstructions(unittest.TestCase):
     """D343: D365's adaef5bf0 against its parent, cold pumasim 0x23fdf0 under qemu-x86_64 (contabo)."""
 

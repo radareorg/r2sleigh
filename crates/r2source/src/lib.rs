@@ -17,7 +17,9 @@ pub mod convention;
 pub mod display_names;
 pub mod native;
 pub mod negative;
-pub use confidence::{Basis, Citation, Confidence, Fact, Grade, Never, NeverProof, Premise};
+pub use confidence::{
+    Basis, Citation, Confidence, Fact, Grade, Mark, Never, NeverProof, Premise, Premises,
+};
 pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
@@ -152,11 +154,11 @@ pub struct SourceSlotOrigin {
 /// The result lanes a reading call takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SourceReadLanes {
-    Integer,
+    /// The integer register's low bytes; `widest` is the widest read's extent in bytes where every
+    /// read of the lane is known (D610), none where a way in or a read's reach is not.
+    Integer { widest: Option<u8> },
     /// The float register's low bytes, as wide as every read that states a width.
-    Float {
-        bytes: u8,
-    },
+    Float { bytes: u8 },
     /// The integer and second integer registers, one value.
     Pair,
 }
@@ -391,6 +393,8 @@ pub struct OwnedFunctionImage {
     /// container's call-frame information states it: a fact about the frame
     /// the code builds, read from the binary rather than from the code.
     frame_saves: Box<[SourceFrameSave]>,
+    /// How many landing pads the function's calls unwind to, held apart from `blocks` (D570).
+    landing_pads: u32,
     total_source_bytes: usize,
 }
 
@@ -530,6 +534,11 @@ impl OwnedFunctionImage {
     /// offset. Empty where the container states none.
     pub fn frame_saves(&self) -> &[SourceFrameSave] {
         &self.frame_saves
+    }
+
+    /// How many landing pads no block of the image holds: exceptional flow no analysis reads (D570).
+    pub const fn landing_pads(&self) -> u32 {
+        self.landing_pads
     }
 
     pub const fn blocks(&self) -> &[OwnedFunctionBlock] {
@@ -1246,6 +1255,7 @@ mod tests {
                 data_types: None,
                 code_pointer_tables: Box::new([]),
                 frame_saves: Box::new([]),
+                landing_pads: 0,
                 entry_address: 0x1000,
                 blocks: vec![OwnedFunctionBlock {
                     address: 0x1000,

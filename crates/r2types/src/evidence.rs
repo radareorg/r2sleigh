@@ -48,6 +48,9 @@ pub struct EvidenceTypes {
     value_types: r2ssa::dense::IdMap<r2ssa::ValueId, CTypeLike>,
     /// Each parameter entry value a declared callee slot types: the pointer, or why none (D262).
     declared: r2ssa::dense::IdMap<r2ssa::ValueId, DeclaredBound>,
+    /// Each parameter entry value handed whole to callees whose bodies access through it: the
+    /// widths they access at (D610).
+    handed: r2ssa::dense::IdMap<r2ssa::ValueId, r2ssa::AccessWidths>,
 }
 
 /// The declared pointers met so far at one entry value; a conflict stays one (D262).
@@ -99,6 +102,94 @@ impl Identity {
             _ => Self::Bottom,
         }
     }
+}
+
+/// The integer argument registers the site numbers, and its callee's access widths where read.
+fn site_of<'a>(
+    source: &'a r2ssa::SsaArtifact,
+    certificate: &r2ssa::CallsiteCertificate,
+) -> (
+    &'a [r2ssa::CanonicalStorageId],
+    Option<&'a r2ssa::ArgumentWidths>,
+) {
+    let (graph, context) = (source.graph(), source.machine_context());
+    let Some(target) = certificate.direct_target else {
+        return (&[], None);
+    };
+    let instruction = graph.instruction_for_inst(certificate.at);
+    let registers = context.site_integer_arguments(instruction, Some(target));
+    (registers, context.callee_dereferenced(target))
+}
+
+/// The widths each parameter entry value is accessed at by the callees it is handed whole, at the
+/// position the site's convention numbers it (D610). O(arguments).
+fn handed_dereferenced(
+    source: &r2ssa::SsaArtifact,
+    identities: &r2ssa::dense::IdVec<r2ssa::ValueId, Option<r2ssa::ValueId>>,
+) -> IdMap<r2ssa::ValueId, r2ssa::AccessWidths> {
+    let mut handed = IdMap::<r2ssa::ValueId, r2ssa::AccessWidths>::new(source.graph().values.len());
+    for certificate in source.certificates().callsites.values() {
+        // Most arguments are no entry value: the site's numbering is read only for one that is.
+        let mut site = None;
+        for argument in &certificate.argument_certificates {
+            let Some(entry) = identities.get(argument.value).copied().flatten() else {
+                continue;
+            };
+            let (registers, stated) = *site.get_or_insert_with(|| site_of(source, certificate));
+            // A callee no read body states, or a place its summary does not number, may access
+            // through it at any width.
+            let position = match argument.location {
+                r2ssa::CallArgumentLocation::Register { storage } => {
+                    registers.iter().position(|slot| *slot == storage)
+                }
+                _ => None,
+            };
+            let widths = match (stated, position) {
+                (Some(stated), Some(position)) => match stated.at(position) {
+                    Some(widths) => widths,
+                    None => continue,
+                },
+                _ => r2ssa::AccessWidths::OPEN_ONLY,
+            };
+            r2il::refusal_evidence!("handed", "{entry:?} at {position:?}: {widths:?}");
+            let joined = handed.get(entry).map_or(widths, |held| held.join(widths));
+            handed.insert(entry, joined);
+        }
+    }
+    if handed.is_empty() {
+        return handed;
+    }
+    // A call whose arguments are not all stated, or one no certificate states, may be handed any
+    // parameter: each may then be accessed at a width nothing states.
+    let certificates = &source.certificates().callsites;
+    let unstated = certificates.len() < source.facts().call_sites.by_id.len()
+        || certificates.values().any(|site| !site.arguments_complete);
+    let parameters = source.facts().boundaries.parameters.values();
+    let entries = parameters
+        .filter_map(|parameter| parameter.value())
+        .collect::<Vec<_>>();
+    // The body's own accesses at no argument region, read only where a pointee would be claimed.
+    let claims = !unstated
+        && (entries.iter()).any(|entry| handed.get(*entry).is_some_and(|w| w.only().is_some()));
+    let own = claims.then(|| r2ssa::own_unstated_access_formals(source));
+    let own_open = |entry: r2ssa::ValueId| match own {
+        Some(Some(bits)) => {
+            (source.formal_parameter_of(entry)).is_none_or(|f| r2ssa::names_formal(bits, f))
+        }
+        Some(None) => true,
+        None => false,
+    };
+    // Only a stated access proves an address; an open use alone states nothing.
+    for entry in entries {
+        match handed.get(entry).copied() {
+            Some(widths) if !widths.accessed() => _ = handed.remove(entry),
+            Some(widths) if unstated || own_open(entry) => {
+                handed.insert(entry, widths.join(r2ssa::AccessWidths::OPEN_ONLY));
+            }
+            _ => {}
+        }
+    }
+    handed
 }
 
 /// The entry value each value is on every path, once per function: a worklist where each value
@@ -188,6 +279,12 @@ impl EvidenceTypes {
     /// What declared callee slots state of parameter entry value `value`, where one is handed it.
     pub fn declared_bound(&self, value: r2ssa::ValueId) -> Option<&DeclaredBound> {
         self.declared.get(value)
+    }
+
+    /// The widths callees access at through parameter entry value `value`, where one handed it
+    /// whole loads or stores through it (D610).
+    pub fn handed_dereferenced(&self, value: r2ssa::ValueId) -> Option<r2ssa::AccessWidths> {
+        self.handed.get(value).copied()
     }
 }
 
@@ -818,8 +915,10 @@ impl<'a> EvidenceBuilder<'a> {
             }
         }
 
+        let (declared, handed) = self.declared_bounds();
         let mut types = EvidenceTypes {
-            declared: self.declared_bounds(),
+            declared,
+            handed,
             ..EvidenceTypes::default()
         };
         for (node, ty) in self.solver.typed() {
@@ -834,9 +933,14 @@ impl<'a> EvidenceBuilder<'a> {
         types
     }
 
-    /// What type-bearing callee slots state of each parameter entry value: a pointer only at the
-    /// entry value itself, an integer anywhere in its class (D262). O(slots x walk + parameters).
-    fn declared_bounds(&mut self) -> IdMap<r2ssa::ValueId, DeclaredBound> {
+    /// What typed callee slots state of each entry value, a pointer at itself and an integer in its
+    /// class (D262), and its accessing callees' widths (D610). O(slots x walk + arguments).
+    fn declared_bounds(
+        &mut self,
+    ) -> (
+        IdMap<r2ssa::ValueId, DeclaredBound>,
+        IdMap<r2ssa::ValueId, r2ssa::AccessWidths>,
+    ) {
         let source = self.source;
         let values = source.graph().values.len();
         let mut entries = r2ssa::dense::IdSet::<r2ssa::ValueId>::new(values);
@@ -878,7 +982,7 @@ impl<'a> EvidenceBuilder<'a> {
                 declared.insert(value, met.bound());
             }
         }
-        declared
+        (declared, handed_dereferenced(source, &identities))
     }
 
     fn spell(

@@ -45,6 +45,12 @@ pub enum UnprovenCause {
     ForwardCycle,
     /// The convention states no complete set of result lanes, so none is proven empty.
     LanesUnbounded,
+    /// A call reads the result, but not every read is known, so none bounds its width (D610).
+    WidthUnbounded,
+    /// Every read takes another width than the body writes: the C type may be either (D610).
+    WidthBetween,
+    /// Every read and the body agree on a pointer's width, and nothing states whether it is one (D610).
+    PointerWide,
 }
 
 impl UnprovenCause {
@@ -57,6 +63,9 @@ impl UnprovenCause {
             Self::Unread => "Unread",
             Self::ForwardCycle => "ForwardCycle",
             Self::LanesUnbounded => "LanesUnbounded",
+            Self::WidthUnbounded => "WidthUnbounded",
+            Self::WidthBetween => "WidthBetween",
+            Self::PointerWide => "PointerWide",
         }
     }
 
@@ -284,6 +293,16 @@ impl ReturnTypeFact {
         {
             return Self::unproven(source);
         }
+        // An integer register result a call reads is decided where every read and the body agree (D610).
+        if let Some(read) = interface.and_then(|interface| read_width(source, interface)) {
+            return match read {
+                Ok(bits) => {
+                    let ty = graph.unwrap_or_else(|| CTypeLike::uint(bits));
+                    Self::decided_by(ty, ReturnTypeEvidence::Carrier)
+                }
+                Err((bits, cause)) => Self::unproven_at(source, Some(bits), Some(cause), true),
+            };
+        }
         if let Some(ty) = graph {
             return Self::decided_by(ty, ReturnTypeEvidence::Carrier);
         }
@@ -367,16 +386,46 @@ fn declared(source: &r2ssa::SsaArtifact) -> Option<CTypeLike> {
 /// The width a body's own integer result is written at, where nothing else states it: a float or a
 /// pair a reading call decided stays a value (doc/adr-scratch-result.md, "Rendering of Unproven").
 fn written_bits(interface: &r2ssa::SourceFunctionInterface) -> Option<u32> {
+    (!interface.result_read_by_callers())
+        .then(|| written_width(interface))
+        .flatten()
+}
+
+/// The width a register result's returns write: its logical value's, within the storage word.
+fn written_width(interface: &r2ssa::SourceFunctionInterface) -> Option<u32> {
     let r2ssa::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
         return None;
     };
-    if interface.result_read_by_callers() {
-        return None;
-    }
     let whole = storage.size.saturating_mul(8);
     let logical = (interface.return_logical_value())
         .and_then(|value| u32::try_from(value.carrier().size_bits()).ok());
     Some(logical.map_or(whole, |bits| bits.min(whole)))
+}
+
+/// The width a read integer result is decided at (D610): the body's, where every read is known, the
+/// widest takes exactly that width, and it holds no pointer; else the body's width, unproven, and why.
+fn read_width(
+    source: &r2ssa::SsaArtifact,
+    interface: &r2ssa::SourceFunctionInterface,
+) -> Option<Result<u32, (u32, UnprovenCause)>> {
+    let r2source::SourceClosedResult::Read(r2source::SourceReadLanes::Integer { widest }) =
+        interface.closed_result()?
+    else {
+        return None;
+    };
+    let written = written_width(interface)?;
+    let Some(widest) = widest else {
+        return Some(Err((written, UnprovenCause::WidthUnbounded)));
+    };
+    // A caller may truncate (`(int)f()`) and a body widen (`movzx eax, al`): only agreement pins it.
+    if u32::from(widest).saturating_mul(8) != written {
+        return Some(Err((written, UnprovenCause::WidthBetween)));
+    }
+    let pointer = (source.machine_context().memory_model()).default_address_bits();
+    Some(match written < pointer {
+        true => Ok(written),
+        false => Err((written, UnprovenCause::PointerWide)),
+    })
 }
 
 /// What each value-carrying return hands back, then each tail call's result.

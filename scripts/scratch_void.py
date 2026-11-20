@@ -43,9 +43,9 @@ from target import TARGETS, Target, by_name  # noqa: E402
 
 CLASSES = ("void-open", "void-closed", "refused", "unanswered")
 VOIDS = ("void-open", "void-closed")
-# The Unproven causes the ADR names (doc/adr-scratch-result.md, "Rendering of Unproven").
-CAUSES = ("Written", "EntryInput", "Unread", "ForwardCycle")
-CAUSE = re.compile(r"r2dec proof:[^\n]*?\b(" + "|".join(CAUSES) + r")\b")
+# The Unproven cause the proof line names for the result (`r2types::UnprovenCause::name`), whichever it is, so a
+# cause added later (D610's `WidthUnbounded`, `WidthBetween`, `PointerWide`) is counted by its name.
+CAUSE = re.compile(r"r2dec proof:[^\n]*?; the result is unproven \((\w+)\)")
 CLONE = re.compile(r"\.(isra|constprop|part)\.\d")
 KINDS = ("clone", "defect", "moves")
 OWNER = re.compile(r"\bD\d+\b")

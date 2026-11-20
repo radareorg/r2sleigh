@@ -47,14 +47,19 @@ impl BodyWalk {
         self.trace.exits_after()
     }
 
-    /// Every direct call target the walk reached.
-    pub(super) fn calls(&self) -> &std::collections::BTreeSet<u64> {
-        self.trace.calls()
+    /// Each direct call as (target, instruction): the survey's caller sites (D566).
+    pub(super) fn call_sites(&self) -> &[(u64, u64)] {
+        self.trace.call_sites()
     }
 
-    /// Every function entry the walk leaves for by a direct branch.
-    pub(super) fn tail_calls(&self) -> impl Iterator<Item = u64> + '_ {
-        self.trace.tail_calls().iter().copied()
+    /// Each branch to another function's entry as (target, instruction).
+    pub(super) fn tail_sites(&self) -> &[(u64, u64)] {
+        self.trace.tail_sites()
+    }
+
+    /// Whether a call of the body unwinds to a landing pad (D570).
+    pub(super) fn unwinds(&self) -> bool {
+        self.trace.unwinds()
     }
 
     /// The bytes the walk decoded as this body's instructions.
@@ -70,6 +75,8 @@ pub(super) struct Walking<'p, S: Source + 'static> {
     thumb: Option<NativeTarget<'p>>,
     /// Whether a body is walked in the instruction set its callers enter it in, rather than the one the program places there.
     entered: bool,
+    /// Whether each walk records its calls' unwinds: the survey walks their pads, a return does not (D599).
+    unwinds: bool,
 }
 
 /// The program as one walk in one instruction set reads it, told which callees are known to come back.
@@ -141,6 +148,10 @@ impl crate::body::Program for Knowing<'_> {
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.program.return_address_register()
     }
+
+    fn landing_pad(&self, last: u64) -> Option<u64> {
+        self.program.landing_pad(last)
+    }
 }
 
 impl<'p, S: Source + 'static> Walking<'p, S> {
@@ -154,7 +165,26 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
             primary,
             thumb,
             entered,
+            unwinds: false,
         })
+    }
+
+    /// The same walker, each walk recording its calls' unwinds for `walk_pads` (D570).
+    pub(super) const fn recording_unwinds(mut self) -> Self {
+        self.unwinds = true;
+        self
+    }
+
+    /// Walk the landing pads of a body the survey walked, its callees' returns as `returns` says (D570).
+    pub(super) fn walk_pads(&self, walk: &mut BodyWalk, returns: &dyn Fn(u64, bool) -> bool) {
+        let knowing = Knowing {
+            program: &self.program,
+            thumb: walk.thumb,
+            returns,
+            halts: &walk.halts,
+        };
+        let disasm = self.target(walk.thumb).disasm;
+        walk.trace.walk_pads(disasm, &knowing);
     }
 
     /// The decoder a body is walked with.
@@ -221,24 +251,29 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             true => thumb && self.thumb.is_some(),
             false => self.program.thumb_at(address),
         };
-        let halts = Halts::default();
-        let knowing = Knowing {
-            program: &self.program,
-            thumb,
-            returns,
-            halts: &halts,
-        };
-        let disasm = self.target(thumb).disasm;
-        let mut trace = Trace::start(address, disasm, &knowing).map_err(NativeRefusal::Body)?;
-        let transfers = Self::step(&mut trace, thumb);
-        let walk = BodyWalk {
-            entry: address,
-            trace,
-            thumb,
-            tables: Tabled::Unread,
-            halts,
-        };
-        Ok((walk, transfers))
+        // A defect reading one body refuses that body's walk, never the survey (D587).
+        let walked = crate::isolation::isolated(|| {
+            let halts = Halts::default();
+            let knowing = Knowing {
+                program: &self.program,
+                thumb,
+                returns,
+                halts: &halts,
+            };
+            let disasm = self.target(thumb).disasm;
+            let trace = Trace::start(address, disasm, &knowing, self.unwinds);
+            let mut trace = trace.map_err(NativeRefusal::Body)?;
+            let transfers = Self::step(&mut trace, thumb);
+            let walk = BodyWalk {
+                entry: address,
+                trace,
+                thumb,
+                tables: Tabled::Unread,
+                halts,
+            };
+            Ok((walk, transfers))
+        });
+        walked.unwrap_or_else(|panicked| Err(NativeRefusal::from(panicked)))
     }
 
     fn open(
@@ -335,7 +370,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             returns,
             halts: &halts,
         };
-        let mut trace = Trace::start(walk.entry, target.disasm, &knowing).ok()?;
+        let mut trace = Trace::start(walk.entry, target.disasm, &knowing, self.unwinds).ok()?;
         let transfers = Self::step(&mut trace, walk.thumb);
         (walk.trace, walk.halts, walk.tables) = (trace, halts, Tabled::Unread);
         Some(transfers)
@@ -345,14 +380,14 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         let target = self.target(walk.thumb);
         let callees = walk.trace.calls().iter().chain(walk.trace.tail_calls());
         let loads = walk.trace.loads();
-        // Preparing costs far more than walking, so only a body that calls something declared to take a function is lifted and prepared.
+        // Lifting costs more than walking, so only a body that calls something declared to take a function is lifted and read.
         if !crate::native::hands_a_function(target, &self.program, callees.copied(), loads) {
             return Vec::new();
         }
         let Ok(body) = self.lifted(walk.entry, walk.thumb, returns) else {
             return Vec::new();
         };
-        crate::native::handed(target, &self.program, body)
+        crate::native::handed(target, &self.program, &body)
             .into_iter()
             .map(|pointer| match self.thumb.is_some() {
                 // A handed pointer states its instruction set in its low bit, as `bx` reads it.

@@ -31,6 +31,7 @@ impl SSAFunction {
         Self {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
+            system_calls: BTreeSet::new(),
             callee_passes: Arc::default(),
             frame_points: None,
             promoted_slots: std::collections::BTreeSet::new(),
@@ -42,6 +43,8 @@ impl SSAFunction {
             decided_dead_blocks: BTreeMap::new(),
             decided_dead_edges: BTreeSet::new(),
             premises: BTreeSet::new(),
+            result_premises: BTreeSet::new(),
+            callee_premises: Arc::default(),
             assumed_exits: super::AssumedExits::default(),
             stack_pointer_carrier: None,
             name: None,
@@ -591,6 +594,9 @@ impl SSAFunction {
             supervisor_calls: arch
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
+            system_calls: arch
+                .map(|arch| arch.system_calls.iter().copied().collect())
+                .unwrap_or_default(),
             callee_passes: Arc::default(),
             frame_points: None,
             promoted_slots: std::collections::BTreeSet::new(),
@@ -602,6 +608,8 @@ impl SSAFunction {
             decided_dead_blocks: BTreeMap::new(),
             decided_dead_edges: BTreeSet::new(),
             premises: BTreeSet::new(),
+            result_premises: BTreeSet::new(),
+            callee_premises: Arc::default(),
             assumed_exits: super::AssumedExits::default(),
             stack_pointer_carrier: None,
             name: None,

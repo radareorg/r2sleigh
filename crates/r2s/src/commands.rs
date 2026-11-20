@@ -258,6 +258,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(crate::listing::disassemble_function)
     ),
     verb!(
+        ["pdfj"],
+        Address,
+        Public,
+        "a function's listing as JSON, each line with its notes",
+        Some(crate::opcodes::function_json)
+    ),
+    verb!(
         ["pdd"],
         Address,
         Public,
@@ -289,7 +296,7 @@ pub(crate) const VERBS: &[Verb] = &[
         ["aa"],
         None,
         Public,
-        "analyse every function: each rendering then reads its callers too",
+        "survey the program once: later answers are faster, never different",
         Some(|session, _| session.program.analyse_program().map(|()| String::new()))
     ),
     verb!(
@@ -436,11 +443,27 @@ fn help() -> String {
     out
 }
 
-/// `verb?`: one verb's usage, and the other names it answers to.
-fn usage(verb: &Verb) -> String {
+/// `verb?`: one verb's usage, and the other names it answers to; `pd?` ends with the mark legend,
+/// each cell in the proof role a listing paints it in.
+fn usage(verb: &Verb, paints: Option<r2s_tui::theme::Depth>) -> String {
     let mut out = format!("Usage: {}  {}", verb.usage(), verb.summary);
     if verb.names.len() > 1 {
         out.push_str(&format!("\naliases: {}", verb.names[1..].join(" ")));
+    }
+    if verb.names[0] == "pd" {
+        out.push_str("\nmarks after ';':");
+        for mark in r2engine::query::Mark::ALL.into_iter().rev() {
+            let cell = match mark.cell() {
+                ' ' => "(space)".to_owned(),
+                cell => cell.to_string(),
+            };
+            let roles = r2s_tui::theme::Role::marked(mark.cell()).map(|role| (0..cell.len(), role));
+            let cell = match paints {
+                Some(depth) => r2s_tui::theme::ansi(&cell, &Vec::from_iter(roles), depth),
+                None => cell,
+            };
+            out.push_str(&format!("\n{cell}  {}", mark.reads_as()));
+        }
     }
     out
 }
@@ -455,7 +478,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
         return Ok(help());
     }
     if let Some(named) = verb.strip_suffix('?').and_then(find) {
-        return Ok(usage(named));
+        return Ok(usage(named, session.paints()));
     }
     match find(verb).and_then(|verb| verb.run) {
         Some(run) => run(session, argument),
@@ -498,7 +521,7 @@ pub(crate) fn parse_number(session: &mut Session, text: &str) -> Result<u64, Str
     }
     session
         .program
-        .address_named(text)?
+        .address_spelled(text)?
         .ok_or_else(|| format!("unknown address or flag '{}'", text))
 }
 
@@ -557,6 +580,10 @@ fn info(session: &Session) -> Result<String, String> {
         image.container().languages.program.spelled()
     ));
     posture(&mut out, image.container());
+    // A `.gnu_debugdata` section refused whole: no symbol of it is listed (D572).
+    if let Some(refused) = image.minidebug_refusal() {
+        out.push_str(&format!("minidebug refused: {refused}\n"));
+    }
     if let Some(entry) = image
         .entry_points()
         .iter()
@@ -641,7 +668,8 @@ pub(crate) fn discovered(session: &mut Session) -> Result<Table, String> {
     // radare2's layout, with no header: `addr nbbs size name`, so the two
     // diff line for line. How sure discovery is moved to `aflj`.
     let mut table = Table::default();
-    for row in listed_functions(session)? {
+    let demangle = session.demangle;
+    for row in listed_functions(session, demangle)? {
         table.row(
             Some(row.address),
             format!(
@@ -656,7 +684,8 @@ pub(crate) fn discovered(session: &mut Session) -> Result<Table, String> {
 /// `aflj`: the same rows as JSON objects, with radare2's keys and the reason
 /// discovery believes each one.
 fn discovered_json(session: &mut Session) -> Result<String, String> {
-    let rows = listed_functions(session)?
+    // JSON keeps the flag spelling (`asm.demangle` shows names; it does not rename them).
+    let rows = listed_functions(session, false)?
         .into_iter()
         .map(|row| {
             serde_json::json!({
@@ -680,10 +709,11 @@ struct ListedFunction {
     confidence: String,
 }
 
-/// Every function discovery found, with the blocks and span its walk traced.
-fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String> {
+/// Every function discovery found, with the blocks and span its walk traced, named as `demangle` shows.
+fn listed_functions(session: &mut Session, demangle: bool) -> Result<Vec<ListedFunction>, String> {
     let found = session.program.functions()?;
     let extents = session.program.function_extents()?;
+    let names = session.program.names();
     Ok(found
         .iter()
         .map(|one| {
@@ -692,15 +722,8 @@ fn listed_functions(session: &mut Session) -> Result<Vec<ListedFunction>, String
                 address: one.address,
                 blocks: extent.map_or(0, |extent| extent.blocks),
                 size: extent.map_or(0, |extent| extent.bytes),
-                // Spelled as a listing spells it, which is how radare2 writes
-                // it and what makes the two comparable.
-                name: session
-                    .program
-                    .names()
-                    .of(one.address)
-                    .map(r2engine::names::Name::spelled)
-                    .or_else(|| one.name.clone())
-                    .unwrap_or_else(|| format!("fcn.{:08x}", one.address)),
+                // Shown as a listing shows it, which is how radare2 writes it.
+                name: names.function(one.address, demangle),
                 confidence: one.confidence.to_string(),
             }
         })
@@ -831,7 +854,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
     for (fact, source) in index.to(wanted) {
         count += 1;
         let text = match &source.line.syntax {
-            Some(_) => crate::listing::spelled(&source.line, &names),
+            Some(_) => crate::listing::spelled(&source.line, &names, session.demangle),
             // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
             None => format!("{} {wanted:#010x}", datum(session)),
         };
@@ -841,7 +864,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
             false => source
                 .owners
                 .iter()
-                .map(|owner| names.function(*owner))
+                .map(|owner| names.function(*owner, session.demangle))
                 .collect(),
         };
         for owner in owners {
@@ -935,7 +958,7 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
         .map(|&(count, one, many)| format!("{count} {}", if count == 1 { one } else { many }))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("\n; covers {read} functions; {gaps} — absence is not proof")
+    format!("\n; covers {read} functions; {gaps}; absence is not proof")
 }
 
 /// Every string the data sections hold.
@@ -999,7 +1022,7 @@ fn every_string(session: &Session) -> Result<String, String> {
             text.len() + 1,
             section_of(session, *paddr, true),
             text_type(text),
-            escaped(text)
+            r2engine::names::escaped(text)
         ));
     }
     Ok(out)
@@ -1024,7 +1047,7 @@ fn string_table(session: &Session, found: &[(u64, String)]) -> Table {
                 text.len() + 1,
                 section_of(session, *vaddr, false),
                 text_type(text),
-                escaped(text)
+                r2engine::names::escaped(text)
             ),
         );
     }
@@ -1051,22 +1074,6 @@ fn text_type(text: &str) -> &'static str {
         true => "ascii",
         false => "utf8",
     }
-}
-
-/// A string as radare2 prints one: each control character escaped, so one string is one line.
-fn escaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Every address this binary has a name for, spelled as radare2 spells it.
@@ -1232,12 +1239,14 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
         .iter()
         .filter(|symbol| !symbol.import)
         .collect();
-    // Numbered as the static table numbers them, where it states them.
+    // Numbered as the static table numbers them, where it states them; a MiniDebugInfo symbol by
+    // the inner `.symtab`'s number, as radare2 numbers it.
     let nth = |symbol: &r2image::Symbol| {
-        symbol.origin.table.map_or(
-            (true, symbol.origin.dynamic.or(symbol.origin.directory)),
-            |index| (false, Some(index)),
-        )
+        let origin = &symbol.origin;
+        let other = origin.dynamic.or(origin.directory).or(origin.minidebug);
+        origin
+            .table
+            .map_or((true, other), |index| (false, Some(index)))
     };
     stated.sort_by_key(|symbol| nth(symbol));
     for symbol in stated {
@@ -1600,16 +1609,33 @@ fn replay_stop(stop: r2engine::query::replay::ReplayStop) -> serde_json::Value {
 fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
-    let roles = match (&rendering.response.output, session.paints()) {
-        (r2engine::EngineRendering::Function(rendered), true) => {
-            Some(crate::listing::c_roles(rendered.emission().roles()))
+    let laid = match &rendering.response.output {
+        r2engine::EngineRendering::Function(rendered) if session.railed() || session.pdd_addr => {
+            let emission = rendered.emission();
+            let residuals = emission.residuals().len();
+            let notes = crate::rails::notes(session, addr, &rendering.response, residuals);
+            let stated = crate::rails::Stated {
+                text: emission.definition(),
+                indent: emission.indent(),
+                roles: crate::listing::c_roles(emission.roles()),
+                depths: emission.depths(),
+                proof: emission.proof_line(),
+                lowest: emission.lowest_addresses(),
+            };
+            Some(crate::rails::laid(session, &stated, &notes))
         }
-        _ => None,
+        r2engine::EngineRendering::Function(rendered) => {
+            let roles = crate::listing::c_roles(rendered.emission().roles());
+            Some((rendered.emission().definition().to_owned(), roles))
+        }
+        r2engine::EngineRendering::Listing(_) => None,
     };
     let text = rendering.response.output.into_text();
-    let mut out = match roles {
-        Some(roles) => r2s_tui::theme::ansi(&text, &roles),
-        None => text,
+    // Plain `pdd` is the definition's bytes; the layout is only where a key asks for it (D568).
+    let mut out = match (laid, session.paints()) {
+        (Some((text, roles)), Some(depth)) => r2s_tui::theme::ansi(&text, &roles, depth),
+        (Some((laid, _)), None) if session.railed() || session.pdd_addr => laid,
+        _ => text,
     };
     // A callee whose analysis panicked is a defect in the engine, not a fact
     // about the program, so it is printed with the rendering it degraded
@@ -1633,11 +1659,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
 fn decompile_json(session: &mut Session, argument: &str) -> Result<String, String> {
     let addr = parse_number(session, argument)?;
     let rendering = session.program.rendered(addr)?;
-    let name = session
-        .program
-        .names()
-        .of(addr)
-        .map_or_else(|| format!("fcn.{addr:08x}"), r2engine::names::Name::spelled);
+    let name = session.program.names().function(addr, false);
     serde_json::to_string(&rendering.answer(&name, addr)).map_err(|error| error.to_string())
 }
 

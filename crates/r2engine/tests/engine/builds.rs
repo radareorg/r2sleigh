@@ -1,5 +1,5 @@
-//! A callee's result is resolved from one build of it: the owners its build names are resolved
-//! first, and their statements update that build (doc/adr-callee-builds.md).
+//! A callee resolved against its owners' statements keeps or rebuilds its build as they move it
+//! (doc/adr-callee-builds.md); since D573 every read is the closed world's.
 
 use crate::common;
 
@@ -43,8 +43,6 @@ fn an_owners_statement_updates_the_build_that_named_it() {
         "{text}"
     );
     let stats = open.analysis_stats();
-    // No callee is read alone and then again against its owners.
-    assert_eq!(stats.callee_reads.computed, 0, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
 
@@ -59,7 +57,7 @@ fn a_callee_resolved_from_its_build_reads_as_one_rendered_first() {
 }
 
 /// `mov eax, 7; ret`, then `call 0x1000; ret`, then `call 0x1010; mov [rsi], eax; ret`: the leaf's
-/// statement builds its caller again.
+/// statement reaches the root through `middle`.
 const VALUE: &[u8] = &[
     0xb8, 0x07, 0x00, 0x00, 0x00, // 1000 mov eax, 7
     0xc3, // 1005 ret
@@ -74,7 +72,7 @@ const VALUE: &[u8] = &[
 ];
 
 #[test]
-fn an_owner_that_moves_the_build_has_it_built_again() {
+fn an_owners_statement_reaches_the_root_through_its_caller() {
     let functions = [
         ("leaf", BASE, 0x06),
         ("middle", BASE + 0x10, 0x06),
@@ -87,10 +85,7 @@ fn an_owner_that_moves_the_build_has_it_built_again() {
     // `middle` keeps what `leaf` keeps across its call, so the store's rsi is the root's (D363).
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     assert!(!text.contains("never assigned"), "{text}");
-    let stats = open.analysis_stats();
-    assert_eq!(stats.callee_reads.computed, 0, "{stats:?}");
-    assert_eq!(stats.rebuilt, 1, "{stats:?}");
-    assert_eq!(stats.defects, 0, "{stats:?}");
+    assert_eq!(open.analysis_stats().defects, 0);
 }
 
 /// `mov eax, 7; ret`, then `call 0x1000; mov [rsi], eax; ret`.
@@ -179,14 +174,13 @@ fn a_reach_promotion_never_asked_keeps_the_build() {
 }
 
 /// `forwards`' build is kept against `frees`' statement, so its second recovery borrows the static
-/// phases its first collected: one prefix per build and per seal, 9 on the parent (D289).
+/// phases its first collected (D289): it is never built again.
 #[test]
 fn a_kept_build_collects_its_static_phases_once() {
     let mut open = OpenProgram::of(Literal::plt_wrapped("free", &FORWARDS));
     let _ = rendered(&mut open, ROOT);
     let stats = open.analysis_stats();
     assert_eq!(stats.rebuilt, 0, "{stats:?}");
-    assert_eq!(stats.static_prefixes, 8, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
 
@@ -224,8 +218,5 @@ fn a_reach_that_moves_no_decision_keeps_the_build() {
     assert!(text.contains("= middle(arg0, arg1);"), "{text}");
     let stats = open.analysis_stats();
     assert_eq!(stats.rebuilt, 0, "{stats:?}");
-    // Built again, `middle` walks 13 more values (47); the restatement decides its 1 sink point.
-    assert_eq!(stats.frame_walk_steps, 34, "{stats:?}");
-    assert_eq!(stats.frame_decision_steps, 3, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }

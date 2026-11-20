@@ -512,6 +512,7 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    callee_dereferenced: crate::CalleeWidths,
     /// What each stated callee may write of its caller's stack, by entry (D377).
     callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The low bytes each walked callee may read of each result register, by entry (D372).
@@ -932,6 +933,7 @@ impl SourceMachineContext {
             member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            callee_dereferenced: crate::CalleeWidths::default(),
             callee_writes: BTreeMap::new(),
             callee_lane_reads: BTreeMap::new(),
             callee_imports: BTreeMap::new(),
@@ -1277,6 +1279,10 @@ impl SourceMachineContext {
         self.callee_argument_reach = callee_argument_reach;
     }
 
+    pub(crate) fn set_callee_dereferenced(&mut self, dereferenced: crate::CalleeWidths) {
+        self.callee_dereferenced = dereferenced;
+    }
+
     pub(crate) fn set_callee_writes(
         &mut self,
         writes: BTreeMap<u64, crate::call_reads::StackWrites>,
@@ -1328,6 +1334,11 @@ impl SourceMachineContext {
         position: usize,
     ) -> Option<&crate::interproc::ArgumentReach> {
         self.callee_argument_reach.get(&target)?.get(&position)
+    }
+
+    /// The access widths of each argument of `target`, where its body is read (D610).
+    pub fn callee_dereferenced(&self, target: u64) -> Option<&crate::ArgumentWidths> {
+        self.callee_dereferenced.get(&target)
     }
 
     pub(crate) fn set_frame_saves(&mut self, saves: &[r2source::SourceFrameSave]) {
@@ -1702,23 +1713,8 @@ impl SourceMachineContext {
     /// What a `size`-byte load at `address` reads, where the capture holds those bytes read-only
     /// and they fit a constant: one search, in the memory's byte order.
     pub fn read_only_bits(&self, address: u64, size: u32) -> Option<u64> {
-        let (start, bytes) = self.read_only.range(..=address).next_back()?;
-        let from = usize::try_from(address - start).ok()?;
-        let window = bytes.get(from..from.checked_add(usize::try_from(size).ok()?)?)?;
-        if window.len() > 8 {
-            return None;
-        }
-        let ordered = window.iter().copied();
-        let bits = match self.memory_model.default_endianness() {
-            MachineMemoryEndianness::Little => ordered
-                .rev()
-                .fold(0u64, |bits, byte| (bits << 8) | u64::from(byte)),
-            MachineMemoryEndianness::Big => {
-                ordered.fold(0u64, |bits, byte| (bits << 8) | u64::from(byte))
-            }
-            _ => return None,
-        };
-        Some(bits)
+        let endian = self.memory_model.default_endianness();
+        crate::read_only::bits_in(&self.read_only, address, size, endian)
     }
 
     pub(crate) fn bind_source_string_literals(&mut self, literals: &[(u64, String)]) {

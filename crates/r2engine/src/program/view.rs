@@ -382,6 +382,10 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         let assembled = self.db.inputs().assembled();
         assembled.and_then(|held| held.link.clone())
     }
+
+    fn landing_pad(&self, last: u64) -> Option<u64> {
+        self.source().container().unwind.pad_for(last)
+    }
 }
 
 impl<S: Source + 'static> crate::native::Program for View<'_, S> {
@@ -394,21 +398,14 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.note_rebuilt();
     }
 
-    /// A callee resolved against its result's owners; under `aa`, against its arity's too.
+    /// A callee resolved against the owners of its result and its arity.
     fn read_callee(
         &self,
         address: u64,
-        callers: super::World,
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
-        let thumb = self.thumb_at(address);
-        let demand = match callers {
-            super::World::Closed => super::resolved::Demand::Arity,
-            super::World::Open => super::resolved::Demand::Result,
-        };
-        let read = self
-            .db
-            .get::<super::resolved::Resolved>(&((address, thumb), demand));
+        let node = (address, self.thumb_at(address));
+        let read = self.db.get::<super::resolved::Resolved>(&node);
         let read = read.expect("a callee's read asks for no other root");
         std::sync::Arc::clone(&read.0)
     }

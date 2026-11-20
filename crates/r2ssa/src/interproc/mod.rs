@@ -236,6 +236,74 @@ impl SummaryMemoryRange {
     }
 }
 
+/// The widths of the loads and stores made through one argument: bit `n` for `2^n` bytes up to
+/// 16, one bit for any other width, and one where accesses no body states may be made (D610).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct AccessWidths(u8);
+
+impl AccessWidths {
+    const OTHER: u8 = 1 << 5;
+    const OPEN: u8 = 1 << 7;
+    /// Accesses at no stated width: what an unread callee or an unplaced use may make.
+    pub const OPEN_ONLY: Self = Self(Self::OPEN);
+
+    /// One access of `bytes`.
+    pub const fn of(bytes: u32) -> Self {
+        match bytes {
+            1 | 2 | 4 | 8 | 16 => Self(1 << bytes.trailing_zeros()),
+            _ => Self(Self::OTHER),
+        }
+    }
+
+    #[must_use]
+    pub const fn join(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether a stated access is made: what proves the argument an address.
+    pub const fn accessed(self) -> bool {
+        self.0 & !Self::OPEN != 0
+    }
+
+    /// The one width every access takes, in bytes, where every access is stated and they agree.
+    pub const fn only(self) -> Option<u32> {
+        match self.0 {
+            bits if bits != 0
+                && bits & (Self::OTHER | Self::OPEN) == 0
+                && bits.is_power_of_two() =>
+            {
+                Some(1 << bits.trailing_zeros())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Each integer argument position's access widths, a copy held per callee; a position past the
+/// eighth states nothing and reads as open (D610).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ArgumentWidths([AccessWidths; ArgumentWidths::POSITIONS]);
+
+impl ArgumentWidths {
+    pub const POSITIONS: usize = 8;
+
+    fn join(&mut self, position: usize, widths: AccessWidths) {
+        if let Some(held) = self.0.get_mut(position) {
+            *held = held.join(widths);
+        }
+    }
+
+    /// The widths at `position`, none where nothing is accessed through it.
+    pub fn at(&self, position: usize) -> Option<AccessWidths> {
+        match self.0.get(position) {
+            Some(widths) => (*widths != AccessWidths::default()).then_some(*widths),
+            None => Some(AccessWidths::OPEN_ONLY),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SummaryMemoryLocation {
     pub region: SummaryMemoryRegion,
@@ -625,14 +693,19 @@ struct LocalSummaryFacts {
     return_observations: Vec<SummaryValueObservation>,
     call_observations: BTreeMap<CallSiteId, CallObservation>,
     call_carriers_converged: bool,
-    /// The arguments the body itself loads or stores through: proof, where
-    /// `arg_effects` also holds what an unknown call is assumed to do.
-    dereferenced_args: BTreeSet<usize>,
+    /// The arguments the body itself loads or stores through, with each access's width: proof,
+    /// where `arg_effects` also holds what an unknown call is assumed to do.
+    dereferenced_args: BTreeMap<usize, AccessWidths>,
     /// The formals something the summary cannot place could reach through,
     /// as `dependence` bits: an access at no stated place, a call, a formal
     /// stored into memory. Their reach is unbounded; every other formal's is
     /// what the accesses through it state.
     unplaced_reach: u64,
+    /// The formals this body accesses at a width no argument region states: exposed through the
+    /// frame, stored, at no argument region, or read by an operation nothing describes (D610).
+    widths_open: u64,
+    /// The formals handed to a call, whose accesses there this body does not state (D610).
+    handed_on: u64,
 }
 
 #[derive(Debug)]
@@ -1164,8 +1237,24 @@ impl PreparedCalleeSummary {
     /// Only accesses the body performs: an argument handed to a call nothing
     /// can see is assumed read and written in `arg_effects`, which is a
     /// conservative guess about effects rather than proof the value is an address.
-    pub const fn dereferenced_arguments(&self) -> &BTreeSet<usize> {
+    pub const fn dereferenced_arguments(&self) -> &BTreeMap<usize, AccessWidths> {
         &self.local.dereferenced_args
+    }
+
+    /// Each accessed argument's access widths, opened where an access this body does not state
+    /// may reach it (D610). `O(arguments)`.
+    pub fn argument_access_widths(&self) -> ArgumentWidths {
+        let open = self.local.widths_open | self.local.handed_on;
+        let mut widths = ArgumentWidths::default();
+        for (index, accessed) in &self.local.dereferenced_args {
+            widths.join(*index, *accessed);
+        }
+        for index in
+            (0..ArgumentWidths::POSITIONS).filter(|index| dependence::names_formal(open, *index))
+        {
+            widths.join(index, AccessWidths::OPEN_ONLY);
+        }
+        widths
     }
 
     /// Each argument this body passes on unchanged to a direct callee: the
@@ -2007,6 +2096,18 @@ fn collect_local_summary_facts(prepared: &SsaArtifact, abi: &Formals<'_>) -> Loc
     collect_local_summary_facts_with_obligation_authority(prepared, abi, false)
 }
 
+/// The formals `prepared`'s own body accesses at a width no argument region states, as
+/// `dependence` bits; `None` where no convention numbers its formals (D610). `O(ops)`.
+pub fn own_unstated_access_formals(prepared: &SsaArtifact) -> Option<u64> {
+    let abi = Formals::of(prepared.machine_context())?;
+    Some(collect_source_owned_summary_facts(prepared, &abi).widths_open)
+}
+
+/// Whether `bits` names formal `formal`.
+pub fn names_formal(bits: u64, formal: usize) -> bool {
+    dependence::names_formal(bits, formal)
+}
+
 fn collect_source_owned_summary_facts(
     prepared: &SsaArtifact,
     abi: &Formals<'_>,
@@ -2074,8 +2175,10 @@ fn collect_local_summary_facts_with_obligation_authority(
         return_observations: Vec::new(),
         call_observations: BTreeMap::new(),
         call_carriers_converged: call_argument_state.converged,
-        dereferenced_args: BTreeSet::new(),
+        dereferenced_args: BTreeMap::new(),
         unplaced_reach: 0,
+        widths_open: 0,
+        handed_on: 0,
     };
     // Which formals each value is computed from, and so which formals an
     // access or a call this summary cannot place could reach through.
@@ -2083,6 +2186,7 @@ fn collect_local_summary_facts_with_obligation_authority(
     out.unplaced_reach |= dependence.passed_to_calls();
     if source_requires_unknown_effects {
         out.unplaced_reach = u64::MAX;
+        out.widths_open = u64::MAX;
     }
     let bits_of_var = |var: &SSAVar| {
         prepared
@@ -2095,12 +2199,17 @@ fn collect_local_summary_facts_with_obligation_authority(
     // it. A frame no address leaves is read only by this body's own loads,
     // which carry the formal on in the dependence.
     out.unplaced_reach |= dependence.exposed_formals();
-    // An access that names no argument region at a stated place could touch
-    // any formal's object its address is computed from.
+    out.widths_open |= dependence.exposed_formals();
+    out.handed_on = dependence.passed_to_calls();
+    // An access that names no argument region at a stated place could touch any formal's object
+    // its address is computed from; at no argument region, its width is no argument's (D610).
     let unplaced = |location: &SummaryMemoryLocation, addr: &SSAVar| match location.region {
-        SummaryMemoryRegion::Unknown => bits_of_var(addr),
-        SummaryMemoryRegion::Arg { .. } if location.range.is_none() => bits_of_var(addr),
-        _ => 0,
+        SummaryMemoryRegion::Unknown => {
+            let bits = bits_of_var(addr);
+            (bits, bits)
+        }
+        SummaryMemoryRegion::Arg { .. } if location.range.is_none() => (bits_of_var(addr), 0),
+        _ => (0, 0),
     };
 
     if source_requires_unknown_effects {
@@ -2168,8 +2277,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, dst.size);
-                    out.unplaced_reach |= unplaced(&location, addr);
-                    mark_location_access(&mut out, location, true, false);
+                    let (reach, unstated) = unplaced(&location, addr);
+                    out.unplaced_reach |= reach;
+                    out.widths_open |= unstated;
+                    mark_location_access(&mut out, location, dst.size, (true, false));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
                         location,
@@ -2194,8 +2305,11 @@ fn collect_local_summary_facts_with_obligation_authority(
                         space,
                         access.dst.size,
                     );
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(access.stored());
-                    mark_location_access(&mut out, location, true, true);
+                    let ((reach, unstated), stored) =
+                        (unplaced(&location, addr), bits_of_var(access.stored()));
+                    out.unplaced_reach |= reach | stored;
+                    out.widths_open |= unstated | stored;
+                    mark_location_access(&mut out, location, access.dst.size, (true, true));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
                         location,
@@ -2223,8 +2337,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                     }
                     let location =
                         classify_memory_access_location(prepared, abi, addr, *space, val.size);
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
-                    mark_location_access(&mut out, location, true, true);
+                    let ((reach, unstated), stored) = (unplaced(&location, addr), bits_of_var(val));
+                    out.unplaced_reach |= reach | stored;
+                    out.widths_open |= unstated | stored;
+                    mark_location_access(&mut out, location, val.size, (true, true));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Read,
                         location,
@@ -2262,8 +2378,10 @@ fn collect_local_summary_facts_with_obligation_authority(
                     // A formal's pointer stored where this function does not
                     // own the memory has escaped: whatever reads it later can
                     // reach its object.
-                    out.unplaced_reach |= unplaced(&location, addr) | bits_of_var(val);
-                    mark_location_access(&mut out, location, false, true);
+                    let ((reach, unstated), stored) = (unplaced(&location, addr), bits_of_var(val));
+                    out.unplaced_reach |= reach | stored;
+                    out.widths_open |= unstated | stored;
+                    mark_location_access(&mut out, location, val.size, (false, true));
                     out.memory_effects.insert(SummaryMemoryEffect {
                         kind: SummaryMemoryEffectKind::Write,
                         location,
@@ -2279,10 +2397,12 @@ fn collect_local_summary_facts_with_obligation_authority(
                 }
                 SSAOp::CallOther { inputs, .. } => {
                     has_volatile_or_unknown_effects = true;
-                    out.unplaced_reach |= inputs
+                    let reached = inputs
                         .iter()
                         .map(|input| bits_of_var(input))
                         .fold(0, |left, right| left | right);
+                    out.unplaced_reach |= reached;
+                    out.widths_open |= reached;
                     let args = inputs
                         .iter()
                         .map(|input| classify_var_operand(prepared, input))
@@ -2299,6 +2419,7 @@ fn collect_local_summary_facts_with_obligation_authority(
                     // An operation whose effect nothing describes could read
                     // or write through any register.
                     out.unplaced_reach = u64::MAX;
+                    out.widths_open = u64::MAX;
                     mark_unknown_call_effects(
                         &mut out.has_unknown_calls,
                         &mut out.arg_effects,
@@ -2363,13 +2484,14 @@ fn memory_access_is_local_stack(prepared: &SsaArtifact, addr: &SSAVar, space: Sp
 fn mark_location_access(
     out: &mut LocalSummaryFacts,
     location: SummaryMemoryLocation,
-    read: bool,
-    write: bool,
+    width: u32,
+    (read, write): (bool, bool),
 ) {
     let SummaryMemoryRegion::Arg { index } = location.region else {
         return;
     };
-    out.dereferenced_args.insert(index);
+    let widths = out.dereferenced_args.entry(index).or_default();
+    *widths = widths.join(AccessWidths::of(width));
     let effect = out.arg_effects.entry(index).or_default();
     if read {
         effect.mark_read();

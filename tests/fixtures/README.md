@@ -13,6 +13,7 @@ answer.
 | `hashes_gcc_x64_O2_stripped` | `tests/corpus/hashes.c` | discovery with no symbol table, which has to reach `main` through `__libc_start_main` |
 | `rv_O0g` | `tests/gold/review.c` | the review fixture: x86-64 PIE, GCC 13.3.0 `-O0 -g`; `classify`'s jump table is read through a spilled index nothing bounds |
 | `rv_O0g_stripped` | `rv_O0g` after `strip --strip-all` | the same program with no debug information: every declared fact has to come from the DWARF, and none may appear without it |
+| `minidebug_gcc_x64_O2` | `src/two_units_a.c`, `src/two_units_b.c` | GCC 13.3.0 `-O2`, x86-64 PIE, then GDB 15.2's MiniDebugInfo recipe (below): stripped, its function symbols in an xz `.gnu_debugdata` (872 bytes, LZMA2, CRC64) whose `.symtab` states both `static helper`s (0x11c0, 4 bytes; 0x11e0, 62) and `main` (0x1060, 101) |
 | `two_units_O0g` | `src/two_units_a.c`, `src/two_units_b.c` | GCC 13.3.0 `-O0 -g`: two units each defining a `static helper` of its own, so a declaration found by name would be the other unit's |
 | `syscalls_static_O2` | `src/syscalls.c` | GCC 13.3.0 `-O2 -nostdlib -static`, stripped: system calls whose number is a constant, the same constant on two paths, folded in the body, and a parameter; and `0f 05` as an immediate |
 | `struct_pointers_O0g` | `src/struct_pointers.c` | GCC 13.3.0 `-O0 -g`, x86-64 PIE: parameters declared through typedefs of structs, a struct holding a pointer to `struct lock_s`, which no unit lays out, and a function calling itself with them |
@@ -33,6 +34,9 @@ answer.
 | `loop_exits_gcc_x64_O2` | `src/loop_exits.c` | GCC 13.3.0 `-O2 -g0 -fno-pie -no-pie -nostdlib -nostartfiles -static -fno-asynchronous-unwind-tables -Wl,-e,main`: loops that leave by more than one exit, one of which goes on to a test and two returns of its own, one of which writes and returns |
 | `noreturn_guards_gcc_x64_O2`, `noreturn_guards_gcc_aarch64_O2` | `src/noreturn_guards.c` | GCC 13.3.0 `-O2` (x86-64, and `aarch64-linux-gnu-gcc`), PIE, not stripped: a test whose arm calls `exit` or `abort`, with the work after it on the other arm, and an exit under the then arm of a test whose else returns |
 | `member_call_gcc_x64_O0g`, `member_call_gcc_x64_O2g`, `member_call_gcc_aarch64_O0g`, `member_call_gcc_aarch64_O2g`, `member_call_gcc_x64_O2` | `src/member_call.c` | GCC 13.3.0 `-O0`/`-O2 -g -fno-pie -no-pie` (x86-64, and `aarch64-linux-gnu-gcc`); `member_call_gcc_x64_O2` is the `-O2` build after `strip --strip-all`: calls through function-pointer members of a `struct ops *` parameter, two pointers, a narrow `int`, nine arguments and a `double`, beside a variadic member, a record result and a slot behind a loaded pointer, which stay residual (S32, D171) |
+| `cxx_try_catch_gcc_x64_O0` | `src/try_catch.cc` | GCC 13.3.0 `g++ -O0` (x86-64, PIE): `guarded` (0x12f0) calls `risky` inside a `try` with a destructor and a `catch` that returns. `readelf --debug-dump=frames` puts its LSDA at 0x21a0; by hand `ff 9b 21 01 14` (LPStart omitted, TType, uleb128 call sites, 20 bytes), then `[0x1325,0x132a) pad 0x1356`, `[0x138f,0x1394) none`, `[0x13ba,0x13bf) pad 0x13ce`, `[0x13f4,0x13f9) none`; the personality is `DW.ref.__gxx_personality_v0`, an `R_X86_64_64` import (D570) |
+| `cxx_cold_split_gcc_x64_O2` | `src/cold_split.cc` | GCC 13.3.0 `g++ -O2` (x86-64, PIE): `nm -C` lists `build(int) [clone .cold]` at 0x11a0; the pad at 0x1911 jumps into it (D570) |
+| `c_cleanup_gcc_aarch64_O0` | `src/cleanup.c` | GCC 13.3.0 `aarch64-linux-gnu-gcc -O0 -fexceptions`: a `cleanup` attribute under `__gcc_personality_v0` (`R_AARCH64_ABS64`); `guarded` (0x9e8), LSDA 0xc84 by hand `[0xa24,0xa28) pad 0xa64`, `[0xa98,0xa9c) none`. The AArch64 twin is C: the build host has no `aarch64-linux-gnu-g++` (D570) |
 | `fuzzed_elf9`, `fuzzed_file12` | radare2-testbins `fuzzed/elf9`, `fuzzed/file12` (not executable, so the census skips them) | hostile headers: an `.init_array` and a `__cstring` stating sizes far past the file's end, which once hung on open and read 2 GB |
 
 `src/` holds sources the equivalence gate must not build as programs of their
@@ -43,3 +47,21 @@ rather than for their behaviour. Each binary is built with
 `tests/coverage/pinned/` carries the whole-binary coverage cells, which are the
 same idea for a different question: those are gated as a population, these are
 named by individual tests.
+
+`minidebug_gcc_x64_O2`, by the recipe in GDB 15.2's manual, node "MiniDebugInfo"
+(binutils 2.42, xz 5.4.5):
+
+```sh
+gcc -O2 -o minidebug_gcc_x64_O2 src/two_units_a.c src/two_units_b.c
+nm -D minidebug_gcc_x64_O2 --format=posix --defined-only | awk '{ print $1 }' | sort > dynsyms
+nm minidebug_gcc_x64_O2 --format=posix --defined-only \
+  | awk '{ if ($2 == "T" || $2 == "t" || $2 == "D") print $1 }' | sort > funcsyms
+comm -13 dynsyms funcsyms > keep_symbols
+objcopy --only-keep-debug minidebug_gcc_x64_O2 debug
+objcopy -S --remove-section .gdb_index --remove-section .comment \
+  --keep-symbols=keep_symbols debug mini_debuginfo
+strip --strip-all -R .comment minidebug_gcc_x64_O2
+xz mini_debuginfo
+objcopy --add-section .gnu_debugdata=mini_debuginfo.xz minidebug_gcc_x64_O2
+xz -dc mini_debuginfo.xz > inner && readelf -sW inner   # the hand truth the r2image test reads
+```

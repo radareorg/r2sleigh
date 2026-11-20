@@ -10,7 +10,11 @@ use common::{
 };
 use r2engine::discovery::Basis;
 use r2engine::program::{Container, LoaderWrite, OpenProgram, Source, WriteKind};
-use r2engine::query::{AnnotationKind, ArgumentSlot, CallArgument, Line, Listing, Stop};
+use r2engine::query::{
+    AnnotationKind, ArgumentSlot, CallArgument, CallBoundaryRefusal, Confidence, Line, Listing,
+    Stop, UnstatedImport,
+};
+use r2source::Premise;
 
 /// The result each line claims, by address.
 fn computes(lines: &[Line]) -> Vec<(u64, Option<u64>)> {
@@ -189,8 +193,10 @@ fn a_slot_the_loader_writes_is_read_but_never_said_to_hold_what_the_file_does() 
     // The jump is a tail call through the slot, and nothing declares or proves what it hands on.
     let call = AnnotationKind::Call {
         callee: Some(SLOT),
-        arguments: None,
-        uncounted: None,
+        arguments: Err(CallBoundaryRefusal::ImportUnstated(
+            UnstatedImport::Undeclared,
+        )),
+        noreturn: None,
     };
     assert_eq!(
         supported(&whole[0]),
@@ -207,7 +213,9 @@ fn a_function_listing_reads_through_an_address_until_a_byte_of_its_register_is_w
         let line = lines.iter().find(|line| line.address == at);
         let annotations = line.into_iter().flat_map(|line| &line.annotations);
         let reads = annotations.filter_map(|annotation| match annotation.kind {
-            AnnotationKind::Reads { address, width } => Some((address, width, annotation.support)),
+            AnnotationKind::Reads { address, width } => {
+                Some((address, width, annotation.confidence.basis))
+            }
             _ => None,
         });
         reads.collect::<Vec<_>>()
@@ -263,11 +271,15 @@ fn an_address_the_next_instruction_adds_to_is_still_formed() {
     assert_eq!(pdf(STEPPED)[0], (STEPPED, Some(ONE)));
 }
 
-/// Each claim a line carries, with the rung it stands on.
+/// Each claim a line carries, with the rung it stands on; none of these assumes a premise.
 fn supported(line: &Line) -> Vec<(AnnotationKind, Basis)> {
+    let rung = |confidence: &Confidence| {
+        assert!(confidence.premises.is_empty(), "{confidence}");
+        confidence.basis
+    };
     line.annotations
         .iter()
-        .map(|annotation| (annotation.kind.clone(), annotation.support))
+        .map(|annotation| (annotation.kind.clone(), rung(&annotation.confidence)))
         .collect()
 }
 
@@ -572,8 +584,8 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
         .into_iter()
         .flat_map(|line| &line.annotations)
         .find(|annotation| matches!(annotation.kind, AnnotationKind::Bounds { .. }))
-        .map(|annotation| annotation.support);
-    assert_eq!(rung, Some(Basis::Decoded));
+        .map(|annotation| annotation.confidence.clone());
+    assert_eq!(rung, Some(Confidence::of(Basis::Decoded)));
     // Writing eax only restates the width a 32-bit write clears, which says nothing.
     assert!(!proved.contains(&(TWO, 0, 0xffff_ffff)), "{proved:?}");
     let plain = program
@@ -586,7 +598,7 @@ fn a_function_listing_says_what_was_proved_about_each_value() {
 }
 
 /// What the certificates anchor at each line, by address, in the order the line lists them.
-fn certified(lines: &[Line]) -> Vec<(u64, AnnotationKind, Basis)> {
+fn certified(lines: &[Line]) -> Vec<(u64, AnnotationKind, Confidence)> {
     let certified = |kind: &AnnotationKind| {
         matches!(
             kind,
@@ -605,7 +617,7 @@ fn certified(lines: &[Line]) -> Vec<(u64, AnnotationKind, Basis)> {
     let on = |line: &Line| {
         let claims = line.annotations.iter().filter(|one| certified(&one.kind));
         let at = line.address;
-        let claims = claims.map(move |one| (at, one.kind.clone(), one.support));
+        let claims = claims.map(move |one| (at, one.kind.clone(), one.confidence.clone()));
         claims.collect::<Vec<_>>()
     };
     lines.iter().flat_map(on).collect()
@@ -634,7 +646,14 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         slot: ArgumentSlot::Register(rdi),
         value: Some(HANDED),
     };
-    let returns = AnnotationKind::Returns { storage: rax };
+    // No call reads `hands`' written result: the `ret` note is `afi`'s unproven result (D584).
+    let standing = r2engine::query::ResultStanding::Unproven(Some(r2types::UnprovenCause::Written));
+    let returns = AnnotationKind::Returns {
+        storage: Some(rax),
+        standing,
+    };
+    // `ident`'s alone read states its one parameter exactly, so the mapping rests on nothing (D592).
+    let closed = Confidence::of(Basis::Certified);
     assert_eq!(
         certified(&hands),
         [
@@ -642,18 +661,18 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
             (
                 HANDS,
                 AnnotationKind::ArgumentOf { call, index: 0 },
-                Basis::Certified
+                closed.clone(),
             ),
             (
                 call,
                 AnnotationKind::Call {
                     callee: Some(BASE),
-                    arguments: Some(vec![argument]),
-                    uncounted: None,
+                    arguments: Ok(vec![argument]),
+                    noreturn: None,
                 },
-                Basis::Certified,
+                closed,
             ),
-            (call + 5, returns.clone(), Basis::Certified),
+            (call + 5, returns, Confidence::of(Basis::Convention)),
         ]
     );
     let ident = program
@@ -661,7 +680,15 @@ fn a_call_line_says_what_its_boundary_hands_on_and_the_line_that_set_it_says_so(
         .expect("it lists")
         .lines
         .value;
-    assert_eq!(certified(&ident), [(BASE + 3, returns, Basis::Certified)]);
+    // `hands` reads none of `ident`'s result: unproven, `Unread`.
+    let unread = r2engine::query::ResultStanding::Unproven(Some(r2types::UnprovenCause::Unread));
+    let returns = AnnotationKind::Returns {
+        storage: Some(rax),
+        standing: unread,
+    };
+    // The closed answer names its premise on `ident`'s own result (D573).
+    let convention = Confidence::of(Basis::Convention).assuming(Premise::ClosedWorld);
+    assert_eq!(certified(&ident), [(BASE + 3, returns, convention)]);
 }
 
 #[test]
@@ -692,7 +719,7 @@ fn a_dispatch_says_where_its_table_is_and_each_arm_which_cases_reach_it() {
         table: Some(table),
     };
     let said = certified(&lines);
-    let switched = |at: u64, kind: AnnotationKind| (at, kind, Basis::Solved);
+    let switched = |at: u64, kind: AnnotationKind| (at, kind, Confidence::of(Basis::Solved));
     for expected in [
         switched(dispatch, switch),
         switched(0x100e, case(0)),
@@ -973,7 +1000,7 @@ fn a_walk_that_panics_is_the_listings_refusal_and_the_session_goes_on() {
     assert!(refused.contains(&defect), "{refused}");
     // The same defect refused the analysis first, and that is said too.
     assert!(refused.contains("the analysis panicked at "), "{refused}");
-    // The next function is untouched by it.
+    // The next function is untouched by it: the survey refuses that one body's walk (D587).
     let one = program.function_listing(ONE).expect("the session goes on");
     assert!(one.refused.is_none());
     assert_eq!(one.lines.value.first().map(|line| line.address), Some(ONE));

@@ -70,6 +70,7 @@ pub(crate) mod optimize;
 pub mod origin;
 pub(crate) mod phi;
 pub mod place;
+pub mod reaching_constant;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
@@ -120,12 +121,12 @@ pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
     AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeImports, CalleeLaneReads,
-    CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite, ExitSite,
-    GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo,
-    RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
-    SSAFunction, Sealed, SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
-    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedConstruction,
-    TrustedSeal, TrustedSsaArtifact, def_use_graph,
+    CalleePreservedCarriers, CalleeWidths, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,
+    ExitSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared,
+    RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction,
+    SSABlock as FunctionSSABlock, SSAFunction, Sealed, SiteConventions, SourceRef, SourceSite,
+    SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
+    StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -135,15 +136,16 @@ pub use integrity::{
     validate_ssa_function,
 };
 pub use interproc::{
-    ArgumentReach, CallArgObservation, FunctionSemanticLinkage, FunctionSemanticSummary,
-    InterprocFunctionId, InterprocFunctionInput, InterprocSummaryDiagnostics, InterprocSummarySet,
-    PreparedCalleeSummary, PreparedInterprocFunctionInput, PreparedInterprocSummaryError,
-    PreparedInterprocSummarySet, SummaryAllocationEffect, SummaryArgEffect, SummaryArgumentReach,
-    SummaryAtomicEffect, SummaryAtomicOp, SummaryAtomicOrdering, SummaryLifetimeEffect,
-    SummaryLifetimeOp, SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryLocation,
-    SummaryMemoryRange, SummaryMemoryRegion, SummaryReturnRelation, SummarySyncEffect,
-    SummarySyncOp, SummaryTransferEffect, SummaryTransferLength, observe_call_arguments,
-    solve_interproc_summary_set, solve_prepared_interproc_summary_set,
+    AccessWidths, ArgumentReach, ArgumentWidths, CallArgObservation, FunctionSemanticLinkage,
+    FunctionSemanticSummary, InterprocFunctionId, InterprocFunctionInput,
+    InterprocSummaryDiagnostics, InterprocSummarySet, PreparedCalleeSummary,
+    PreparedInterprocFunctionInput, PreparedInterprocSummaryError, PreparedInterprocSummarySet,
+    SummaryAllocationEffect, SummaryArgEffect, SummaryArgumentReach, SummaryAtomicEffect,
+    SummaryAtomicOp, SummaryAtomicOrdering, SummaryLifetimeEffect, SummaryLifetimeOp,
+    SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryLocation, SummaryMemoryRange,
+    SummaryMemoryRegion, SummaryReturnRelation, SummarySyncEffect, SummarySyncOp,
+    SummaryTransferEffect, SummaryTransferLength, names_formal, observe_call_arguments,
+    own_unstated_access_formals, solve_interproc_summary_set, solve_prepared_interproc_summary_set,
     solve_prepared_interproc_summary_set_from_callee_summaries,
 };
 pub use machine::{

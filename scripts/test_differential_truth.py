@@ -795,6 +795,16 @@ class Presence(unittest.TestCase):
                                    {0x1000: fn("int32_t fcn_1000(r2sleigh_unread_u64 arg0, int32_t arg1)")})
         self.assertEqual((code, report["facts"]["silently_wrong"], report["facts"]["marked_wrong"]), (0, 0, 1))
 
+    def test_an_unproven_parameter_spelled_through_its_typedef_is_marked(self) -> None:
+        # D610: `r2sleigh_unproven_u64` is a parameter's carrier whose type no evidence proves.
+        code, report, _ = run_main({0x1000: "int32_t f(const uint8_t* p)"},
+                                   {0x1000: fn("int32_t fcn_1000(r2sleigh_unproven_u64 arg0)")})
+        self.assertEqual((code, report["facts"]["silently_wrong"], report["facts"]["marked_wrong"]), (0, 0, 1))
+        # A pointer to it claims a pointer, which the typedef does not mark.
+        code, report, _ = run_main({0x1000: "int32_t f(const uint8_t* p)"},
+                                   {0x1000: fn("int32_t fcn_1000(r2sleigh_unproven_u64* arg0)")})
+        self.assertEqual((code, report["facts"]["silently_wrong"]), (1, 1))
+
     def test_another_typedef_named_result_is_a_silent_claim(self) -> None:
         code, report, _ = run_main({0x1000: "int32_t f(void)"}, {0x1000: fn("r2sleigh_result_x fcn_1000(void)")})
         self.assertEqual((code, report["facts"]["silently_wrong"]), (1, 1))

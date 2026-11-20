@@ -184,6 +184,19 @@ pub(crate) fn shape(occ: &mut Occurrences, ev: &Evidence<'_>, stmt: CStmt) -> CS
     stmt
 }
 
+/// A chained case's test copied with its statement's markers reminted, as its `if` was.
+fn remint_test(
+    test: &CExpr,
+    mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId,
+) -> CExpr {
+    let ids = test
+        .observation_ids()
+        .iter()
+        .map(|id| mint(*id))
+        .collect::<Vec<_>>();
+    CExpr::observe_all(ids, test.unobserved().clone())
+}
+
 /// `stmt` copied as a new occurrence: each marker in it replaced by the one `mint` gives for it.
 fn remint(stmt: &CStmt, mint: &mut dyn FnMut(RenderObservationId) -> RenderObservationId) -> CStmt {
     let copy = |stmts: &[CStmt],
@@ -242,6 +255,7 @@ fn remint(stmt: &CStmt, mint: &mut dyn FnMut(RenderObservationId) -> RenderObser
                 .map(|case| SwitchCase {
                     value: case.value.clone(),
                     body: copy(&case.body, mint),
+                    test: case.test.as_ref().map(|test| remint_test(test, mint)),
                 })
                 .collect(),
             default: default.as_ref().map(|body| copy(body, mint)),

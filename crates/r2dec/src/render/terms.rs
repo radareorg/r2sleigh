@@ -118,7 +118,7 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
 /// `ty`, the unstated word as its integer (D265).
 pub(super) fn word_free(ty: &CType) -> &CType {
     match ty {
-        CType::Typedef { ty: inner, .. } if r2types::is_unstated_word(ty) => inner,
+        CType::Typedef { ty: inner, .. } if r2types::is_width_only(ty) => inner,
         ty => ty,
     }
 }
@@ -953,11 +953,21 @@ impl Spell<'_> {
         reclass(self.machine(expr)?, &held, ty)
     }
 
+    /// `value` rotated left by a literal `0 < k < bits`, the only count `shift.rotate` states.
+    fn rotate(&self, bits: u32, value: CExpr, count: TermId) -> Option<CExpr> {
+        let TermKind::Literal(k) = self.arena.term(count).kind else {
+            return None;
+        };
+        let k = k.bits();
+        let rotated =
+            crate::prelude::Helper::rotate_left(bits).filter(|_| 0 < k && k < u64::from(bits))?;
+        Some(rotated.call(vec![cast(integer(bits)?, value), CExpr::UIntLit(k)]))
+    }
+
     /// The term as C of its own machine type; `None` where C has no exact spelling of it.
     pub(super) fn term(&self, id: TermId) -> Option<CExpr> {
         let node = self.arena.term(id);
-        let ty = node.ty;
-        let bits = ty.width_bits();
+        let (ty, bits) = (node.ty, node.ty.width_bits());
         let child = |id: TermId| self.term(id);
         let child_bits = |id: TermId| self.arena.term(id).ty.width_bits();
         match node.kind {
@@ -999,6 +1009,7 @@ impl Spell<'_> {
                 child(value)?,
                 child(count)?,
             ),
+            TermKind::Rotate { value, count } => self.rotate(bits, child(value)?, count),
             TermKind::Compare {
                 op,
                 interpretation,

@@ -562,6 +562,7 @@ mod tests {
                 cases: vec![SwitchCase {
                     value: v[7].clone(),
                     body: vec![CStmt::Expr(v[10].clone())],
+                    test: None,
                 }],
                 default: Some(vec![CStmt::Return(Some(v[9].clone()))]),
             },

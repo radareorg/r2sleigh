@@ -2,6 +2,8 @@
 
 Status: built 2026-11-12 (D226, D286 to D289). Owners: r2ssa `TrustedConstruction` and `BuildKey`, r2engine `resolved.rs`.
 
+D573 (round 14) deleted the build search this ADR's decision describes (`built_resolved`, `callee_built`, `built_read`, `resolve_built`): every request now resolves in the closed world (doc/adr-resolved-bodies.md, "One world"), which reads each callee alone and then again against its owners, so `Demand::Result` had no reader. `BuildKey` and the kept build of `restate_against` (D289, D365, D441) stand. D586 measures what the closure pays.
+
 ## Problem
 
 A cold `pdd` prepared a callee twice where an owner's statement moves its result ([result-side](adr-result-side.md), D226). `CalleeReads` prepared it alone, and `outside_resolved` prepared it again against the owners that read named. On pumasim `pdd @ 0x23fdf0` S36's float-lane walk made `0x2312c0` (810 blocks) wait on `0x3f0010`, and the run went from 19.91 G to 24.46 G. The two preparations differ only in what the owners state.

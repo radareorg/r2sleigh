@@ -62,7 +62,7 @@ fn called(lines: &[Line], at: u64) -> Vec<(u64, Basis)> {
             AnnotationKind::Target {
                 address,
                 call: true,
-            } => Some((address, annotation.support)),
+            } => Some((address, annotation.confidence.basis)),
             _ => None,
         })
         .collect()

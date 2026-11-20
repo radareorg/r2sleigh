@@ -134,6 +134,12 @@ pub enum TermKind {
         value: TermId,
         count: TermId,
     },
+    /// `value` rotated left by `count` bits at the term's width: `(v << k) | (v >> (w - k))`,
+    /// `k` taken modulo `w`. Only rule `shift.rotate` builds one, with a literal count.
+    Rotate {
+        value: TermId,
+        count: TermId,
+    },
     Compare {
         op: MachineComparisonOp,
         interpretation: MachineSignedness,
@@ -266,6 +272,7 @@ impl TermKind {
                 value: p,
                 count: p,
             },
+            Self::Rotate { .. } => Self::Rotate { value: p, count: p },
             Self::Concat { .. } => Self::Concat { high: p, low: p },
             Self::Subscript { .. } => Self::Subscript { base: p, index: p },
             Self::Select { .. } => Self::Select {
@@ -300,7 +307,9 @@ impl TermKind {
             | Self::FloatArithmetic { left, right, .. }
             | Self::FloatCompare { left, right, .. }
             | Self::Flag { left, right, .. } => ([left, right, placeholder], 2),
-            Self::Shift { value, count, .. } => ([value, count, placeholder], 2),
+            Self::Shift { value, count, .. } | Self::Rotate { value, count } => {
+                ([value, count, placeholder], 2)
+            }
             Self::Concat { high, low } => ([high, low, placeholder], 2),
             Self::Subscript { base, index } => ([base, index, placeholder], 2),
             Self::Select {
@@ -408,6 +417,10 @@ impl TermKind {
             } => Self::Shift {
                 kind,
                 overshift,
+                value: new[0],
+                count: new[1],
+            },
+            Self::Rotate { .. } => Self::Rotate {
                 value: new[0],
                 count: new[1],
             },
