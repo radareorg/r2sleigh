@@ -995,9 +995,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(Answer::complete(index.0))
     }
 
-    /// Every reference to `wanted`, each with the line the index read it from: the index holds no
-    /// line (D612), so each first owner is listed again at the index's grade, once.
-    ///
+    /// Every reference to `wanted` with its line, each first owner listed again once (D612):
     /// `O(log R + k)` into the index, then `O(sum of the first owners' bodies)`.
     pub fn references_to(&mut self, wanted: u64) -> Result<ReferencesTo, String> {
         let index = self.references()?.value;
