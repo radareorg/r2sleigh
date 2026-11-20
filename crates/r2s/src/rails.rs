@@ -170,20 +170,25 @@ pub(crate) fn laid(
             }
             let shift = out.len();
             out.push_str(&source[from..to]);
-            for (span, role) in roles {
-                let (low, high) = (span.start.max(start + from), span.end.min(start + to));
-                if low < high {
-                    painted.push((
-                        low - start - from + shift..high - start - from + shift,
-                        *role,
-                    ));
-                }
-            }
+            moved(roles, start + from..start + to, shift, &mut painted);
             from = to;
         }
         start = end;
     }
     (out, painted)
+}
+
+/// Each role's part inside `window` of the text, moved to start at `shift` of the output.
+fn moved(roles: &Roles, window: std::ops::Range<usize>, shift: usize, painted: &mut Roles) {
+    for (span, role) in roles {
+        let (low, high) = (span.start.max(window.start), span.end.min(window.end));
+        if low < high {
+            painted.push((
+                low - window.start + shift..high - window.start + shift,
+                *role,
+            ));
+        }
+    }
 }
 
 /// `rest` (from byte `skipped`, laid after `prefix` cells) wrapped past [`WIDTH`]: greedy, lowest

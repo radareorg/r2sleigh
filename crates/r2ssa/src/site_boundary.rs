@@ -1465,6 +1465,45 @@ struct CallEvent {
     predicated: bool,
 }
 
+/// The lanes `plane` holds bytes in, one bit each.
+fn lane_mask(plane: &[Bytes; LANES]) -> u8 {
+    (0..LANES)
+        .filter(|lane| plane[*lane] != 0)
+        .fold(0u8, |bits, lane| bits | 1 << lane)
+}
+
+impl Event {
+    /// `step`, its byte sets stored from `at` of the flow's bytes.
+    fn of(step: &Step, at: usize) -> Self {
+        Self {
+            op: index(step.op),
+            at: index(at),
+            flags: u8::from(step.weak)
+                | u8::from(step.call) << 1
+                | u8::from(step.ret) << 2
+                | u8::from(step.unstated) << 3,
+            written: lane_mask(&step.writes),
+            read: lane_mask(&step.reads),
+        }
+    }
+}
+
+impl CallEvent {
+    /// The call at `(block, op)`, with what its block states of the count register `counted`.
+    fn of<B: Lifted>(
+        flow: &CallerFlow<'_, B>,
+        (block, op): (usize, usize),
+        counted: Option<CanonicalStorageId>,
+    ) -> Self {
+        Self {
+            block: index(block),
+            op: index(op),
+            count: counted.map(|register| (register, flow.count(block, op, register))),
+            predicated: flow.predicated(block, op),
+        }
+    }
+}
+
 impl LaneFlow {
     /// The steps of `flow` in `lanes`, each call's count of the register `counted` names. `O(ops)`.
     pub fn of<B: Lifted>(
@@ -1480,37 +1519,15 @@ impl LaneFlow {
             let mut steps = Vec::new();
             flow.steps_back(block, 0..usize::MAX, &tracked, |step| steps.push(*step));
             for step in steps.iter().rev().filter(|step| !step.is_identity()) {
-                let mask = |plane: &[Bytes; LANES]| {
-                    (0..LANES)
-                        .filter(|lane| plane[*lane] != 0)
-                        .fold(0u8, |bits, lane| bits | 1 << lane)
-                };
-                events.push(Event {
-                    op: index(step.op),
-                    at: index(bytes.len()),
-                    flags: u8::from(step.weak)
-                        | u8::from(step.call) << 1
-                        | u8::from(step.ret) << 2
-                        | u8::from(step.unstated) << 3,
-                    written: mask(&step.writes),
-                    read: mask(&step.reads),
-                });
+                events.push(Event::of(step, bytes.len()));
                 bytes.extend(
                     step.writes
                         .iter()
                         .chain(&step.reads)
                         .filter(|held| **held != 0),
                 );
-                if step.call {
-                    let count = counted(block, step.op)
-                        .map(|register| (register, flow.count(block, step.op, register)));
-                    calls.push(CallEvent {
-                        block: index(block),
-                        op: index(step.op),
-                        count,
-                        predicated: flow.predicated(block, step.op),
-                    });
-                }
+                let call = step.call.then_some((block, step.op));
+                calls.extend(call.map(|at| CallEvent::of(flow, at, counted(at.0, at.1))));
             }
         }
         first.push(index(events.len()));

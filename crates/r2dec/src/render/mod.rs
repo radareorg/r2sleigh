@@ -120,29 +120,7 @@ pub fn render(
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
     let clauses = proof::ProofClauses::of(&c, unassigned.as_deref().unwrap_or_default());
-    // The proof line every rendering opens with: what became of each obligation the source owes.
-    proof::note_unproven_constructs(
-        &mut c,
-        Some(&ledger),
-        0,
-        input.declared_call_prototypes(),
-        0,
-        (
-            &clauses,
-            (
-                (input.open_second_result(), input.integer_lane_unread_only()),
-                &input.body_disputed_lanes(),
-            ),
-            input.inferred_aggregates().len(),
-            &tags.conflicting(),
-            &input.unproven_parameters(),
-        ),
-        (input.return_type())
-            .filter(|fact| fact.is_unproven())
-            .map(r2types::ReturnTypeFact::unproven_cause),
-        input.arity_floor(),
-        input.artifact().landing_pads(),
-    );
+    open_proof_line(&mut c, input, &ledger, &clauses, &tags);
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
     ready.seal_observation_markers(
@@ -157,6 +135,38 @@ pub fn render(
         ledger,
         stopped,
     })
+}
+
+/// The proof line every rendering opens with: what became of each obligation the source owes.
+fn open_proof_line(
+    c: &mut CFunction,
+    input: &RenderInput<'_>,
+    ledger: &ObligationLedger,
+    clauses: &proof::ProofClauses,
+    tags: &tags::Tags,
+) {
+    proof::note_unproven_constructs(
+        c,
+        Some(ledger),
+        0,
+        input.declared_call_prototypes(),
+        0,
+        (
+            clauses,
+            (
+                (input.open_second_result(), input.integer_lane_unread_only()),
+                &input.body_disputed_lanes(),
+            ),
+            input.inferred_aggregates().len(),
+            &tags.conflicting(),
+            &input.unproven_parameters(),
+        ),
+        (input.return_type())
+            .filter(|fact| fact.is_unproven())
+            .map(r2types::ReturnTypeFact::unproven_cause),
+        input.arity_floor(),
+        input.artifact().landing_pads(),
+    );
 }
 
 /// D2 over every placed block. A late edge's copy is promised to render; when one gaps, spell again with

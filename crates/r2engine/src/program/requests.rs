@@ -1023,28 +1023,12 @@ impl<S: Source + 'static> OpenProgram<S> {
         let mut lines = Vec::new();
         if !asked.is_empty() {
             let walker = super::returns::Walking::new(view.clone(), true)?;
-            for (owner, mut addresses) in asked {
-                addresses.sort_unstable();
-                addresses.dedup();
+            for (owner, addresses) in asked {
                 let thumb = match survey.walked_in(owner) {
                     Some(Ok(thumb)) => thumb,
                     _ => return Err(format!("{owner:#x} holds a reference and was not walked")),
                 };
-                let (listed, _) =
-                    listed_lines(&view, &walker, owner, thumb)?.map_err(|(unread, _)| {
-                        format!("{owner:#x} was read and is now unread: {unread:?}")
-                    })?;
-                // A body lists an instruction once per block holding it; the index read the first that claims.
-                let mut taken = vec![false; addresses.len()];
-                for line in listed {
-                    if let Ok(at) = addresses.binary_search(&line.address)
-                        && !taken[at]
-                        && crate::query::references::claims(&line)
-                    {
-                        taken[at] = true;
-                        lines.push(line);
-                    }
-                }
+                lines.extend(claimed_lines(&view, &walker, (owner, thumb), addresses)?);
             }
             lines.sort_by_key(|line| line.address);
         }
@@ -1052,13 +1036,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         for (fact, claim) in index.to(wanted) {
             let line = match claim.word {
                 true => None,
-                false => {
-                    let at = (lines.binary_search_by_key(&claim.address, |line| line.address))
-                        .map_err(|_| {
-                            format!("{:#x}'s line is not in its owner's listing", claim.address)
-                        })?;
-                    Some(lines[at].clone())
-                }
+                false => Some(line_at(&lines, claim.address)?),
             };
             referring.push(Referring {
                 fact: *fact,
@@ -1197,6 +1175,39 @@ fn listed_lines<S: Source + 'static>(
     )
 }
 
+/// `owner`'s lines at `addresses`, each once: a body lists an instruction once per block holding
+/// it and the index read the first that claims. `O(body + k log k)`.
+fn claimed_lines<S: Source + 'static>(
+    view: &View<'_, S>,
+    walker: &super::returns::Walking<'_, S>,
+    (owner, thumb): (u64, bool),
+    mut addresses: Vec<u64>,
+) -> Result<Vec<Line>, String> {
+    addresses.sort_unstable();
+    addresses.dedup();
+    let (listed, _) = listed_lines(view, walker, owner, thumb)?
+        .map_err(|(unread, _)| format!("{owner:#x} was read and is now unread: {unread:?}"))?;
+    let mut taken = vec![false; addresses.len()];
+    let mut lines = Vec::new();
+    for line in listed {
+        let Ok(at) = addresses.binary_search(&line.address) else {
+            continue;
+        };
+        if !taken[at] && crate::query::references::claims(&line) {
+            taken[at] = true;
+            lines.push(line);
+        }
+    }
+    Ok(lines)
+}
+
+/// The line at `address` in `lines`, sorted by address: `O(log n)`.
+fn line_at(lines: &[Line], address: u64) -> Result<Line, String> {
+    let at = lines.binary_search_by_key(&address, |line| line.address);
+    let at = at.map_err(|_| format!("{address:#x}'s line is not in its owner's listing"))?;
+    Ok(lines[at].clone())
+}
+
 /// The body `Walked` holds for `entry`, its decodes kept: the same walk, refusals and tables.
 fn listed_walk<S: Source + 'static>(
     view: &View<'_, S>,
@@ -1279,19 +1290,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             .map(|vaddr| (vaddr, stated.clone()))
             .collect::<BTreeMap<_, _>>();
         if seeds.is_empty() {
-            return Ok(Surveyed(Arc::new(Survey {
-                functions: Vec::new(),
-                placeless,
-                walked: BTreeMap::new(),
-                extents: BTreeMap::new(),
-                supervisor: BTreeMap::new(),
-                holders: crate::discovery::Holders::default(),
-                callers: BTreeMap::new(),
-                tail_callers: BTreeMap::new(),
-                after_exits: Vec::new(),
-                unwinding: 0,
-                unresolved: Some(0),
-            })));
+            return Ok(Surveyed(Arc::new(empty_survey(placeless))));
         }
         let walker = super::returns::Walking::new(view.clone(), true)?.recording_unwinds();
         let mut found = crate::discovery::functions(&view, seeds, &walker);
@@ -1363,6 +1362,23 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             unwinding,
             unresolved,
         })))
+    }
+}
+
+/// The survey of a program that states no function: nothing walked, so no transfer is unresolved.
+fn empty_survey(placeless: BTreeMap<u64, Confidence>) -> Survey {
+    Survey {
+        functions: Vec::new(),
+        placeless,
+        walked: BTreeMap::new(),
+        extents: BTreeMap::new(),
+        supervisor: BTreeMap::new(),
+        holders: crate::discovery::Holders::default(),
+        callers: BTreeMap::new(),
+        tail_callers: BTreeMap::new(),
+        after_exits: Vec::new(),
+        unwinding: 0,
+        unresolved: Some(0),
     }
 }
 

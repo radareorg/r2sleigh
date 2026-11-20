@@ -124,23 +124,25 @@ fn report_stats(stats: r2engine::query::AnalysisStats) {
     }
 }
 
-fn main() {
-    allocator::install();
-    let profile = allocator::profile();
-    let cli = Cli::parse();
+/// The session over `cli.file`: a raw blob where `-a` and `-b` name its machine. Exits on a refusal.
+fn opened(cli: &Cli) -> session::Session {
     let opened = match (&cli.arch, cli.bits) {
         (Some(arch), Some(bits)) => {
             raw_arch(arch, bits).and_then(|arch| session::Session::open_raw(&cli.file, arch))
         }
         _ => session::Session::open(&cli.file),
     };
-    let mut session = match opened {
-        Ok(session) => session,
-        Err(message) => {
-            eprintln!("r2s: {}", message);
-            std::process::exit(1);
-        }
-    };
+    opened.unwrap_or_else(|message| {
+        eprintln!("r2s: {message}");
+        std::process::exit(1)
+    })
+}
+
+fn main() {
+    allocator::install();
+    let profile = allocator::profile();
+    let cli = Cli::parse();
+    let mut session = opened(&cli);
     // Colour is for a person: a terminal, and nobody who asked for none
     // (https://no-color.org). Anything a program reads gets plain text.
     let terminal = std::io::stdout().is_terminal();
