@@ -447,3 +447,87 @@ Open, with the fact that stopped each:
   index is paid on every graph build; the walks it replaces visit 51 to 1,829
   blocks a command. The graph build moved 1.70% to 1.76% of samples; the rest
   is unattributed. The patch is kept outside the tree; no cache was added.
+
+## D470 local classes: step 0 (round 16, design and proof)
+
+**Invariant I.** For every class `C`, member `m`, and point `q` where the rendered C reads `C`'s
+local `L` to mean `m`, the last assignment to `L` executed on every path to `q` is `m`'s.
+
+**Classes (r2ssa, `local_classes.rs`, built in the collection while `ValueLiveness` lives).**
+Candidates are phi webs: a bound phi's output with each operand that is a bound instruction
+output of the same canonical location and the same value type. Formals, constants, unbound
+values and memory are never members. Two webs join only where no member of one interferes with
+a member of the other (`interfering_lanes == 0`), checked by the linear class test of Boissinot,
+Darte, Rastello, de Dinechin and Guillon (CGO 2009): the two member lists merged in dominator
+preorder, each value checked against its nearest dominating member only. A value with no proof
+is its own class. Storage: `class: Vec<u32>` by `ValueId`, members per class in preorder,
+`O(V α(V) + Σ segments)`. Per class, `joins` is the iterated dominance frontier of its member
+definition blocks (Cytron et al., TOPLAS 1991; Sreedhar and Gao, POPL 1995).
+
+**`current_at(C, block, ordinal) -> Option<ValueId>`.** The nearest element dominating
+`(block, ordinal)` among `C`'s member definitions and `C`'s joins: a member where that element
+is its definition or a join holding one of `C`'s own phis; `None` where it is a join with no phi
+of `C`, or nothing dominates. `O(log |C|)` by binary search in the preorder list.
+
+**Every site that assigns `L` in the rendered C.**
+
+1. A bound member's statement `L = e;`, printed at the member's SSA position: a block's
+   statements are spelled in instruction order.
+2. An edge copy into a phi `p` of `C` on `u -> v`, printed in the arm of `u`'s branch after its
+   test, or after `u`'s statements on a single edge. The structurer moves a back edge's copies
+   before a `do`/`while` tail test (fnv1a32's `rdi_1 = rdi_2;` before `while (...)`), see
+   **Tests** below. It is dropped exactly when its operand `o` is a bound member of `C` and
+   `current_at(C, u, end) == o`: `L` already holds `p`'s value on that edge. Otherwise it is
+   kept and assigns `L` (an unbound operand, whose expression has no assignment of its own, or
+   one outside `C`).
+3. A parallel copy whose writes clobber its reads goes through `next_carrier` temporaries: each
+   kept copy's operand is read before any write to `L`. With classes, a clobber is a write to
+   `L` and a read of any member of `C` in the same parallel copy, compared by class, not by id.
+4. The `input == output` edge assigns nothing; `L` holds `p` already (case 2's rule with `o = p`).
+5. An arm no path reads (`arm_read` false) assigns nothing; `p` is read on no path from it, so
+   no read reaches `q` through that edge.
+6. A formal's entry value is the parameter's own symbol; formals are never members, so no
+   class local is assigned at entry.
+
+**Lemma (reaching assignment).** Where `current_at(C, b, k) = Some(m)`, on every path to
+`(b, k)` the last assignment to `L` is `m`'s. Every assignment to `L` is at a member definition
+(site 1) or on an edge into a block of `C`'s phis (sites 2 to 5), and every such block is in
+`joins`. The nearest dominating element `x` of definitions and joins is the last of them on
+every path to `(b, k)` (Cytron's renaming argument: an element nearer on some path would lie in
+the dominance frontier closure, hence be an element dominating `(b, k)` nearer than `x`). If
+`x` is `m`'s definition, the statement assigned `m`. If `x` is a join holding `p` of `C`, every
+edge into it assigned `p`'s operand (kept copy) or held it (dropped copy, by induction in
+dominator order on `current_at(C, u, end)`), or is an arm no path reads (site 5). Members do not
+interfere, so no other member's definition lies between `x` and `(b, k)` on a path where `m` is
+read. A join without a phi of `C` gives `None`: the value depends on the path.
+
+**Reads and the reading point.** A read of member `m` prints `L` only where
+`current_at(C, b, k) == Some(m)` at its reading point; otherwise it is not a variable and the
+reader is bound (below). The reading point is where the text stands, not the SSA use:
+- a statement's operands, forwarded subexpressions included, read at the statement's
+  instruction `r`: `(block of r, ordinal of r)`. `Values.reading` holds the block today; it
+  gains the ordinal of the statement being spelled, set where the attempt starts;
+- an edge copy's operand reads at `(u, end)`;
+- a test or selector reads at `(u, end)`, and is admitted only where no edge out of `u` keeps a
+  copy into `C` (**Tests**).
+
+A forwarded value `v` (unbound, its expression printed at its reader) whose expression reads a
+member that `current_at` refuses at the reader is bound on the next attempt: it then prints at
+its own SSA position, where its operands are current. This covers a read forwarded past a
+redefinition, which SSA interference does not see.
+
+**Tests.** A tail test the structurer prints after `u`'s back edge copies reads `L` after a kept
+copy assigned `p`. The rule above refuses such a read where `u` keeps a copy into `C`; the
+test's value is then bound, printed before the copies at its SSA position. A dropped copy
+assigns nothing, so it does not block the test.
+
+**Termination.** The spelling loop (`spell_function`) adds one instruction to the bound set per
+refused read, and the set only grows: at most `|instructions|` more attempts, each `O(text)`.
+
+**What r2dec owns.** It declares one symbol per class with bound members, named by the location
+with a numeric suffix where two classes share it, ordered by smallest member id; it reads
+`class` and `current_at`. It decides no interference and no class.
+
+**Expected cost.** One pass over phi edges and one dominance frontier per class in the
+collection; `current_at` `O(log |C|)` per read. Cause line: "D470: local classes, one pass over
+phi edges and one dominance frontier per class".
