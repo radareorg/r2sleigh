@@ -75,7 +75,7 @@ FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s 0x401330; pdf; s 0x401530; pdf
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 51: sym.fnv1a32 (arg0, arg1);
 │           0x00401330      f30f1efa       endbr64
 │           0x00401334      4885f6         test rsi, rsi
@@ -95,7 +95,7 @@ EXPECT=<<EOF
 └           0x00401365      c3             ret                         ; . returns rax
 ; CALL XREF from sym.main @ 0x401134(x)
 ; CALL XREF from sym.combined @ 0x401b7d(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 76: sym.crc32_bitwise (arg0, arg1);
 │           0x00401530      f30f1efa       endbr64
 │           0x00401534      4885f6         test rsi, rsi
@@ -131,7 +131,7 @@ FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s sym.siphash24; pdf
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x4011d7(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 599: sym.siphash24 (arg0, arg1, arg2, arg3);
 │ ; ! result unproven: rax, PointerWide
 │           0x004018b0      f30f1efa       endbr64
@@ -348,7 +348,7 @@ FILE=tests/fixtures/code_pointer_table_O0
 CMDS=pdf @ sym._table_dispatch
 EXPECT=<<EOF
 ; CALL XREF from sym._main @ 0x1000004d0(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 1 indirect transfer unresolved
 ┌ 152: sym._table_dispatch (arg0, arg1, ?);
 │ ; ~ at least 2 args
 │ ; ! result unproven: x0, WidthUnbounded
@@ -465,7 +465,7 @@ ARGS=-e scr.utf8=false
 CMDS=pdf @ 0x401330
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 / 51: sym.fnv1a32 (arg0, arg1);
 |           0x00401330      f30f1efa       endbr64
 |           0x00401334      4885f6         test rsi, rsi
@@ -493,7 +493,7 @@ ARGS=-e asm.lines=false
 CMDS=pdf @ 0x401330
 EXPECT=<<EOF
 ; CALL XREF from sym.main @ 0x401067(x)
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 51: sym.fnv1a32 (arg0, arg1);
 │           0x00401330      f30f1efa       endbr64
 │           0x00401334      4885f6         test rsi, rsi
@@ -520,7 +520,7 @@ NAME=header of an unproven result
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=pdf @ 0x401000; afi @ 0x401000~result
 EXPECT=<<EOF
-; ? xrefs may be short: indirect transfers unread
+; ? xrefs may be short: 5 indirect transfers unresolved
 ┌ 27: sym._init (?);
 │ ; ~ at least 0 args
 │ ; ! result unproven: rax, Written

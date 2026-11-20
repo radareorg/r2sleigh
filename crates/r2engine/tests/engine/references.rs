@@ -51,7 +51,8 @@ fn the_index_carries_the_scope_it_was_read_over() {
     };
     assert_eq!(coverage.unresolved.get(&TWO), Some(&vec![stopped]));
     assert_eq!(coverage.unresolved.len(), 1, "{coverage:?}");
-    assert_eq!(coverage.indirect_count(), 1);
+    // An unwalked body may transfer anywhere, so the survey states no count (D619).
+    assert_eq!(coverage.indirect_count(), None);
 }
 
 #[test]
@@ -298,7 +299,7 @@ fn a_walk_stopped_before_it_read_its_tables_is_indexed_as_far_as_it_went() {
         [(BASE + 3, BASE + 0x28, Role::Jump, Basis::Decoded)]
     );
     assert!(index.coverage.unread.is_empty(), "{:?}", index.coverage);
-    assert_eq!(index.coverage.indirect_count(), 1);
+    assert_eq!(index.coverage.indirect_count(), Some(1));
     // The stop was the request's, not the program's: asked again, the arms are there.
     let again = program.references().expect("the index builds").value;
     assert!(again.facts().len() > index.facts().len());

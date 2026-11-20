@@ -937,8 +937,9 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
     if coverage.is_closed() {
         return format!("\n; covers {read} functions, every body walked to its end");
     }
-    let indirect = coverage.indirect_count();
-    let other = coverage.unresolved_count() - indirect;
+    // An unwalked body states no count; its own clause below says it is unread.
+    let indirect = coverage.indirect_count().unwrap_or(0);
+    let other = coverage.unreadable_count();
     let gaps = [
         (
             indirect,

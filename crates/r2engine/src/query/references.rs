@@ -124,6 +124,11 @@ pub fn claimed_by(lines: &[Line]) -> Vec<Reference> {
     lines.iter().flat_map(claims_of).collect()
 }
 
+/// Whether a line claims any reference: the index keeps the first that does.
+pub(crate) fn claims(line: &Line) -> bool {
+    claims_of(line).next().is_some()
+}
+
 /// The references one line claims.
 fn claims_of(line: &Line) -> impl Iterator<Item = Reference> + '_ {
     line.annotations.iter().filter_map(|annotation| {
@@ -310,6 +315,9 @@ pub struct Coverage {
     /// Each place the loader writes a value the index cannot read: a word no record states, or a
     /// field forming an address of code (doc/adr-result-side.md, "The closed world").
     pub unstated: Vec<u64>,
+    /// The survey's count of indirect transfers no walk followed, the header's own (D619); `None`
+    /// where a body is unwalked.
+    pub indirect: Option<usize>,
 }
 
 /// Why one function contributed nothing to the index.
@@ -322,22 +330,22 @@ pub enum Unread {
 }
 
 impl Coverage {
-    /// How many transfers no walk could follow, across every function.
-    pub fn unresolved_count(&self) -> usize {
-        self.unresolved.values().map(Vec::len).sum()
-    }
-
-    /// How many of those are indirect branches rather than unreadable bytes.
-    pub fn indirect_count(&self) -> usize {
-        self.unresolved
-            .values()
-            .flatten()
-            .filter(|stop| stop.reason == UnresolvedReason::IndirectBranch)
+    /// How many walk stops are unreadable bytes rather than indirect branches, across every function.
+    pub fn unreadable_count(&self) -> usize {
+        let stops = self.unresolved.values().flatten();
+        stops
+            .filter(|stop| stop.reason != UnresolvedReason::IndirectBranch)
             .count()
     }
 
-    /// Whether every believed body was read and walked to its end.
+    /// How many indirect transfers no walk followed: opaque calls and unresolved dispatches, as the
+    /// survey counts them for every header (D619).
+    pub fn indirect_count(&self) -> Option<usize> {
+        self.indirect
+    }
+
+    /// Whether every believed body was read and walked to its end, every indirect transfer followed.
     pub fn is_closed(&self) -> bool {
-        self.unread.is_empty() && self.unresolved.is_empty()
+        self.unread.is_empty() && self.unresolved.is_empty() && self.indirect == Some(0)
     }
 }

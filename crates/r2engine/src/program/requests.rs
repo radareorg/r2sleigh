@@ -322,6 +322,8 @@ pub(super) struct Survey {
     after_exits: Vec<u64>,
     /// How many walked bodies hold a call that unwinds to a landing pad (D570).
     pub(super) unwinding: usize,
+    /// The indirect transfers no walk followed, program-wide; `None` where a body is unwalked (D619).
+    pub(super) unresolved: Option<usize>,
 }
 
 impl Survey {
@@ -669,6 +671,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         // that fails lists no xref, and the `?` line stands: the listing does not depend on it.
         if let Ok(survey) = self.surveyed() {
             (listing.header.calls, listing.header.tails) = survey.xrefs_of(entry);
+            listing.header.unresolved = survey.unresolved;
         }
         Ok((listing, shape))
     }
@@ -998,12 +1001,14 @@ impl<S: Source + 'static> OpenProgram<S> {
                     listed_lines(&view, &walker, owner, thumb)?.map_err(|(unread, _)| {
                         format!("{owner:#x} was read and is now unread: {unread:?}")
                     })?;
-                // A body lists an instruction once per block holding it; the index read the first.
+                // A body lists an instruction once per block holding it; the index read the first that claims.
                 let mut taken = vec![false; addresses.len()];
                 for line in listed {
                     if let Ok(at) = addresses.binary_search(&line.address)
-                        && !std::mem::replace(&mut taken[at], true)
+                        && !taken[at]
+                        && crate::query::references::claims(&line)
                     {
+                        taken[at] = true;
                         lines.push(line);
                     }
                 }
@@ -1089,7 +1094,10 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     let survey = survey.as_ref().clone()?.0;
     let walked = &survey.walked;
     let mut index = Indexing::default();
-    let mut coverage = Coverage::default();
+    let mut coverage = Coverage {
+        indirect: survey.unresolved,
+        ..Coverage::default()
+    };
     let writes = &view.source().container().loader_writes;
     index.read_words(
         writes,
@@ -1249,6 +1257,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 tail_callers: BTreeMap::new(),
                 after_exits: Vec::new(),
                 unwinding: 0,
+                unresolved: Some(0),
             })));
         }
         let walker = super::returns::Walking::new(view.clone(), true)?.recording_unwinds();
@@ -1290,6 +1299,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         let unwinding = (found.walks.values())
             .filter(|walk| walk.as_ref().is_ok_and(super::returns::BodyWalk::unwinds))
             .count();
+        // Default-deny: a body no walk read may transfer anywhere, so no count is stated.
+        let unresolved = (found.walks.values())
+            .map(|walk| {
+                walk.as_ref()
+                    .ok()
+                    .map(super::returns::BodyWalk::unresolved_transfers)
+            })
+            .sum::<Option<usize>>();
         let holders =
             crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
                 let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
@@ -1311,6 +1328,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             tail_callers,
             after_exits,
             unwinding,
+            unresolved,
         })))
     }
 }

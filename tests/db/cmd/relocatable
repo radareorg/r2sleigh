@@ -36,7 +36,6 @@ NAME=relocatable object listing
 FILE=crates/r2image/tests/data/relocated.elf
 CMDS=pdf @ sym.f
 EXPECT=<<EOF
-; ? xrefs may be short: indirect transfers unread
 ┌ 31: sym.f (?);
 │ ; ~ at least 0 args
 │ ; ! result unproven: rax, Written

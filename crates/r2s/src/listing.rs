@@ -497,6 +497,7 @@ fn xrefs(header: &r2engine::program::Header, name: &dyn Fn(u64) -> String) -> Ve
     // Default-deny: the list is complete only where the engine counts no unfollowed transfer.
     let short = match header.unresolved {
         Some(0) => None,
+        Some(1) => Some("xrefs may be short: 1 indirect transfer unresolved".to_owned()),
         Some(count) => Some(format!(
             "xrefs may be short: {count} indirect transfers unresolved"
         )),
