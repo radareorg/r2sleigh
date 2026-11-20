@@ -90,7 +90,7 @@ EXPECT=<<EOF
 │      ╎│   0x00401357      4839fe         cmp rsi, rdi
 │      └│─< 0x0040135a      75ec           jne 0x401348
 │       │   0x0040135c      c3             ret                         ; . returns rax
-│       │   ;-- 3 bytes not in this function: 0x0040135d..0x0040135f
+│       │   ;-- ? 3 bytes in no block: 0x0040135d..0x0040135f
 │       └─> 0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
 └           0x00401365      c3             ret                         ; . returns rax
 ; CALL XREF from sym.main @ 0x401134(x)
@@ -188,7 +188,7 @@ EXPECT=<<EOF
 │      └│─< 0x00401978      758e           jne 0x401908
 │       └─> 0x0040197a      4183e007       and r8d, 0x7                ;   defines r8 in [0x0, 0x7]
 │           0x0040197e      3e42ff24c5..   jmp qword ds:[0x402020 + r8*0x8] ; ~ switch table (8 cases) at 0x402020
-│           ;-- 9 bytes not in this function: 0x00401987..0x0040198f
+│           ;-- ? 9 bytes in no block: 0x00401987..0x0040198f
 │           ;-- case 7:                                                ; from 0x0040197e
 │           0x00401990      410fb67a06     movzx edi, byte [r10 + 0x6]
 │           0x00401995      48c1e730       shl rdi, 0x30               ; ~ defines rdi in [0x0, 0xff000000000000]
@@ -480,7 +480,7 @@ EXPECT=<<EOF
 |      :|   0x00401357      4839fe         cmp rsi, rdi
 |      `|=< 0x0040135a      75ec           jne 0x401348
 |       |   0x0040135c      c3             ret                         ; . returns rax
-|       |   ;-- 3 bytes not in this function: 0x0040135d..0x0040135f
+|       |   ;-- ? 3 bytes in no block: 0x0040135d..0x0040135f
 |       `-> 0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
 \           0x00401365      c3             ret                         ; . returns rax
 EOF
@@ -508,7 +508,7 @@ EXPECT=<<EOF
 │           0x00401357      4839fe         cmp rsi, rdi
 │           0x0040135a      75ec           jne 0x401348
 │           0x0040135c      c3             ret                         ; . returns rax
-│           ;-- 3 bytes not in this function: 0x0040135d..0x0040135f
+│           ;-- ? 3 bytes in no block: 0x0040135d..0x0040135f
 │           0x00401360      b8c59d1c81     mov eax, 0x811c9dc5
 └           0x00401365      c3             ret                         ; . returns rax
 EOF

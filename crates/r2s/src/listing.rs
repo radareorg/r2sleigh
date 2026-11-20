@@ -362,16 +362,12 @@ pub(crate) fn disassemble_function(
     let lines = &answer.value;
     let mut rows = Vec::new();
     let mut row_of = Vec::with_capacity(lines.len());
-    let mut end = None;
+    let mut gaps = listing.gaps.iter().peekable();
     for (line, next) in lines.iter().zip(next_calls(lines)) {
-        // Bytes between two blocks no block of this function holds: one pass, `O(L)`.
-        if let Some(end) = end.filter(|end| *end < line.address) {
-            let gap = line.address - end;
-            let last = line.address - 1;
-            let text = format!(";-- {gap} bytes not in this function: {end:#010x}..{last:#010x}");
-            rows.push(Row::comment(text));
+        // The engine's gaps come in listing order, each ending at the line it precedes (D622).
+        if let Some(gap) = gaps.next_if(|gap| gap.range.end == line.address) {
+            rows.push(gap_row(gap));
         }
-        end = Some(line.address + line.bytes.len().max(1) as u64);
         rows.extend(labels(line));
         row_of.push(rows.len());
         rows.push(listed(session, line, next));
@@ -511,6 +507,32 @@ fn xrefs(header: &r2engine::program::Header, name: &dyn Fn(u64) -> String) -> Ve
         out.push((text, roles));
     }
     out
+}
+
+/// A gap row: bytes not in this function, some held by another body, or with `?` bytes no walked body holds.
+fn gap_row(gap: &r2engine::query::Gap) -> Row {
+    let (start, last) = (gap.range.start, gap.range.end - 1);
+    let size = gap.range.end - start;
+    if gap.held {
+        return Row::comment(format!(
+            ";-- {size} bytes not in this function: {start:#010x}..{last:#010x}"
+        ));
+    }
+    let mut text = ";-- ".to_owned();
+    let mut roles = Roles::new();
+    let said = format!("{size} bytes in no block: {start:#010x}..{last:#010x}");
+    noted(
+        &mut text,
+        &mut roles,
+        r2engine::query::Mark::Unknown,
+        &said,
+        Some(Role::Comment),
+    );
+    Row {
+        text,
+        roles,
+        ..Row::comment(String::new())
+    }
 }
 
 /// Whether the line is an indirect jump no walk followed: an unknown-kind note says so.

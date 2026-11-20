@@ -30,6 +30,8 @@ pub struct FunctionListing {
     pub edges: Vec<FlowEdge>,
     /// What `pdf` states above the first line (D566).
     pub header: Header,
+    /// Each run of bytes between two listed lines that no line covers, in listing order (D622).
+    pub gaps: Vec<crate::query::Gap>,
 }
 
 /// A function's header: who reaches it, and the frame answer `afi` reads.
@@ -431,6 +433,22 @@ fn listed_by_block(answered: &Answered<'_>, blocks: &[r2il::R2ILBlock]) -> Answe
     whole
 }
 
+/// The bytes between consecutive lines no line covers, each with whether a walked body holds any
+/// of it: one pass, `O(L + G log S)` for G gaps.
+fn gaps(lines: &[Line], holders: Option<&crate::discovery::Holders>) -> Vec<crate::query::Gap> {
+    let mut gaps = Vec::new();
+    let mut end = None;
+    for line in lines {
+        if let Some(end) = end.filter(|end| *end < line.address) {
+            let range = end..line.address;
+            let held = holders.is_some_and(|holders| holders.holds_any(range.clone()));
+            gaps.push(crate::query::Gap { range, held });
+        }
+        end = Some(line.address + line.bytes.len().max(1) as u64);
+    }
+    gaps
+}
+
 impl<S: Source + 'static> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
     pub fn prepared(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
@@ -669,10 +687,14 @@ impl<S: Source + 'static> OpenProgram<S> {
         listing.edges = flow_edges(&listing.lines.value, &shape);
         // The survey every request reads: its caller sets, never the reference index (D566). A survey
         // that fails lists no xref, and the `?` line stands: the listing does not depend on it.
-        if let Ok(survey) = self.surveyed() {
+        let survey = self.surveyed().ok();
+        if let Some(survey) = &survey {
             (listing.header.calls, listing.header.tails) = survey.xrefs_of(entry);
             listing.header.unresolved = survey.unresolved;
         }
+        // Default-deny: with no survey, no byte is known held.
+        let holders = survey.as_ref().map(|survey| &survey.holders);
+        listing.gaps = gaps(&listing.lines.value, holders);
         Ok((listing, shape))
     }
 
@@ -757,6 +779,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                 info,
                 ..Header::default()
             },
+            gaps: Vec::new(),
         };
         Ok((listing, pads))
     }
@@ -791,6 +814,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                     }),
                     edges: Vec::new(),
                     header: Header::default(),
+                    gaps: Vec::new(),
                 };
                 let shape = shape_of(std::iter::empty(), std::iter::empty(), None);
                 return Ok((listing, shape));
@@ -826,6 +850,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             refused: Some(AnalysisRefused { reason, unresolved }),
             edges: Vec::new(),
             header: Header::default(),
+            gaps: Vec::new(),
         };
         Ok((listing, shape))
     }

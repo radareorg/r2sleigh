@@ -302,6 +302,14 @@ fn start(at: usize) -> u32 {
     u32::try_from(at).expect("more than 2^32 owner rows")
 }
 
+/// Bytes a function's listing leaves between two of its lines (D622).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gap {
+    pub range: std::ops::Range<u64>,
+    /// Whether a walked body holds any byte; else every byte is in no walked body.
+    pub held: bool,
+}
+
 /// Which functions the index read, and where it could not read on.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Coverage {

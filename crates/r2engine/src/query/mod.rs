@@ -81,7 +81,7 @@ pub use records::{
     Standing, Stop, Trips, Unexpressed, Unlifted, WalkedBody,
 };
 pub use references::{
-    Claim, Coverage, Reference, References, ReferencesTo, Referring, Role, Unread,
+    Claim, Coverage, Gap, Reference, References, ReferencesTo, Referring, Role, Unread,
 };
 pub use result::ResultStanding;
 

@@ -18,6 +18,7 @@ mod declared_types;
 mod default_deny;
 mod degraded;
 mod discovery;
+mod gaps;
 mod gs;
 mod handed;
 mod header;
