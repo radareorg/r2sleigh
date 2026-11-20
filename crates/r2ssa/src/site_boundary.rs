@@ -624,6 +624,15 @@ impl Live {
 /// Where control goes between a caller's lifted blocks, as the walk that lifted them stated it.
 pub struct CallerFlow<'a, B> {
     blocks: &'a [B],
+    graph: Graph,
+    /// What each operation of each block may do, where the block's first operation is `first[block]`.
+    modes: Vec<Mode>,
+    first: Vec<u32>,
+}
+
+/// The blocks of a body as a lane pass reads them, apart from their operations.
+#[derive(Clone)]
+struct Graph {
     /// Each block's address and index, ascending.
     starts: Vec<(u64, usize)>,
     successors: Edges,
@@ -635,9 +644,6 @@ pub struct CallerFlow<'a, B> {
     open: Vec<bool>,
     /// Blocks holding control flow other than one terminator at their end: no write there kills.
     irregular: Vec<bool>,
-    /// What each operation of each block may do, where the block's first operation is `first[block]`.
-    modes: Vec<Mode>,
-    first: Vec<u32>,
 }
 
 /// The low bytes a walked body may read of each result register before writing it (D372, D411),
@@ -754,6 +760,7 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
 }
 
 /// Block indices by block, flat.
+#[derive(Clone)]
 struct Edges {
     starts: Vec<u32>,
     items: Vec<u32>,
@@ -878,12 +885,14 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
         );
         Self {
             blocks,
-            starts,
-            successors,
-            predecessors,
-            leaves,
-            open: open_blocks,
-            irregular,
+            graph: Graph {
+                starts,
+                successors,
+                predecessors,
+                leaves,
+                open: open_blocks,
+                irregular,
+            },
             modes,
             first,
         }
@@ -902,22 +911,7 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
         effects: &dyn CallEffects,
         sites: &[(usize, usize)],
     ) -> Vec<SiteBoundary> {
-        let mut fates = vec![SiteBoundary::unknown(lanes); sites.len()];
-        if sites.is_empty() {
-            return fates;
-        }
-        let pass = Pass::new(self, Lanes::of(lanes), effects);
-        let Some(live_in) = pass.solve(pass.budget()) else {
-            return fates;
-        };
-        // Each block is replayed once, from its end back to its first site.
-        let mut by_block = (0..sites.len()).collect::<Vec<_>>();
-        by_block.sort_by_key(|site| (sites[*site].0, std::cmp::Reverse(sites[*site].1)));
-        for run in by_block.chunk_by(|one, other| sites[*one].0 == sites[*other].0) {
-            let wanted = run.iter().map(|site| (*site, sites[*site].1));
-            pass.replay(sites[run[0]].0, wanted, &live_in, &mut fates);
-        }
-        fates
+        site_fates_of(self, lanes, effects, sites)
     }
 
     /// What the body entered at `entry` does to its entry registers; none past the budget or where no
@@ -930,10 +924,11 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
         kept: &KeptBy<'_>,
     ) -> Option<RegisterEffect> {
         let at = self
+            .graph
             .starts
             .binary_search_by_key(&entry, |(start, _)| *start)
             .ok()
-            .map(|at| self.starts[at].1)?;
+            .map(|at| self.graph.starts[at].1)?;
         let tracked = Lanes::of(lanes);
         let pass = Pass::new(self, tracked, effects);
         let live = pass.solve(pass.budget())?.swap_remove(at);
@@ -967,13 +962,13 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
         let none = (UniverseSet::empty(outermost.len()), Box::default());
         let mut returning = Vec::new();
         for (at, block) in self.blocks.iter().map(Lifted::lifted).enumerate() {
-            if self.open[at] || self.leaves[at] || self.irregular[at] {
+            if self.graph.open[at] || self.graph.leaves[at] || self.graph.irregular[at] {
                 return none;
             }
             if (block.ops.iter()).any(|op| matches!(op, R2ILOp::Return { .. })) {
                 returning.push(at);
             }
-            if !self.successors.of_block(at).is_empty() {
+            if !self.graph.successors.of_block(at).is_empty() {
                 continue;
             }
             match block.ops.last() {
@@ -989,7 +984,7 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
         let mut reaching = vec![false; self.blocks.len()];
         while let Some(at) = returning.pop() {
             if !std::mem::replace(&mut reaching[at], true) {
-                let from = self.predecessors.of_block(at).iter();
+                let from = self.graph.predecessors.of_block(at).iter();
                 returning.extend(from.map(|from| *from as usize));
             }
         }
@@ -1035,22 +1030,133 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
     }
 }
 
-/// One solve of one body for one set of lanes.
-struct Pass<'p, 'a, B> {
-    flow: &'p CallerFlow<'a, B>,
-    lanes: Lanes,
-    effects: &'p dyn CallEffects,
-    /// What each counting call's block states of its count, by the call's place in the operations.
-    counts: std::collections::BTreeMap<usize, Count>,
+/// One operation as a lane pass reads it: an inert one is no step (doc/adr-result-side.md, "D589").
+#[derive(Clone, Copy)]
+struct Step {
+    op: usize,
+    /// Its write may not happen.
+    weak: bool,
+    call: bool,
+    ret: bool,
+    /// The lift does not state what it reads.
+    unstated: bool,
+    /// The lane bytes its output covers.
+    writes: [Bytes; LANES],
+    /// The lane bytes its inputs cover, less those its instruction reads in form only.
+    reads: [Bytes; LANES],
 }
 
-impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
-    fn new(flow: &'p CallerFlow<'a, B>, lanes: Lanes, effects: &'p dyn CallEffects) -> Self {
+impl Step {
+    /// Whether `Pass::step` leaves every live set as it finds it: no call, return or unstated read,
+    /// and no lane byte written or read.
+    fn is_identity(&self) -> bool {
+        !(self.call || self.ret || self.unstated)
+            && self.writes == [0; LANES]
+            && self.reads == [0; LANES]
+    }
+}
+
+/// What a lane pass reads of a body: the lifted blocks, or their projection ([`LaneFlow`]).
+trait Steps {
+    fn graph(&self) -> &Graph;
+    /// The steps of `block`'s operations in `ops`, last first, their bytes in `lanes`.
+    fn steps_back(
+        &self,
+        block: usize,
+        ops: std::ops::Range<usize>,
+        lanes: &Lanes,
+        visit: impl FnMut(&Step),
+    );
+    /// Every call, by block and operation, in order.
+    fn calls(&self) -> impl Iterator<Item = (usize, usize)>;
+    /// What the call's block states `register` holds where it runs.
+    fn count(&self, block: usize, op: usize, register: CanonicalStorageId) -> Count;
+    /// Whether the call's own instruction may skip it.
+    fn predicated(&self, block: usize, op: usize) -> bool;
+}
+
+impl<B: Lifted> Steps for CallerFlow<'_, B> {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn steps_back(
+        &self,
+        block: usize,
+        ops: std::ops::Range<usize>,
+        lanes: &Lanes,
+        mut visit: impl FnMut(&Step),
+    ) {
+        let operations = &self.blocks[block].lifted().ops;
+        let first = self.first[block] as usize;
+        for op in (ops.start..ops.end.min(operations.len())).rev() {
+            let mode = self.modes[first + op];
+            if mode.inert {
+                continue;
+            }
+            visit(&step_of(&operations[op], op, mode, lanes));
+        }
+    }
+
+    fn calls(&self) -> impl Iterator<Item = (usize, usize)> {
+        (self.blocks.iter().enumerate()).flat_map(|(block, found)| {
+            let ops = &found.lifted().ops;
+            (0..ops.len())
+                .filter(|op| ops[*op].is_call())
+                .map(move |op| (block, op))
+        })
+    }
+
+    fn count(&self, block: usize, op: usize, register: CanonicalStorageId) -> Count {
+        count_of(self.blocks[block].lifted(), op, register)
+    }
+
+    fn predicated(&self, block: usize, op: usize) -> bool {
+        predicated(self.blocks[block].lifted(), op)
+    }
+}
+
+/// `operation` as a step, its bytes in `lanes`. `O(inputs × LANES)`.
+fn step_of(operation: &R2ILOp, op: usize, mode: Mode, lanes: &Lanes) -> Step {
+    let ignored = mode.ignored | mode.cancelled;
+    let mut reads = [0; LANES];
+    for (at, input) in operation.inputs().into_iter().enumerate() {
+        if ignored == u32::MAX || (at < 32 && ignored >> at & 1 == 1) {
+            continue;
+        }
+        merge(&mut reads, lanes.bytes_in(input));
+    }
+    Step {
+        op,
+        weak: mode.weak,
+        call: operation.is_call(),
+        ret: matches!(operation, R2ILOp::Return { .. }),
+        unstated: operation.reads_unstated(),
+        writes: (operation.output()).map_or([0; LANES], |output| lanes.bytes_in(output)),
+        reads,
+    }
+}
+
+/// One solve of one body for one set of lanes.
+struct Pass<'p, F> {
+    flow: &'p F,
+    lanes: Lanes,
+    effects: &'p dyn CallEffects,
+    /// What each counting call's block states of its count, by block and operation.
+    counts: std::collections::BTreeMap<(usize, usize), Count>,
+}
+
+impl<'p, F: Steps> Pass<'p, F> {
+    fn new(flow: &'p F, lanes: Lanes, effects: &'p dyn CallEffects) -> Self {
+        let counted = flow.calls().filter_map(|(block, op)| {
+            let counted = effects.at(block, op).counted?;
+            Some(((block, op), flow.count(block, op, counted.register)))
+        });
         Self {
             flow,
             lanes,
             effects,
-            counts: counts(flow, effects),
+            counts: counted.collect(),
         }
     }
 
@@ -1061,8 +1167,11 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         let Some(counted) = call.counted.take() else {
             return call;
         };
-        let at = self.flow.first[block] as usize + op;
-        let count = self.counts.get(&at).copied().unwrap_or(Count::Other);
+        let count = self
+            .counts
+            .get(&(block, op))
+            .copied()
+            .unwrap_or(Count::Other);
         let more = match (counted.stated, count) {
             (None, Count::Nought) | (Some(_), Count::Unstated) => LaneBytes::default(),
             (None, _) => counted.takes,
@@ -1080,13 +1189,14 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
             .map(|lane| lane.all.count_ones() as usize)
             .sum::<usize>();
         let height = 4 * bytes;
-        let blocks = self.flow.blocks.len();
+        let blocks = self.flow.graph().leaves.len();
         blocks.saturating_mul(height + 1).saturating_add(blocks)
     }
 
     /// Live bytes at every block's start, or none where the pass visited more blocks than `budget`.
     fn solve(&self, budget: usize) -> Option<Vec<Live>> {
-        let blocks = self.flow.blocks.len();
+        let graph = self.flow.graph();
+        let blocks = graph.leaves.len();
         let mut live_in = vec![Live::default(); blocks];
         // Work is the blocks whose output may have moved; the last block first, as flow runs forward.
         let mut work = (0..blocks).collect::<std::collections::BTreeSet<_>>();
@@ -1097,20 +1207,12 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
                 return None;
             }
             let mut live = self.out_of(block, &live_in);
-            for (op, operation) in self.flow.blocks[block]
-                .lifted()
-                .ops
-                .iter()
-                .enumerate()
-                .rev()
-            {
-                self.step(&mut live, block, op, operation);
-            }
+            (self.flow).steps_back(block, 0..usize::MAX, &self.lanes, |step| {
+                self.step(&mut live, block, step);
+            });
             if live != live_in[block] {
                 live_in[block] = live;
-                work.extend(
-                    (self.flow.predecessors.of_block(block).iter()).map(|from| *from as usize),
-                );
+                work.extend((graph.predecessors.of_block(block).iter()).map(|from| *from as usize));
             }
         }
         Some(live_in)
@@ -1119,15 +1221,16 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
     /// The bytes live where `block` ends: its successors' starts, and everything where it leaves
     /// the body or the walk lost it.
     fn out_of(&self, block: usize, live_in: &[Live]) -> Live {
+        let graph = self.flow.graph();
         let mut out = Live::default();
-        for successor in self.flow.successors.of_block(block) {
+        for successor in graph.successors.of_block(block) {
             out.join(&live_in[*successor as usize]);
         }
         for lane in 0..LANES {
-            if self.flow.leaves[block] {
+            if graph.leaves[block] {
                 out.forwarded[lane] |= self.lanes.all(lane);
             }
-            if self.flow.open[block] || self.flow.irregular[block] {
+            if graph.open[block] || graph.irregular[block] {
                 out.open[lane] |= self.lanes.all(lane);
             }
         }
@@ -1142,30 +1245,28 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         live_in: &[Live],
         fates: &mut [SiteBoundary],
     ) {
-        let ops = &self.flow.blocks[block].lifted().ops;
         let mut live = self.out_of(block, live_in);
-        let mut next = ops.len();
+        let mut next = usize::MAX;
         for (site, op) in wanted {
-            for at in (op + 1..next).rev() {
-                self.step(&mut live, block, at, &ops[at]);
-            }
+            (self.flow).steps_back(block, op + 1..next, &self.lanes, |step| {
+                self.step(&mut live, block, step);
+            });
             next = next.min(op + 1);
-            if !predicated(self.flow.blocks[block].lifted(), op) {
+            if !self.flow.predicated(block, op) {
                 fates[site].fates = self.fate_of(&live);
             }
         }
     }
 
-    /// Move `live` from after `operation` to before it.
-    fn step(&self, live: &mut Live, block: usize, op: usize, operation: &R2ILOp) {
-        let mode = self.flow.modes[self.flow.first[block] as usize + op];
-        if mode.inert {
-            return;
-        }
-        let call = operation.is_call().then(|| self.call_at(block, op));
+    /// Move `live` from after the step to before it.
+    fn step(&self, live: &mut Live, block: usize, step: &Step) {
+        let call = step.call.then(|| self.call_at(block, step.op));
         // What the operation overwrites ends those bytes' liveness, ahead of what it reads.
-        if !mode.weak {
-            live.kill_all(self.overwritten(operation, call.as_ref()));
+        if !step.weak {
+            live.kill_all(match &call {
+                Some(call) => self.overwritten(call),
+                None => step.writes,
+            });
         }
         // A read past a write that may not happen, a call that may leave a byte as it found it or
         // an operation with unstated effects may read that operation's value: no proof of ours.
@@ -1173,17 +1274,15 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
             Some(call) if call.overwrites != Overwrites::All => {
                 unkept(self.lanes.every(), call.kept)
             }
-            _ if operation.reads_unstated() => self.lanes.every(),
-            _ if mode.weak => operation
-                .output()
-                .map_or([0; LANES], |output| self.lanes.bytes_in(output)),
+            _ if step.unstated => self.lanes.every(),
+            _ if step.weak => step.writes,
             _ => [0; LANES],
         };
         for ((open, read), doubt) in live.open.iter_mut().zip(&mut live.read).zip(doubtful) {
             *open |= *read & doubt;
             *read &= !doubt;
         }
-        if matches!(operation, R2ILOp::Return { .. }) {
+        if step.ret {
             merge(&mut live.returned, self.lanes.every());
         }
         if let Some(call) = &call {
@@ -1191,30 +1290,18 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
             merge(&mut live.read, call.reads.0);
         }
         // Reads the lift does not state may be of any lane: open, never dead.
-        if operation.reads_unstated() {
+        if step.unstated {
             merge(&mut live.open, self.lanes.every());
         }
-        self.read(live, operation, mode.ignored | mode.cancelled);
+        merge(&mut live.read, step.reads);
     }
 
-    /// The bytes `operation` overwrites: a call's by its callee, any other's by its output.
-    fn overwritten(&self, operation: &R2ILOp, call: Option<&CallEffect>) -> [Bytes; LANES] {
-        match (call.map(|call| call.overwrites), operation.output()) {
-            (Some(Overwrites::Nothing), _) | (None, None) => [0; LANES],
-            (Some(Overwrites::Bytes(written)), _) => written.0,
-            (Some(Overwrites::All), _) => self.lanes.every(),
-            (None, Some(output)) => self.lanes.bytes_in(output),
-        }
-    }
-
-    /// Add what `operation` reads of the inputs not in `ignored`. A copy of the rest of a register
-    /// is a read of it, as any operation's is.
-    fn read(&self, live: &mut Live, operation: &R2ILOp, ignored: u32) {
-        for (at, input) in operation.inputs().into_iter().enumerate() {
-            if ignored == u32::MAX || (at < 32 && ignored >> at & 1 == 1) {
-                continue;
-            }
-            merge(&mut live.read, self.lanes.bytes_in(input));
+    /// The bytes a call overwrites, by its callee.
+    fn overwritten(&self, call: &CallEffect) -> [Bytes; LANES] {
+        match call.overwrites {
+            Overwrites::Nothing => [0; LANES],
+            Overwrites::Bytes(written) => written.0,
+            Overwrites::All => self.lanes.every(),
         }
     }
 
@@ -1223,24 +1310,220 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
     }
 }
 
-/// What the block of each call of `flow` that counts states of the count, by the call's place in
-/// its operations.
-fn counts<B: Lifted>(
-    flow: &CallerFlow<'_, B>,
+/// The boundary at each of `sites` from one pass over `flow`; past its budget every site is Unknown.
+fn site_fates_of<F: Steps>(
+    flow: &F,
+    lanes: ResultLanes,
     effects: &dyn CallEffects,
-) -> std::collections::BTreeMap<usize, Count> {
-    let calls = (flow.blocks.iter().enumerate()).flat_map(|(block, found)| {
-        let ops = &found.lifted().ops;
-        (0..ops.len())
-            .filter(|op| ops[*op].is_call())
-            .map(move |op| (block, op))
-    });
-    let counted = calls.filter_map(|(block, op)| {
-        let counted = effects.at(block, op).counted?;
-        let count = count_of(flow.blocks[block].lifted(), op, counted.register);
-        Some((flow.first[block] as usize + op, count))
-    });
-    counted.collect()
+    sites: &[(usize, usize)],
+) -> Vec<SiteBoundary> {
+    let mut fates = vec![SiteBoundary::unknown(lanes); sites.len()];
+    if sites.is_empty() {
+        return fates;
+    }
+    let pass = Pass::new(flow, Lanes::of(lanes), effects);
+    let Some(live_in) = pass.solve(pass.budget()) else {
+        return fates;
+    };
+    // Each block is replayed once, from its end back to its first site.
+    let mut by_block = (0..sites.len()).collect::<Vec<_>>();
+    by_block.sort_by_key(|site| (sites[*site].0, std::cmp::Reverse(sites[*site].1)));
+    for run in by_block.chunk_by(|one, other| sites[*one].0 == sites[*other].0) {
+        let wanted = run.iter().map(|site| (*site, sites[*site].1));
+        pass.replay(sites[run[0]].0, wanted, &live_in, &mut fates);
+    }
+    fates
+}
+
+/// A body's flow as its lane pass reads it, without its lift (doc/adr-result-side.md, "D589"): the
+/// graph, each step `Pass::step` does not leave as it is, and each call's count and predication.
+/// Size `O(B + E + steps)`; [`LaneFlow::site_fates`] equals [`CallerFlow::site_fates`] over the same lanes.
+pub struct LaneFlow {
+    lanes: ResultLanes,
+    graph: Graph,
+    /// Each block's first event, and one past the last.
+    first: Box<[u32]>,
+    events: Box<[Event]>,
+    /// Each event's nonzero lane bytes: those written, then those read, lane by lane.
+    bytes: Box<[Bytes]>,
+    /// Each call by block and operation, ascending.
+    calls: Box<[CallEvent]>,
+}
+
+/// A step, its lane bytes in `LaneFlow::bytes` from `at`.
+#[derive(Clone, Copy)]
+struct Event {
+    op: u32,
+    at: u32,
+    /// `weak`, `call`, `ret`, `unstated` from bit 0.
+    flags: u8,
+    /// The lanes with bytes written, and with bytes read, one bit each.
+    written: u8,
+    read: u8,
+}
+
+#[derive(Clone, Copy)]
+struct CallEvent {
+    block: u32,
+    op: u32,
+    /// The count register a caller's effect named at the projection, and what the block states of it.
+    count: Option<(CanonicalStorageId, Count)>,
+    predicated: bool,
+}
+
+impl LaneFlow {
+    /// The steps of `flow` in `lanes`, each call's count of the register `counted` names. `O(ops)`.
+    pub fn of<B: Lifted>(
+        flow: &CallerFlow<'_, B>,
+        lanes: ResultLanes,
+        counted: impl Fn(usize, usize) -> Option<CanonicalStorageId>,
+    ) -> Self {
+        let tracked = Lanes::of(lanes);
+        let (mut first, mut events, mut bytes, mut calls) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for block in 0..flow.blocks.len() {
+            first.push(index(events.len()));
+            let mut steps = Vec::new();
+            flow.steps_back(block, 0..usize::MAX, &tracked, |step| steps.push(*step));
+            for step in steps.iter().rev().filter(|step| !step.is_identity()) {
+                let mask = |plane: &[Bytes; LANES]| {
+                    (0..LANES)
+                        .filter(|lane| plane[*lane] != 0)
+                        .fold(0u8, |bits, lane| bits | 1 << lane)
+                };
+                events.push(Event {
+                    op: index(step.op),
+                    at: index(bytes.len()),
+                    flags: u8::from(step.weak)
+                        | u8::from(step.call) << 1
+                        | u8::from(step.ret) << 2
+                        | u8::from(step.unstated) << 3,
+                    written: mask(&step.writes),
+                    read: mask(&step.reads),
+                });
+                bytes.extend(
+                    step.writes
+                        .iter()
+                        .chain(&step.reads)
+                        .filter(|held| **held != 0),
+                );
+                if step.call {
+                    let count = counted(block, step.op)
+                        .map(|register| (register, flow.count(block, step.op, register)));
+                    calls.push(CallEvent {
+                        block: index(block),
+                        op: index(step.op),
+                        count,
+                        predicated: flow.predicated(block, step.op),
+                    });
+                }
+            }
+        }
+        first.push(index(events.len()));
+        Self {
+            lanes,
+            graph: flow.graph.clone(),
+            first: first.into(),
+            events: events.into(),
+            bytes: bytes.into(),
+            calls: calls.into(),
+        }
+    }
+
+    /// The lanes its steps are in.
+    pub fn lanes(&self) -> ResultLanes {
+        self.lanes
+    }
+
+    /// The count register named at the projection for the call at (block, op).
+    pub fn count_register(&self, block: usize, op: usize) -> Option<CanonicalStorageId> {
+        Some(self.call(block, op)?.count?.0)
+    }
+
+    /// The boundary at each of `sites`, as [`CallerFlow::site_fates`] gives it over the lift.
+    pub fn site_fates(
+        &self,
+        effects: &dyn CallEffects,
+        sites: &[(usize, usize)],
+    ) -> Vec<SiteBoundary> {
+        site_fates_of(self, self.lanes, effects, sites)
+    }
+
+    /// The bytes it holds on the heap.
+    pub fn heap_bytes(&self) -> usize {
+        let graph = &self.graph;
+        let edges = |edges: &Edges| 4 * (edges.starts.len() + edges.items.len());
+        16 * graph.starts.len()
+            + edges(&graph.successors)
+            + edges(&graph.predecessors)
+            + 3 * graph.leaves.len()
+            + 4 * self.first.len()
+            + size_of::<Event>() * self.events.len()
+            + size_of::<Bytes>() * self.bytes.len()
+            + size_of::<CallEvent>() * self.calls.len()
+    }
+
+    fn call(&self, block: usize, op: usize) -> Option<&CallEvent> {
+        let key = (index(block), index(op));
+        let at = (self.calls).binary_search_by_key(&key, |call| (call.block, call.op));
+        at.ok().map(|at| &self.calls[at])
+    }
+}
+
+impl Steps for LaneFlow {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn steps_back(
+        &self,
+        block: usize,
+        ops: std::ops::Range<usize>,
+        lanes: &Lanes,
+        mut visit: impl FnMut(&Step),
+    ) {
+        debug_assert!(Lanes::of(self.lanes).every() == lanes.every());
+        let events = &self.events[self.first[block] as usize..self.first[block + 1] as usize];
+        let from = events.partition_point(|event| (event.op as usize) < ops.start);
+        let to = events.partition_point(|event| (event.op as usize) < ops.end);
+        for event in events[from..to].iter().rev() {
+            let mut held = self.bytes[event.at as usize..].iter();
+            let mut unpack = |mask: u8| {
+                std::array::from_fn(|lane| match mask >> lane & 1 {
+                    1 => *held.next().expect("a byte set per lane bit"),
+                    _ => 0,
+                })
+            };
+            let writes = unpack(event.written);
+            let reads = unpack(event.read);
+            visit(&Step {
+                op: event.op as usize,
+                weak: event.flags & 1 != 0,
+                call: event.flags & 2 != 0,
+                ret: event.flags & 4 != 0,
+                unstated: event.flags & 8 != 0,
+                writes,
+                reads,
+            });
+        }
+    }
+
+    fn calls(&self) -> impl Iterator<Item = (usize, usize)> {
+        (self.calls.iter()).map(|call| (call.block as usize, call.op as usize))
+    }
+
+    /// The count stated at the projection, where `register` is the one named there; any other
+    /// register's is no statement.
+    fn count(&self, block: usize, op: usize, register: CanonicalStorageId) -> Count {
+        match self.call(block, op).and_then(|call| call.count) {
+            Some((named, count)) if named == register => count,
+            _ => Count::Other,
+        }
+    }
+
+    fn predicated(&self, block: usize, op: usize) -> bool {
+        self.call(block, op).is_none_or(|call| call.predicated)
+    }
 }
 
 /// What the block states `register` holds where the call at `op` runs: the last write to it before,
@@ -1350,9 +1633,10 @@ impl<B: Lifted> CallerFlow<'_, B> {
         reads: &dyn CallReadsAt,
     ) -> RegisterFate {
         let at = self
+            .graph
             .starts
             .binary_search_by_key(&entry, |(start, _)| *start);
-        match at.ok().map(|at| self.starts[at].1) {
+        match at.ok().map(|at| self.graph.starts[at].1) {
             Some(block) => self.fate_from((block, 0), register, reads),
             None => RegisterFate::Other,
         }
@@ -1372,7 +1656,7 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 Walked::Other => return RegisterFate::Other,
                 Walked::Ends => {}
                 Walked::RunsOn => {
-                    for next in self.successors.of_block(block) {
+                    for next in self.graph.successors.of_block(block) {
                         let next = *next as usize;
                         if !std::mem::replace(&mut seen[next], true) {
                             pending.push((next, 0));
@@ -1399,12 +1683,13 @@ impl<B: Lifted> CallerFlow<'_, B> {
         handed: &mut Vec<Handoff>,
     ) -> Walked {
         // A block's own leaving transfer is read below; only control past its end is open.
-        if self.irregular[block] {
+        if self.graph.irregular[block] {
             return Walked::Other;
         }
         let lifted = self.blocks[block].lifted();
         let holds = |address: u64| {
             let at = self
+                .graph
                 .starts
                 .binary_search_by_key(&address, |(start, _)| *start);
             at.is_ok()
@@ -1474,7 +1759,7 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 return Walked::Ends;
             }
         }
-        if self.leaves[block] || self.open[block] {
+        if self.graph.leaves[block] || self.graph.open[block] {
             return Walked::Other;
         }
         Walked::RunsOn
@@ -1645,7 +1930,53 @@ mod tests {
             open.iter().copied(),
             Endianness::Little,
         );
-        flow.site_fates(LANES, effects, &[(0, 0)]).swap_remove(0)
+        projected(&flow, effects, &[(0, 0)]).swap_remove(0)
+    }
+
+    /// The fates at `sites` over the lift, checked equal to its projection's (D589).
+    fn projected(
+        flow: &CallerFlow<'_, R2ILBlock>,
+        effects: &dyn CallEffects,
+        sites: &[(usize, usize)],
+    ) -> Vec<SiteBoundary> {
+        let lifted = flow.site_fates(LANES, effects, sites);
+        let counted = |block, op| {
+            effects
+                .at(block, op)
+                .counted
+                .map(|counted| counted.register)
+        };
+        let projection = super::LaneFlow::of(flow, LANES, counted);
+        assert_eq!(projection.site_fates(effects, sites), lifted);
+        lifted
+    }
+
+    /// `call f` among 40 operations that touch no lane, then a read of EAX and a counted call: the
+    /// projection keeps 4 steps and gives the lift's fates at both calls (D589).
+    #[test]
+    fn a_projection_of_lane_free_operations_gives_the_lifts_fates() {
+        let quiet = |at: u64| write(0x40 + 8 * (at % 4), 8);
+        let al = R2ILOp::Copy {
+            dst: Varnode::register(0, 1),
+            src: Varnode::constant(0, 1),
+        };
+        let ops = [
+            (0..20).map(quiet).collect::<Vec<_>>(),
+            vec![call()],
+            (20..40).map(quiet).collect(),
+            vec![al, call(), store(0, 4), ret()],
+        ]
+        .concat();
+        let blocks = [block(0x1000, 64, ops)];
+        let flow = CallerFlow::new(&blocks, [], [], Endianness::Little);
+        let fated = projected(&flow, &Variadic, &[(0, 20), (0, 42)]);
+        assert_eq!(fated.len(), 2);
+        let projection = super::LaneFlow::of(&flow, LANES, |_, _| None);
+        assert_eq!(
+            projection.events.len(),
+            5,
+            "two calls, the AL write, the read, the return"
+        );
     }
 
     fn integer(fate: SiteBoundary) -> K {
@@ -2282,7 +2613,7 @@ mod tests {
             [],
             Endianness::Little,
         );
-        let fated = flow.site_fates(LANES, NOTHING, &[(0, 1)]);
+        let fated = projected(&flow, NOTHING, &[(0, 1)]);
         assert_eq!(integer(fated[0].clone()), K::Unknown);
         let plain = [block(
             0x1000,

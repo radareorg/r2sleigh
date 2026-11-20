@@ -76,6 +76,9 @@ pub enum Retention {
     /// Only the newest answer, which the request in flight is reading; a dropped one keeps its
     /// revisions and what it read only while a held answer read it, so that answer stays good.
     Newest,
+    /// A deposited row its one reader takes with [`Db::take`], which releases it; no answer reads
+    /// its entry, so nothing is computed from it twice (D589).
+    Consumed,
 }
 
 /// What the database does with a computed answer.
@@ -480,6 +483,20 @@ impl<I: Inputs + 'static> Db<I> {
         Ok(Some(value))
     }
 
+    /// `Q`'s deposited answer at `key` where good, as [`Db::held`] reads it, and its entry released:
+    /// a `Consumed` row's one reader takes it once. Never computes.
+    pub fn take<Q: Query<I>>(&self, key: &Q::Key) -> Result<Option<Rc<Q::Value>>, Cycle> {
+        debug_assert!(Q::RETENTION == Retention::Consumed);
+        let taken = self.held::<Q>(key)?;
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        typed.entries.borrow_mut().remove(key);
+        Ok(taken)
+    }
+
     /// The dependencies `Q`'s entry at `key` stores in its own list; none where nothing is held.
     #[cfg(test)]
     fn stored<Q: Query<I>>(&self, key: &Q::Key) -> usize {
@@ -664,7 +681,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
     /// `key` is now the newest answer of a query that holds only its newest: the one before loses
     /// its value, and its entry too unless a held answer read it. O(log n) per compute.
     fn bound(&self, entries: &mut BTreeMap<Q::Key, Entry<Q::Value>>, key: &Q::Key) {
-        if Q::RETENTION == Retention::Held {
+        if Q::RETENTION != Retention::Newest {
             return;
         }
         let previous = self.newest.borrow_mut().replace(key.clone());
@@ -740,7 +757,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             });
         }
         db.frames.borrow_mut().push(Frame {
-            held: Q::RETENTION == Retention::Held,
+            held: Q::RETENTION != Retention::Newest,
             query: Q::NAME,
             ..Frame::default()
         });
@@ -934,6 +951,48 @@ mod tests {
             db.deposit::<Prefix>(found);
             sum
         }
+    }
+
+    /// A prefix sum deposited for one reader: taken once, then gone.
+    struct Taken;
+    impl Query<Memory> for Taken {
+        type Key = u64;
+        type Value = u64;
+        const NAME: &'static str = "taken";
+        const RETENTION: Retention = Retention::Consumed;
+        fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
+            read(db, 0..at + 1).iter().map(|b| u64::from(*b)).sum()
+        }
+    }
+
+    /// Deposits the prefix sum below `at` as a `Taken` row, then reads it as its one reader does.
+    struct Reader;
+    impl Query<Memory> for Reader {
+        type Key = u64;
+        type Value = Option<u64>;
+        const NAME: &'static str = "reader";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> Option<u64> {
+            let taken = db.take::<Taken>(&at).expect("never computes");
+            taken.map(|sum| *sum + 1)
+        }
+    }
+
+    #[test]
+    fn a_consumed_row_is_released_once_its_reader_takes_it() {
+        let mut db = Db::new(Memory::new((1..=16).collect()));
+        db.frames.borrow_mut().push(Frame::default());
+        read(&db, 0..4);
+        db.deposit::<Taken>([(3, 10)]);
+        db.frames.borrow_mut().pop();
+        assert!(db.holds::<Taken>(&3));
+        // The reader takes the row and depends on what it read; the entry is gone.
+        assert_eq!(*db.get::<Reader>(&3).unwrap(), Some(11));
+        assert!(!db.holds::<Taken>(&3));
+        assert_eq!(db.take::<Taken>(&3).unwrap(), None);
+        // A write below the row moves its reader, which then finds nothing to take.
+        db.inputs_mut().write(2, 100);
+        assert_eq!(*db.get::<Reader>(&3).unwrap(), None);
     }
 
     #[test]

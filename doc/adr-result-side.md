@@ -901,3 +901,44 @@ register is no result-lane event, so the projection drops it. A projection
 that serves the deep read states, per call site and at the lift, the folded
 format address and the count register's last write. That widens the ruled
 event set, so the build stopped there (ROADMAP D589).
+
+## D589 as built (round 16): one lift per body
+
+Default taken (round 16 ruling, finding 3): the projection's events are
+widened by two per-site facts, the address of a float-free printf format the
+one lift folded (the block's `BlockOrigins`, else the seal's fold) and the
+count register's state before each counting call (`count_of`). Both are
+computed at that lift by the same functions; no output or premise moves.
+
+Proof the projection is exact. `Pass::step` leaves every live set as found
+on an operation that is inert, or that is no call, no return, has no
+unstated read and whose output and unignored inputs cover no lane byte: the
+kill is empty, the doubt is the output's lane bytes (none), nothing merges
+and `read` adds nothing. A pass over the remaining steps in order, with the
+same modes, edges, `leaves`, `open` and `irregular`, gives the same `Live`
+at every block start and the same fate at every site. `predicated` and
+`count_of` read operations a step drops, so each call event keeps both.
+
+Shape. r2ssa `site_boundary.rs`: one `Pass` over a `Steps` trait, which the
+lifted blocks (`CallerFlow`) and the projection (`LaneFlow`) implement; one
+`step`, no second transfer function. `LaneFlow` holds the graph, per block
+its events (operation, weak/call/return/unstated flags, a lane mask written
+and read, the nonzero lane bytes in one arena) and per call its count
+statement and predication. `O(B + E + events)`. r2engine `fates.rs`:
+`RegisterEffects` deposits a `LaneFlows` row with the projection, each
+call's callee, the folded format addresses and the direct sites; `SiteFates`
+takes it (`Retention::Consumed`, `Db::take`: released once read, so nothing
+is computed from it twice) and asks no `Walked`. The format's `CallEffect`
+is not stored: `import_takes` reads the depth. Where the deep effects name
+other lanes or another count register, the body lifts again and
+`site_fates_relifted` counts it; that counter now counts a real lift in
+`SiteFates`, no longer a held row in `CallersFirst::pop`.
+
+Measured (Mac release, probe build that also lifted each projected body and
+compared, never pushed): projected bodies equal to their lift on 495 of 495
+(0pack `pdd @ 0x62ecf0`), 1,792 of 1,792 (pumasim `pdd @ 0x23fdf0`), 407 of
+407 (bash `pdf @ 0x1e1d0`), 108 of 108 (bash `aa; pdd @ 0x2e630`), 2,333 of
+2,333 (pumasim 50-function session); `site_fates_relifted` 0 on each;
+outputs byte-identical to the base. Rows a deep read deposits whose own
+`SiteFates` is never asked stay held: r2ssa bytes live at the session's peak
+4.9 MB (4,386 rows, mean 2.2 KB, largest 114 KB), 3.2 MB on cold 0pack.
