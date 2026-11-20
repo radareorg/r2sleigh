@@ -39,7 +39,7 @@ pub enum ImageError {
     Parse(String),
     #[error("this build decodes no {} code", architecture_name(*.0))]
     UnsupportedArchitecture(object::Architecture),
-    #[error("unrecognised binary: e_machine {0:#x} names no machine the ELF registry lists")]
+    #[error("this build decodes no code for e_machine {0:#x}")]
     UnknownMachine(u16),
     #[error(
         "unrecognised binary: a universal binary with {slices} slices, none of an architecture this build decodes"
@@ -1094,12 +1094,14 @@ impl Image {
             None => vaddr != 0 && executable(vaddr),
         };
         // An entry no code backs is stated for `ie` and seeds nothing (D577).
-        let unbacked_entry = entry.filter(|entry| !runs(*entry)).map(|vaddr| Entry {
-            vaddr,
-            kind: EntryKind::Main,
-            thumb,
-            stated_at: entry_field,
-        });
+        // `e_entry` 0 states no entry (gABI), so it is no unbacked one either.
+        let unbacked_entry =
+            (entry.filter(|entry| *entry != 0 && !runs(*entry))).map(|vaddr| Entry {
+                vaddr,
+                kind: EntryKind::Main,
+                thumb,
+                stated_at: entry_field,
+            });
         if let Some(entry) = entry.filter(|entry| runs(*entry)) {
             entries.push(Entry {
                 vaddr: entry,

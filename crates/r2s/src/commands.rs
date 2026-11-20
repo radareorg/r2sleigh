@@ -42,8 +42,8 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
 fn cut_seek(statement: &Statement, error: String) -> String {
     match &statement.command {
         Command::Plain { verb, .. } if verb == "s" && statement.cut => format!(
-            "{error}; the line cut the name at `;`, `~` or `@`: a line that starts with `'` \
-             takes it whole, as in 's <name>"
+            "{error}; the line cut the name at `;`, `~` or `@`: {}",
+            crate::line::CALL_FORM
         ),
         _ => error,
     }
@@ -543,7 +543,7 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
 /// `x?`: every verb whose name starts with `prefix`, in table order; none for fewer than two.
 fn group_help(prefix: &str) -> Option<String> {
     let group = (VERBS.iter())
-        .filter(|verb| verb.names.iter().any(|name| name.starts_with(prefix)))
+        .filter(|verb| verb.name().starts_with(prefix))
         .collect::<Vec<_>>();
     if group.len() < 2 {
         return None;

@@ -1600,10 +1600,8 @@ impl Leb<'_> {
     }
 }
 
-/// The file's bytes with its header's section table fields (`e_shoff`, `e_shnum`, `e_shstrndx`)
-/// zeroed, where `object` refused the file for that table and its header and program headers read
-/// (ELF gABI: `e_shoff` 0 states no section header table). Nothing a section header states is
-/// inferred: the copy is read for segments and the dynamic table only. `O(n)` in the file, once.
+/// The file with `e_shoff`, `e_shnum` and `e_shstrndx` zeroed (gABI: no section header table), read
+/// for segments and the dynamic table where `object` refused the table (D577). `O(n)`, once.
 pub(crate) fn without_section_table(data: &[u8]) -> Option<Vec<u8>> {
     let wide = match data.get(..5)? {
         [0x7f, b'E', b'L', b'F', class] if *class == elf::ELFCLASS64.0 => true,

@@ -37,9 +37,8 @@
 //! search steps over unread. So is a line radare2 reads whole before it looks
 //! for statements (cmd.c:6861-6922): one that starts with `|`, a comment, or
 //! with `b64:'`, an encoded call, and a `/*` comment, which runs to a line that
-//! starts with `*/` and, in a script, to its end. A line that starts with `'`
-//! is radare2's call line, one command read whole (D624). Every statement of a script is cut
-//! and its grep parsed before the first one runs, and a refused statement runs
+//! starts with `*/` and, in a script, to its end; a `'` call line is one command (D624). Every
+//! statement of a script is cut and its grep parsed before the first one runs, and a refused statement runs
 //! nothing. Where radare2 reads the rest of the line some other way, after a
 //! comment, a malformed prefix, a repeat count with no command or a command
 //! that starts with a quote, nothing after it on the line runs here. After a line that failed or quit, radare2
@@ -139,9 +138,8 @@ fn read_line(line: &str) -> Line {
     statements(line)
 }
 
-/// radare2's call line, after its `'`: one command, its text whole, where no `;`, `~`, `@`, `|`,
-/// `>` or quote means anything (`handle_command_call`, 6.2.4 cmd.c:3756-3800). `'@addr'cmd` and
-/// `'0x..'cmd` run at that address. `O(n)` in the line.
+/// radare2's call line after its `'`: one command read whole, `'@addr'cmd` and `'0x..'cmd` at that
+/// address (`handle_command_call`, 6.2.4 cmd.c:3756-3800). `O(n)` in the line.
 fn called(call: &str) -> Result<Statement, String> {
     if call == "?" {
         return Err(CALL_HELP.to_owned());
@@ -189,6 +187,9 @@ const COMMENT: &str = "line: `#` starts a comment in radare2, which r2s does not
                        nothing after it on the line runs";
 const RAW_COMMENT: &str = "line: a line that starts with `|` is a comment in radare2 \
                            (cmd.c:6916), which r2s does not implement";
+/// How a name the line cuts or refuses is typed: radare2's call line (D624).
+pub(crate) const CALL_FORM: &str =
+    "a line that starts with `'` takes a name whole, as in 's <name>";
 const CALL_HELP: &str =
     "line: `'?` is radare2's help for the call line, which r2s does not implement";
 const CALL_ADDRESS: &str = "line: a call that starts `'@` or `'0x` names its address up to a second \
@@ -675,7 +676,7 @@ impl Lexer {
         // A statement a bare `;` ended was cut there, which a call line reads as text.
         let ended = range.end < self.lexemes.len();
         let lexemes = trimmed(&self.lexemes[range]);
-        refuse_operators(lexemes)?;
+        refuse_operators(lexemes).map_err(|refusal| seek_refused(lexemes, refusal))?;
         let written = lexemes
             .first()
             .map_or("", |first| &line[first.offset..stop]);
@@ -809,16 +810,29 @@ impl Command {
     }
 }
 
+/// A refusal of an `s` statement, which names the call line that carries the name whole.
+fn seek_refused(lexemes: &[Lexeme], refusal: String) -> String {
+    let verb = lexemes.iter().take_while(|lexeme| !lexeme.is_blank());
+    match verb.map(|lexeme| lexeme.ch).eq("s".chars()) {
+        true => format!("{refusal}; {CALL_FORM}"),
+        false => refusal,
+    }
+}
+
 /// A command whose handler reads no quote and no escape. A backslash before
 /// anything but a character of [`SPECIAL`] escapes nothing, and is passed on
 /// as text, as radare2 passes it.
 fn plain(verb: String, argument: &[Lexeme]) -> Result<Command, String> {
     if argument.iter().any(|lexeme| lexeme.role == Role::Mark) {
-        return Err(format!(
+        let refusal = format!(
             "line: a quote, or a backslash before a special character, in the argument of \
              `{verb}` is refused: radare2 hands it to the handler as text, and only `?e` and \
              `w` read one"
-        ));
+        );
+        return Err(match verb.as_str() {
+            "s" => format!("{refusal}; {CALL_FORM}"),
+            _ => refusal,
+        });
     }
     Ok(Command::Plain {
         verb,

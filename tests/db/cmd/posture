@@ -89,11 +89,11 @@ paddr      vaddr      phaddr     vhaddr     type
 EOF
 RUN
 
-NAME=an e_machine no ELF machine names
+NAME=an e_machine this build has no decoder for is named with its value
 FILE=tests/fixtures/crackme_unknown_machine
 CMDS=i
 EXPECT_ERR=<<EOF
-r2s: unrecognised binary: e_machine 0x653e names no machine the ELF registry lists
+r2s: this build decodes no code for e_machine 0x653e
 EOF
 EXPECT=<<EOF
 EOF
@@ -132,5 +132,26 @@ EXPECT_ERR=<<EOF
 r2s: this build decodes no raw mips code at 32 bits
 EOF
 EXPECT=<<EOF
+EOF
+RUN
+
+NAME=e_entry 0 states no entry
+FILE=tests/fixtures/x86_64_common_code.o
+CMDS=ie; i~^entry
+EXPECT=<<EOF
+paddr      vaddr      phaddr     vhaddr     type
+------------------------------------------------
+entry    none
+EOF
+RUN
+
+# D636: x86-64 lazy stubs no section states are unnamed, so `__libc_start_main`'s handed `main` is
+# unread; radare2 and `nm` of the undamaged crackme place `main` at 0x4006a4.
+NAME=a refused section table still reaches main through __libc_start_main
+FILE=tests/fixtures/crackme_shoff_past_end
+CMDS=afl~0x004006a4
+BROKEN=1
+EXPECT=<<EOF
+0x004006a4    4    127 fcn.004006a4
 EOF
 RUN

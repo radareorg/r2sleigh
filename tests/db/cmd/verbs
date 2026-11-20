@@ -20,7 +20,7 @@ EXPECT=<<EOF
 EOF
 RUN
 
-NAME=a verb far from every verb names none
+NAME=zz names iz, one edit away
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=zz
 EXPECT_ERR=<<EOF
@@ -175,5 +175,23 @@ EXPECT_ERR=<<EOF
 r2s: unknown command 'z?'
 EOF
 EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a verb far from every verb names none
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=frobnicate
+EXPECT_ERR=<<EOF
+r2s: unknown command 'frobnicate'
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=e? is one verb's usage: no other verb's name starts with e
+FILE=tests/coverage/pinned/hashes_gcc_x64_O2
+CMDS=e?
+EXPECT=<<EOF
+Usage: e [key[=value]]  read or set a configuration key
 EOF
 RUN

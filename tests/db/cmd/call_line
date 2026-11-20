@@ -38,7 +38,17 @@ NAME=a seek cut at an operator names the call line
 FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
 CMDS=s Guard::~Guard()
 EXPECT_ERR=<<EOF
-r2s: unknown address or flag 'Guard::'; the line cut the name at `;`, `~` or `@`: a line that starts with `'` takes it whole, as in 's <name>
+r2s: unknown address or flag 'Guard::'; the line cut the name at `;`, `~` or `@`: a line that starts with `'` takes a name whole, as in 's <name>
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a seek the line refuses at an operator names the call line
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=s std::vector<int>::size() const
+EXPECT_ERR=<<EOF
+r2s: line: `>` redirects to a file in radare2, which r2s does not implement; a line that starts with `'` takes a name whole, as in 's <name>
 EOF
 EXPECT=<<EOF
 EOF

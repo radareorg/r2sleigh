@@ -84,9 +84,8 @@ fn every_name_afl_lists_seeks_to_its_function_and_afi_names_it_alike() {
     }
 }
 
-/// Every `afl` name of 0pack and pumasim seeks through the call line: the uncarried set is empty
-/// (3,096 and 2,107 at 768391be5, cut at an operator). The bins are radare2's test bins:
-/// `R2S_TESTBINS=<radare2-testbins> cargo test -p r2s --features sleigh --test names -- --ignored`.
+/// Every `afl` name of 0pack and pumasim seeks through the call line (3,096 and 2,107 cut at an
+/// operator at 768391be5); `R2S_TESTBINS=<radare2-testbins> ... --test names -- --ignored`.
 #[test]
 #[ignore = "reads radare2's test bins, named by R2S_TESTBINS"]
 fn every_afl_name_of_0pack_and_pumasim_seeks_through_the_call_line() {
@@ -109,15 +108,28 @@ fn every_afl_name_of_0pack_and_pumasim_seeks_through_the_call_line() {
             })
             .collect::<Vec<_>>();
         assert!(rows.len() > 1000, "{binary}: {} rows", rows.len());
+        // Through stdin, a line each: the script is past Linux's 128 KB limit on one argument.
         let script = rows
             .iter()
             .map(|(_, name)| sought(name))
             .collect::<String>();
-        let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
-            .args(["-q", "-c", &script])
+        let mut shell = Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .arg("-q")
             .arg(&path)
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("the shell runs");
+        let mut stdin = shell.stdin.take().expect("a pipe");
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            stdin
+                .write_all(script.as_bytes())
+                .expect("the shell reads its script");
+        });
+        let done = shell.wait_with_output().expect("the shell ends");
+        writer.join().expect("the script was written");
         let landed = String::from_utf8_lossy(&done.stdout).into_owned();
         let landed = landed.lines().collect::<Vec<_>>();
         // A demangled name more than one function prints (a C1 and a C2 constructor) seeks to one of them.
