@@ -493,8 +493,54 @@ impl<I: Inputs + 'static> Db<I> {
             .as_any()
             .downcast_ref::<Table<Q, I>>()
             .expect("a table is registered under its own query's type");
-        typed.entries.borrow_mut().remove(key);
+        let mut entries = typed.entries.borrow_mut();
+        let read = |entry: &Entry<Q::Value>| {
+            let value = entry.value.as_ref();
+            value
+                .zip(taken.as_ref())
+                .is_some_and(|(held, taken)| Rc::ptr_eq(held, taken))
+        };
+        if entries.get(key).is_some_and(read) {
+            entries.remove(key);
+        }
         Ok(taken)
+    }
+
+    /// Hold `value` at `key`, good exactly while `P`'s answer at `owner` is: a row the running
+    /// computation of that answer derives, which shares its reads instead of copying them (D589).
+    pub fn deposit_beside<Q: Query<I>, P: Query<I>>(
+        &self,
+        key: Q::Key,
+        value: Q::Value,
+        owner: &P::Key,
+    ) {
+        if self
+            .frames
+            .borrow()
+            .last()
+            .is_none_or(|frame| frame.stopped)
+        {
+            return;
+        }
+        let deps: Rc<[Dep]> = Rc::new([Dep::Query {
+            table: TypeId::of::<P>(),
+            key: Rc::new(owner.clone()),
+        }]);
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        let now = self.inputs.byte_revision();
+        let entry = Entry {
+            value: Some(Rc::new(value)),
+            deps,
+            verified_at: now,
+            changed_at: now,
+            read_by_held: false,
+            pending: 0,
+        };
+        typed.entries.borrow_mut().insert(key, entry);
     }
 
     /// The dependencies `Q`'s entry at `key` stores in its own list; none where nothing is held.
@@ -978,21 +1024,35 @@ mod tests {
         }
     }
 
+    /// The sum of the first four bytes, depositing it beside itself as a `Taken` row.
+    struct Owner;
+    impl Query<Memory> for Owner {
+        type Key = u64;
+        type Value = u64;
+        const NAME: &'static str = "owner";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
+            let sum = read(db, 0..at + 1).iter().map(|b| u64::from(*b)).sum();
+            db.deposit_beside::<Taken, Owner>(at, sum, &at);
+            sum
+        }
+    }
+
     #[test]
     fn a_consumed_row_is_released_once_its_reader_takes_it() {
         let mut db = Db::new(Memory::new((1..=16).collect()));
-        db.frames.borrow_mut().push(Frame::default());
-        read(&db, 0..4);
-        db.deposit::<Taken>([(3, 10)]);
-        db.frames.borrow_mut().pop();
+        assert_eq!(*db.get::<Owner>(&3).unwrap(), 10);
+        // The row stores one read, its owner's answer, never a copy of the owner's reads.
+        assert_eq!(db.stored::<Taken>(&3), 1);
         assert!(db.holds::<Taken>(&3));
         // The reader takes the row and depends on what it read; the entry is gone.
         assert_eq!(*db.get::<Reader>(&3).unwrap(), Some(11));
         assert!(!db.holds::<Taken>(&3));
         assert_eq!(db.take::<Taken>(&3).unwrap(), None);
-        // A write below the row moves its reader, which then finds nothing to take.
+        // A write below moves the owner the reader read through, which deposits the row anew.
         db.inputs_mut().write(2, 100);
-        assert_eq!(*db.get::<Reader>(&3).unwrap(), None);
+        assert_eq!(*db.get::<Reader>(&3).unwrap(), Some(1 + 2 + 100 + 4 + 1));
+        assert!(!db.holds::<Taken>(&3));
     }
 
     #[test]

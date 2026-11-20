@@ -1592,14 +1592,18 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     const NAME: &'static str = "register-effects";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the body and one scan of the blocks a return is reached from;
-    /// `SiteFates` deposits the row of each body it walks, so only a body it did not walk is lifted
-    /// here, and its `LaneFlows` row is deposited for its own `SiteFates`, `O(ops)`.
+    /// Work: one backward pass and one scan of the blocks reaching a return, for a body `SiteFates`
+    /// did not walk; its `LaneFlows` row is deposited for its own `SiteFates`, `O(ops)`.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (entry, thumb), |read| {
             let (effect, effects) = read.effect(entry);
             if !db.holds::<SiteFates>(&(entry, thumb)) {
-                db.deposit::<LaneFlows>([((entry, thumb), read.projection(&effects))]);
+                let key = (entry, thumb);
+                db.deposit_beside::<LaneFlows, RegisterEffects>(
+                    key,
+                    read.projection(&effects),
+                    &key,
+                );
             }
             effect
         })
@@ -2039,9 +2043,8 @@ impl<S: Source + 'static> Reading<'_, S> {
         }
     }
 
-    /// Each call to a printf-format import whose block folds its format to a literal with no
-    /// floating conversion, and that literal's address: it takes no tail vector register (D218).
-    /// One forward pass per block.
+    /// Each printf-format call whose format folds to a float-free literal, and its address: it takes
+    /// no tail vector register (D218). One forward pass per block.
     fn formatted_sites(&self, body: &Body, effects: &Effects) -> BTreeMap<(usize, usize), u64> {
         let mut sites = BTreeMap::new();
         // Asked once, only where the block fold leaves a format unknown (Gb).
