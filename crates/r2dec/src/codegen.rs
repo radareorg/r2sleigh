@@ -1734,9 +1734,8 @@ impl RenderedFunction {
         &self.function
     }
 
-    /// Each point a line of the definition may break at, by line then offset (D620): the tree
-    /// written again, so no rendering holds them. Empty where that text is not the definition's
-    /// bytes. `O(tokens)`.
+    /// Each break point of the definition, by line then offset, from the tree written again; empty
+    /// where that text is not the definition's bytes. `O(tokens)`; doc/adr-display.md, D620.
     pub fn break_points(&self) -> Vec<BreakPoint> {
         let ready = EmissionReadyFunction {
             function: self.function.clone(),

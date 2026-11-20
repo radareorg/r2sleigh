@@ -186,9 +186,8 @@ pub(crate) fn laid(
     (out, painted)
 }
 
-/// The bytes of a line where it wraps past [`WIDTH`] cells: greedy, each cut the fitting point of
-/// lowest depth, then latest offset (Oppen, TOPLAS 1980). `rest` starts at byte `skipped` of the
-/// line and is laid after `prefix` cells. `O(line length)`.
+/// `rest` (from byte `skipped`, laid after `prefix` cells) wrapped past [`WIDTH`]: greedy, lowest
+/// depth then latest offset (Oppen, TOPLAS 1980). `O(line length)`; doc/adr-display.md, D620.
 fn wrapped(
     rest: &str,
     skipped: usize,
