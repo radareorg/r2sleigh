@@ -41,8 +41,8 @@
 # binaries  file names, each listed, never a pattern
 # values    each value listed (hex, or a posture key), never a pattern; one
 #           listed that the graded run did not report fails the run
-# verdict   r2s-right (with r2_line, radare2's file:line at the pinned
-#           release), r2-right or unfilled (with row, an open ROADMAP row)
+# verdict   r2s-right or deliberate (with r2_line, radare2's file:line at the
+#           pinned release), r2-right or unfilled (with row, an open ROADMAP row)
 # reason    the witness for each value
 
 # The radare2 release every judgment was made against, as an x86-64 host runs
@@ -81,8 +81,8 @@ command = "iS"
 binaries = ["TestRTTI-armv7-dSYM", "core.dwarf"]
 columns = ["size"]
 values = ["0x0"]
-verdict = "r2s-right"
-reason = "a dSYM section at offset 0 holds no bytes (MH_DSYM keeps only the debug sections'): r2s states 0, radare2 the header's size, which no file byte backs"
+verdict = "deliberate"
+reason = "a dSYM section at offset 0 holds no bytes (MH_DSYM keeps only the debug sections'): r2s states 0, radare2 the header's size, which no file byte backs. Deliberate (upstream ledger 2026-11-20): iS size is the header's size, and radare2 master backs it with a zero map"
 
 [[judged]]
 command = ["px", "pd", "ie", "iS", "is"]
@@ -108,8 +108,8 @@ reason = "an MH_OBJECT states no entry: radare2 seeks entry0 to __text's file of
 command = "iS"
 binaries = ["objc-crash", "rsfuzz-3b3a5a268"]
 columns = ["size"]
-verdict = "r2s-right"
-reason = "the section's bytes run past the file's end (objc-crash is 0x25a8 bytes, rsfuzz 0x32e6): r2s states the bytes the file holds, radare2 the header's size"
+verdict = "deliberate"
+reason = "the section's bytes run past the file's end (objc-crash is 0x25a8 bytes, rsfuzz 0x32e6): r2s states the bytes the file holds, radare2 the header's size. Deliberate (upstream ledger 2026-11-20): iS size states the header field, and radare2 clamps the maps"
 
 [[judged]]
 command = "iS"
@@ -190,16 +190,24 @@ command = "iS"
 binaries = ["Lab05-01.dll", "maxsecXP.exe", "maxsec_lowaligW7.exe", "unaligned_sec_paddr.exe"]
 corpus = "pe"
 columns = ["size"]
-verdict = "r2s-right"
-reason = "the raw data runs past the file's end (Lab05-01's .reloc, unaligned_sec_paddr's 0x205 bytes from 0x200 in a 0x400 file, maxsecXP's pointers past it, maxsec_lowaligW7's last section): r2s states the bytes the file holds, radare2 the header's size"
+verdict = "deliberate"
+reason = "the raw data runs past the file's end (Lab05-01's .reloc, unaligned_sec_paddr's 0x205 bytes from 0x200 in a 0x400 file, maxsecXP's pointers past it, maxsec_lowaligW7's last section): r2s states the bytes the file holds, radare2 the header's size. Deliberate (upstream ledger 2026-11-20): iS size states the header field, and radare2 clamps the maps"
 
 [[judged]]
 command = "iS"
 binaries = "maxsecXP.exe"
 corpus = "pe"
-columns = ["paddr", "vsize"]
+columns = ["paddr"]
 verdict = "r2s-right"
-reason = "SectionAlignment 4 maps the file flat, so no raw pointer is read or rounded: r2s states each PointerToRawData and VirtualSize as the header does, radare2 rounds them to FileAlignment and SectionAlignment 4"
+reason = "SectionAlignment 4 maps the file flat, so no raw pointer is read or rounded: r2s states each PointerToRawData as the header does, radare2 rounds it down to FileAlignment (radare2 #27520)"
+
+[[judged]]
+command = "iS"
+binaries = "maxsecXP.exe"
+corpus = "pe"
+columns = ["vsize"]
+verdict = "deliberate"
+reason = "SectionAlignment 4 maps the file flat: r2s states each VirtualSize as the header does, radare2 rounds it up to SectionAlignment 4. Deliberate (upstream ledger 2026-11-20): vsize is the mapped extent, rounded to SectionAlignment as the loader maps it"
 
 [[judged]]
 command = "iS"
@@ -207,8 +215,8 @@ binaries = "quine.exe"
 corpus = "pe"
 columns = ["vsize"]
 values = ["0xb6"]
-verdict = "r2s-right"
-reason = "VirtualSize 0 means SizeOfRawData, 0xb6, which r2s states; radare2 rounds it up to SectionAlignment 4"
+verdict = "deliberate"
+reason = "VirtualSize 0 means SizeOfRawData, 0xb6, which r2s states; radare2 rounds it up to SectionAlignment 4. Deliberate (upstream ledger 2026-11-20): vsize is the mapped extent, rounded to SectionAlignment as the loader maps it"
 
 [[judged]]
 command = ["px", "pd"]
@@ -228,8 +236,8 @@ reason = "a COFF object states no addresses: r2s places a section at 0x08000000 
 command = ["px", "pd"]
 binaries = ["exportobf.exe", "exportsdata.exe", "standard.exe", "tls_obfuscation.exe"]
 corpus = "pe"
-verdict = "r2s-right"
-reason = "radare2 starts a line at an export flag inside an instruction (`~`) and decodes from there, so its listing leaves the instruction stream r2s decodes"
+verdict = "deliberate"
+reason = "radare2 starts a line at an export flag inside an instruction (`~`) and decodes from there, so its listing leaves the instruction stream r2s decodes. Deliberate (upstream ledger 2026-11-20): realigning at a flag is radare2's configured behaviour (asm.flags.middle=2)"
 
 [[judged]]
 command = "is"
@@ -282,14 +290,6 @@ r2s = '\[0x[0-9a-f]+\]$'
 verdict = "deliberate"
 reason = "the import's name is 131 KB holding every C0 control: a name with a control character names nothing (ROADMAP H), so the slot stays a number"
 
-[[judged]]
-command = "pd"
-binaries = ["dll-webdavld.exe", "dllweirdexp-ld.exe", "importsdotXP.exe", "imports_apimsW7.exe", "ownexports2.exe", "ownexportsdot.exe"]
-corpus = "pe"
-r2 = 'sym\.imp\.'
-r2s = 'sym\.imp\.'
-verdict = "r2-right"
-reason = "an import's flag keeps characters radare2's flag filter rewrites (spaces, dashes, slashes, controls); owner r2engine names (ROADMAP P11, symbol flags filtered as radare2 filters them)"
 
 [[judged]]
 command = "pd"
@@ -483,8 +483,8 @@ reason = "a shared object's e_entry 0 names no entry; at 0 radare2 lists the ELF
 [[judged]]
 command = ["is", "iS"]
 binaries = "*.obj"
-verdict = "r2s-right"
-reason = "a relocatable states no addresses: r2s places a NOBITS .bss past the allocated sections at its alignment (W5), radare2 at its sh_offset, over .rodata, since a NOBITS section takes no file bytes"
+verdict = "deliberate"
+reason = "a relocatable states no addresses: r2s places a NOBITS .bss past the allocated sections at its alignment (W5), radare2 at its sh_offset, over .rodata, since a NOBITS section takes no file bytes. Deliberate (upstream ledger 2026-11-20): an ET_REL address is radare2's choice, and radare2 master's .bss 0x8040e40..0x80a26df overlaps no section or map in radare2.c.obj"
 
 [[judged]]
 command = "is"
@@ -666,16 +666,16 @@ reason = "a symbol's flag keeps characters radare2's flag filter drops (#, an em
 command = "px"
 binaries = "*"
 fill = "ff"
-verdict = "r2s-right"
-reason = "past the last mapped byte (the segment's or the placed section's end) nothing is mapped; radare2 dumps its 0xff fill"
+verdict = "deliberate"
+reason = "past the last mapped byte (the segment's or the placed section's end) nothing is mapped; radare2 dumps its 0xff fill. Deliberate (upstream ledger 2026-11-20): the fill is radare2's configured io.unalloc byte"
 
 [[judged]]
 command = "pd"
 binaries = "*"
 r2s = '^<missing>$'
 fill = "ff"
-verdict = "r2s-right"
-reason = "past the last mapped byte (the segment's or the placed section's end) nothing is mapped; radare2 lists its 0xff fill as invalid"
+verdict = "deliberate"
+reason = "past the last mapped byte (the segment's or the placed section's end) nothing is mapped; radare2 lists its 0xff fill as invalid. Deliberate (upstream ledger 2026-11-20): the fill is radare2's configured io.unalloc byte"
 
 [[judged]]
 command = "is"
@@ -901,8 +901,8 @@ binaries = "*"
 corpus = "pe"
 columns = ["vsize"]
 key = "vaddr"
-verdict = "r2s-right"
-reason = "r2s states VirtualSize as the section header does; radare2 rounds it up to SectionAlignment (pe.c: section.vsize += sa - diff)"
+verdict = "deliberate"
+reason = "r2s states VirtualSize as the section header does; radare2 rounds it up to SectionAlignment (pe.c: section.vsize += sa - diff). Deliberate (upstream ledger 2026-11-20): vsize is the mapped extent, rounded to SectionAlignment as the loader maps it"
 
 [[judged]]
 command = "iS"
@@ -1405,8 +1405,8 @@ fields = ["reads"]
 register = 'r(ax|bx|cx|dx|si|di|bp|sp)'
 lacking = "r2s"
 ours = '\be{suffix}\b'
-verdict = "r2s-right"
-reason = "a 32-bit operand reads the 32-bit register, which r2s names; radare2's ESIL reads the 64-bit register too, to write the result back zero-extended"
+verdict = "deliberate"
+reason = "a 32-bit operand reads the 32-bit register, which r2s names; radare2's ESIL reads the 64-bit register too, to write the result back zero-extended. Deliberate (upstream ledger 2026-11-20): radare2's ESIL spells the zero-extension idiom (radare2 #26495), so aea names the full register"
 
 [[judged]]
 command = "aoj"
@@ -1416,8 +1416,8 @@ fields = ["reads"]
 register = 'r(8|9|1[0-5])'
 lacking = "r2s"
 ours = '\b{register}d\b'
-verdict = "r2s-right"
-reason = "a 32-bit operand reads the 32-bit register, which r2s names; radare2's ESIL reads the 64-bit register too, to write the result back zero-extended"
+verdict = "deliberate"
+reason = "a 32-bit operand reads the 32-bit register, which r2s names; radare2's ESIL reads the 64-bit register too, to write the result back zero-extended. Deliberate (upstream ledger 2026-11-20): radare2's ESIL spells the zero-extension idiom (radare2 #26495), so aea names the full register"
 
 [[judged]]
 command = "aoj"
@@ -1476,8 +1476,8 @@ fields = ["reads"]
 registers = ["rax"]
 lacking = "r2s"
 r2s = '^syscall$'
-verdict = "r2s-right"
-reason = "SYSCALL reads no RAX: the kernel's convention does; the instruction writes RCX and R11 and transfers, which the IL states"
+verdict = "deliberate"
+reason = "SYSCALL reads no RAX: the kernel's convention does; the instruction writes RCX and R11 and transfers, which the IL states. Deliberate (upstream ledger 2026-11-20): radare2's ESIL models the OS call, which reads rax"
 
 [[judged]]
 command = "aoj"
@@ -1664,9 +1664,8 @@ command = "afb"
 binaries = "runofthemill"
 corpus = "elf"
 function = 'entry0$'
-verdict = "r2s-right"
-upstream = "anal.bb.maxsize (64K) cuts a longer straight-line block and drops the function body after it"
-reason = "class A: runofthemill 0x401054 is one straight-line block of 67,516 bytes (r2s, edge to 0x411810); radare2 stops at 65,526 bytes with no edge (anal.bb.maxsize 64K) and lists none of the five blocks from 0x411810"
+verdict = "deliberate"
+reason = "class A: runofthemill 0x401054 is one straight-line block of 67,516 bytes (r2s, edge to 0x411810); radare2 stops at 65,526 bytes with no edge (anal.bb.maxsize 64K) and lists none of the five blocks from 0x411810. Deliberate (upstream ledger 2026-11-20): anal.bb.maxsize is radare2's configured budget"
 
 [[judged]]
 command = "afb"
@@ -1734,9 +1733,8 @@ command = "afb"
 binaries = "upxtest"
 corpus = "elf"
 function = 'fcn\.000058d0$'
-verdict = "r2s-right"
-upstream = "afb counts an invalid opcode (64-bit 0x2f) as the last instruction of a block"
-reason = "class A: upxtest 0x58d1 `e87effffff call 0x5854` is followed by 0x2f, which has no 64-bit encoding (Intel SDM: DAS is invalid in 64-bit mode); r2s ends the block at the call (6 bytes), radare2 counts the invalid byte (7)"
+verdict = "deliberate"
+reason = "class A: upxtest 0x58d1 `e87effffff call 0x5854` is followed by 0x2f, which has no 64-bit encoding (Intel SDM: DAS is invalid in 64-bit mode); r2s ends the block at the call (6 bytes), radare2 counts the invalid byte (7). Deliberate (upstream ledger 2026-11-20): counting the invalid op in the function is radare2's convention, which its maintainer tests state (0402c7c475, mips \"stops at invalid instructions\")"
 
 [[judged]]
 command = "afi"
@@ -1795,9 +1793,8 @@ corpus = "elf"
 lacking = "r2"
 r2s = ' in=\.plt(\.sec|\.got)? basis=(stated|called)$'
 r2 = '^<missing> refs='
-verdict = "r2s-right"
-upstream = "aa makes no function at a PLT entry whose JUMP_SLOT names a symbol the object defines (ld.so sym.plt._dl_signal_exception), nor at many .plt.sec and .plt.got entries"
-reason = "class A: ld-2.27.so 0xeb0 `ff2572712200 jmp qword [0x228028]`; .rela.plt's JUMP_SLOT at 0x228028 names _dl_signal_exception, and _dl_find_dso_for_object 0x14a04 and _dl_signal_error 0x1bb73 call it. radare2 flags sym.plt._dl_signal_exception and records both calls but makes no function; r2s lists the stub"
+verdict = "deliberate"
+reason = "class A: ld-2.27.so 0xeb0 `ff2572712200 jmp qword [0x228028]`; .rela.plt's JUMP_SLOT at 0x228028 names _dl_signal_exception, and _dl_find_dso_for_object 0x14a04 and _dl_signal_error 0x1bb73 call it. radare2 flags sym.plt._dl_signal_exception and records both calls but makes no function; r2s lists the stub. Deliberate (upstream ledger 2026-11-20): aa analyses symbols and entries, and aaa makes the PLT function"
 
 [[judged]]
 command = "afl"
@@ -1904,9 +1901,8 @@ corpus = "elf"
 lacking = "r2"
 r2s = ' \[(JUMP|CODE):--x\] (jmp|b) '
 r2 = '^<missing> from=0x[0-9a-f]+ listed=yes$'
-verdict = "r2s-right"
-upstream = "axt lists no reference from a tail jmp to another function's entry (dectest64 0x401164 `eb8a jmp sym.register_tm_clones`)"
-reason = "class D: dectest64 entry.init0 (frame_dummy, 6 bytes) ends `eb8a jmp sym.register_tm_clones` at 0x401164; radare2 draws the jump in pd but `axt @ 0x4010f0` prints nothing; r2s lists the JUMP reference"
+verdict = "deliberate"
+reason = "class D: dectest64 entry.init0 (frame_dummy, 6 bytes) ends `eb8a jmp sym.register_tm_clones` at 0x401164; radare2 draws the jump in pd but `axt @ 0x4010f0` prints nothing; r2s lists the JUMP reference. Deliberate (upstream ledger 2026-11-20): aaa states the reference, and diff_r2.py runs aa"
 
 [[judged]]
 command = "axt"
@@ -2319,9 +2315,8 @@ corpus = "elf"
 function = '^(0x001c3030|0x00412010) '
 lacking = "r2"
 r2s = '^(sym\._ZN22QMultiByteUnicodeTableD1Ev 0x406c3e \[JUMP:\-\-x\] jmp sym\.imp\._ZdaPvm|sym\.memalign_hook_ini 0x413010 \[JUMP:\-\-x\] jmp sym\._mid_memalign)$'
-verdict = "r2s-right"
-upstream = "axt lists no reference from a tail jmp to another function's entry (dectest64 0x401164 `eb8a jmp sym.register_tm_clones`)"
-reason = "class D: ifunc_rel64 0x413010 memalign_hook_ini `jmp sym._mid_memalign` and pumasim 0x406c3e `jmp sym.imp._ZdaPvm` end their functions; radare2 records no JUMP reference, r2s does. r2s's holder shows `from=none` as both are named symbols outside r2s's afl extents"
+verdict = "deliberate"
+reason = "class D: ifunc_rel64 0x413010 memalign_hook_ini `jmp sym._mid_memalign` and pumasim 0x406c3e `jmp sym.imp._ZdaPvm` end their functions; radare2 records no JUMP reference, r2s does. r2s's holder shows `from=none` as both are named symbols outside r2s's afl extents. Deliberate (upstream ledger 2026-11-20): aaa states the reference, and diff_r2.py runs aa"
 
 [[judged]]
 command = "axt"
@@ -2330,9 +2325,8 @@ corpus = "elf"
 function = '^(0x00000d78) '
 lacking = "r2"
 r2s = '^(sym\.atexit 0xde0 \[DATA:\-\-\-\] add x0, x0, sym\.__atexit_handler_wrapper)$'
-verdict = "r2s-right"
-upstream = "axt lists no reference from an adrp+add pair that forms a function's address (truechin.so 0xddc..0xde0 `add x0, x0, sym.__atexit_handler_wrapper`)"
-reason = "class D: truechin.so atexit forms __atexit_handler_wrapper's address (0xd78) by `adrp x0, 0` (0xdd8) and `add x0, x0, 0xd78` (0xde0); pd names the symbol, axt @ 0xd78 prints nothing"
+verdict = "deliberate"
+reason = "class D: truechin.so atexit forms __atexit_handler_wrapper's address (0xd78) by `adrp x0, 0` (0xdd8) and `add x0, x0, 0xd78` (0xde0); pd names the symbol, axt @ 0xd78 prints nothing. Deliberate (upstream ledger 2026-11-20): aaa states the reference, and diff_r2.py runs aa"
 
 [[judged]]
 command = "afv"
@@ -2441,25 +2435,25 @@ reason = "class B: static-glibc-2.27 __libc_start_main's exit loop `mov edx, 0x3
 command = "afl"
 binaries = ["dwarf_go_tree"]
 values = ["0x45c6b4", "0x45c6dd", "0x45c6e1", "0x45c6e5", "0x45ca3c", "0x45ca4a"]
-verdict = "r2s-right"
+verdict = "deliberate"
 r2_line = "libr/core/canal.c:552-554"
-reason = "an entry a call reaches strictly inside a sized STT_FUNC is that function's (ELF gABI st_size; D506): `is` states runtime.duffzero FUNC 0x45c5d0 size 305 around 0x45c6b4..0x45c6e5 and runtime.duffcopy FUNC 0x45c710 size 897 around 0x45ca3c, 0x45ca4a; radare2 makes a function at any call target (canal.c:552-554, the CALL case of r_anal_analyze_fcn_refs, run from :872 after each function)"
+reason = "an entry a call reaches strictly inside a sized STT_FUNC is that function's (ELF gABI st_size; D506): `is` states runtime.duffzero FUNC 0x45c5d0 size 305 around 0x45c6b4..0x45c6e5 and runtime.duffcopy FUNC 0x45c710 size 897 around 0x45ca3c, 0x45ca4a; radare2 makes a function at any call target (canal.c:552-554, the CALL case of r_anal_analyze_fcn_refs, run from :872 after each function). Deliberate (upstream ledger 2026-11-20): radare2 makes every call target a callee entry (Duff's device)"
 
 [[missed]]
 command = "afl"
 binaries = ["go-cdetect"]
 values = ["0x45d789", "0x45d7f8", "0x45d854", "0x45d886", "0x45d88b", "0x45d890", "0x45dbec"]
-verdict = "r2s-right"
+verdict = "deliberate"
 r2_line = "libr/core/canal.c:552-554"
-reason = "as dwarf_go_tree (D506): `is` states runtime.duffzero FUNC 0x45d740 size 369 around 0x45d789..0x45d890 and runtime.duffcopy FUNC 0x45d8c0 size 897 around 0x45dbec"
+reason = "as dwarf_go_tree (D506): `is` states runtime.duffzero FUNC 0x45d740 size 369 around 0x45d789..0x45d890 and runtime.duffcopy FUNC 0x45d8c0 size 897 around 0x45dbec. Deliberate (upstream ledger 2026-11-20): radare2 makes every call target a callee entry (Duff's device)"
 
 [[missed]]
 command = "afl"
 binaries = ["libc-2.21.so"]
 values = ["0xf7269", "0xf7479", "0xf74d9", "0xf7b09"]
-verdict = "r2s-right"
+verdict = "deliberate"
 r2_line = "libr/core/canal.c:552-554"
-reason = "as dwarf_go_tree (D506): `is` states open FUNC 0xf7260 size 90 around 0xf7269, read FUNC 0xf7470 size 90 around 0xf7479, write FUNC 0xf74d0 size 90 around 0xf74d9, close FUNC 0xf7b00 size 90 around 0xf7b09 (each the cancellable syscall path after the single-thread check)"
+reason = "as dwarf_go_tree (D506): `is` states open FUNC 0xf7260 size 90 around 0xf7269, read FUNC 0xf7470 size 90 around 0xf7479, write FUNC 0xf74d0 size 90 around 0xf74d9, close FUNC 0xf7b00 size 90 around 0xf7b09 (each the cancellable syscall path after the single-thread check). Deliberate (upstream ledger 2026-11-20): radare2 makes every call target a callee entry (Duff's device)"
 
 [[missed]]
 command = "axt"
