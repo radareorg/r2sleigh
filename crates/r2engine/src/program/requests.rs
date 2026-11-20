@@ -15,7 +15,7 @@ use crate::query::db::{Db, Query, Retention};
 use crate::query::references::Indexing;
 use crate::query::{
     Answer, Answered, Completion, Coverage, Decoders, Instruction, Line, Listing, Memory, Proved,
-    References, Stop, Unread, WalkedBody, Work,
+    References, ReferencesTo, Referring, Stop, Unread, WalkedBody, Work,
 };
 use crate::{EngineDecompileResponse, SealedFunctionAnalysis};
 
@@ -967,6 +967,70 @@ impl<S: Source + 'static> OpenProgram<S> {
         Ok(Answer::complete(index.0))
     }
 
+    /// Every reference to `wanted`, each with the line the index read it from: the index holds no
+    /// line (D612), so each first owner is listed again at the index's grade, once.
+    ///
+    /// `O(log R + k)` into the index, then `O(sum of the first owners' bodies)`.
+    pub fn references_to(&mut self, wanted: u64) -> Result<ReferencesTo, String> {
+        let index = self.references()?.value;
+        let survey = self.surveyed()?;
+        let view = self.view();
+        // Each owner's wanted addresses: the line of a claim is its first owner's (`Indexing::read`).
+        let mut asked = BTreeMap::<u64, Vec<u64>>::new();
+        for (_, claim) in index.to(wanted).filter(|(_, claim)| !claim.word) {
+            let owner = *claim
+                .owners
+                .first()
+                .ok_or("a claimed instruction with no owner")?;
+            asked.entry(owner).or_default().push(claim.address);
+        }
+        let mut lines = Vec::new();
+        if !asked.is_empty() {
+            let walker = super::returns::Walking::new(view.clone(), true)?;
+            for (owner, mut addresses) in asked {
+                addresses.sort_unstable();
+                addresses.dedup();
+                let thumb = match survey.walked_in(owner) {
+                    Some(Ok(thumb)) => thumb,
+                    _ => return Err(format!("{owner:#x} holds a reference and was not walked")),
+                };
+                let (listed, _) =
+                    listed_lines(&view, &walker, owner, thumb)?.map_err(|(unread, _)| {
+                        format!("{owner:#x} was read and is now unread: {unread:?}")
+                    })?;
+                // A body lists an instruction once per block holding it; the index read the first.
+                let mut taken = vec![false; addresses.len()];
+                for line in listed {
+                    if let Ok(at) = addresses.binary_search(&line.address)
+                        && !std::mem::replace(&mut taken[at], true)
+                    {
+                        lines.push(line);
+                    }
+                }
+            }
+            lines.sort_by_key(|line| line.address);
+        }
+        let mut referring = Vec::new();
+        for (fact, claim) in index.to(wanted) {
+            let line = match claim.word {
+                true => None,
+                false => {
+                    let at = (lines.binary_search_by_key(&claim.address, |line| line.address))
+                        .map_err(|_| {
+                            format!("{:#x}'s line is not in its owner's listing", claim.address)
+                        })?;
+                    Some(lines[at].clone())
+                }
+            };
+            referring.push(Referring {
+                fact: *fact,
+                owners: claim.owners.to_vec(),
+                line,
+            });
+        }
+        Ok(ReferencesTo { referring, index })
+    }
+
     /// Discovery over the whole program, which settles each function's instruction set and whether it returns.
     pub(super) fn surveyed(&self) -> Result<Arc<Survey>, String> {
         self.loaded()?;
@@ -1038,36 +1102,58 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     }
     let walker = super::returns::Walking::new(view.clone(), true)?;
     for (&entry, thumb) in walked {
-        // `Walked`'s body, its decodes kept: the listing lifts nothing again (D162).
-        let walk = match thumb {
-            Ok(thumb) => listed_walk(view, entry, *thumb).map(|walk| (*thumb, walk)),
-            Err(refusal) => Err(refusal.clone()),
-        };
-        let (thumb, walk) = match walk {
-            Ok(walk) => walk,
+        let thumb = match thumb {
+            Ok(thumb) => *thumb,
             Err(refusal) => {
-                coverage.unread.insert(entry, Unread::Refused(refusal));
+                coverage
+                    .unread
+                    .insert(entry, Unread::Refused(refusal.clone()));
                 continue;
             }
         };
-        if !walk.body.unresolved.is_empty() {
-            coverage
-                .unresolved
-                .insert(entry, walk.body.unresolved.clone());
-        }
-        let machine = walker.machine(thumb).ok_or("no machine")?;
-        let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, entry, walk) {
-            Ok(lines) => {
+        match listed_lines(view, &walker, entry, thumb)? {
+            Ok((lines, unresolved)) => {
+                if !unresolved.is_empty() {
+                    coverage.unresolved.insert(entry, unresolved);
+                }
                 coverage.read.push(entry);
                 index.read(entry, lines);
             }
-            Err(unread) => {
+            Err((unread, unresolved)) => {
+                if !unresolved.is_empty() {
+                    coverage.unresolved.insert(entry, unresolved);
+                }
                 coverage.unread.insert(entry, unread);
             }
         }
     }
     Ok(index.finish(coverage))
+}
+
+/// One body's lines, or why it is unread, each beside where its walk stopped.
+type ListedLines =
+    Result<(Vec<Line>, Vec<crate::body::Unresolved>), (Unread, Vec<crate::body::Unresolved>)>;
+
+/// One walked body listed as the index reads it, with where its walk stopped: `O(body)`.
+fn listed_lines<S: Source + 'static>(
+    view: &View<'_, S>,
+    walker: &super::returns::Walking<'_, S>,
+    entry: u64,
+    thumb: bool,
+) -> Result<ListedLines, String> {
+    // `Walked`'s body, its decodes kept: the listing lifts nothing again (D162).
+    let walk = match listed_walk(view, entry, thumb) {
+        Ok(walk) => walk,
+        Err(refusal) => return Ok(Err((Unread::Refused(refusal), Vec::new()))),
+    };
+    let unresolved = walk.body.unresolved.clone();
+    let machine = walker.machine(thumb).ok_or("no machine")?;
+    Ok(
+        match claimed_by(view, (walker.target(thumb), machine), entry, walk) {
+            Ok(lines) => Ok((lines, unresolved)),
+            Err(unread) => Err((unread, unresolved)),
+        },
+    )
 }
 
 /// The body `Walked` holds for `entry`, its decodes kept: the same walk, refusals and tables.

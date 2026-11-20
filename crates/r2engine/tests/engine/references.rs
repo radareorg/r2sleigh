@@ -187,7 +187,7 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
     // The references to one address come back by source, each with the instruction and the function holding it.
     let to = index
         .to(CALLEE)
-        .map(|(fact, source)| (fact.from, source.line.address, source.owners.clone()))
+        .map(|(fact, source)| (fact.from, source.address, source.owners.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(
         to,
@@ -196,9 +196,10 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
             (CALLS + 7, CALLS + 7, vec![CALLS])
         ]
     );
-    let text = index
-        .to(CALLEE)
-        .filter_map(|(_, source)| Some(source.line.syntax.as_ref()?.text()))
+    // The index holds no line (D612): `axt` lists the owner again and takes it.
+    let answer = program.references_to(CALLEE).expect("the references list");
+    let text = (answer.referring.iter())
+        .filter_map(|referring| Some(referring.line.as_ref()?.syntax.as_ref()?.text()))
         .collect::<Vec<_>>();
     assert_eq!(text, ["lea rax, [0x1050]", "call rax"]);
 }
@@ -390,7 +391,7 @@ fn a_tail_two_functions_share_is_held_by_each() {
     let index = program.references().expect("the index builds").value;
     let held = index
         .to(leaf)
-        .map(|(fact, source)| (fact.from, fact.role, source.owners.clone()))
+        .map(|(fact, source)| (fact.from, fact.role, source.owners.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(held, [(BASE + 0x10, Role::Call, vec![left, right])]);
 }
