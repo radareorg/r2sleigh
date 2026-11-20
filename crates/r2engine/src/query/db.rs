@@ -76,6 +76,9 @@ pub enum Retention {
     /// Only the newest answer, which the request in flight is reading; a dropped one keeps its
     /// revisions and what it read only while a held answer read it, so that answer stays good.
     Newest,
+    /// A deposited row its one reader takes with [`Db::take`], which releases it; no answer reads
+    /// its entry, so nothing is computed from it twice (D589).
+    Consumed,
 }
 
 /// What the database does with a computed answer.
@@ -480,6 +483,66 @@ impl<I: Inputs + 'static> Db<I> {
         Ok(Some(value))
     }
 
+    /// `Q`'s deposited answer at `key` where good, as [`Db::held`] reads it, and its entry released:
+    /// a `Consumed` row's one reader takes it once. Never computes.
+    pub fn take<Q: Query<I>>(&self, key: &Q::Key) -> Result<Option<Rc<Q::Value>>, Cycle> {
+        debug_assert!(Q::RETENTION == Retention::Consumed);
+        let taken = self.held::<Q>(key)?;
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        let mut entries = typed.entries.borrow_mut();
+        let read = |entry: &Entry<Q::Value>| {
+            let value = entry.value.as_ref();
+            value
+                .zip(taken.as_ref())
+                .is_some_and(|(held, taken)| Rc::ptr_eq(held, taken))
+        };
+        if entries.get(key).is_some_and(read) {
+            entries.remove(key);
+        }
+        Ok(taken)
+    }
+
+    /// Hold `value` at `key`, good exactly while `P`'s answer at `owner` is: a row the running
+    /// computation of that answer derives, which shares its reads instead of copying them (D589).
+    pub fn deposit_beside<Q: Query<I>, P: Query<I>>(
+        &self,
+        key: Q::Key,
+        value: Q::Value,
+        owner: &P::Key,
+    ) {
+        if self
+            .frames
+            .borrow()
+            .last()
+            .is_none_or(|frame| frame.stopped)
+        {
+            return;
+        }
+        let deps: Rc<[Dep]> = Rc::new([Dep::Query {
+            table: TypeId::of::<P>(),
+            key: Rc::new(owner.clone()),
+        }]);
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        let now = self.inputs.byte_revision();
+        let entry = Entry {
+            value: Some(Rc::new(value)),
+            deps,
+            verified_at: now,
+            changed_at: now,
+            read_by_held: false,
+            pending: 0,
+        };
+        typed.entries.borrow_mut().insert(key, entry);
+    }
+
     /// The dependencies `Q`'s entry at `key` stores in its own list; none where nothing is held.
     #[cfg(test)]
     fn stored<Q: Query<I>>(&self, key: &Q::Key) -> usize {
@@ -664,7 +727,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
     /// `key` is now the newest answer of a query that holds only its newest: the one before loses
     /// its value, and its entry too unless a held answer read it. O(log n) per compute.
     fn bound(&self, entries: &mut BTreeMap<Q::Key, Entry<Q::Value>>, key: &Q::Key) {
-        if Q::RETENTION == Retention::Held {
+        if Q::RETENTION != Retention::Newest {
             return;
         }
         let previous = self.newest.borrow_mut().replace(key.clone());
@@ -740,7 +803,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
             });
         }
         db.frames.borrow_mut().push(Frame {
-            held: Q::RETENTION == Retention::Held,
+            held: Q::RETENTION != Retention::Newest,
             query: Q::NAME,
             ..Frame::default()
         });
@@ -934,6 +997,62 @@ mod tests {
             db.deposit::<Prefix>(found);
             sum
         }
+    }
+
+    /// A prefix sum deposited for one reader: taken once, then gone.
+    struct Taken;
+    impl Query<Memory> for Taken {
+        type Key = u64;
+        type Value = u64;
+        const NAME: &'static str = "taken";
+        const RETENTION: Retention = Retention::Consumed;
+        fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
+            read(db, 0..at + 1).iter().map(|b| u64::from(*b)).sum()
+        }
+    }
+
+    /// Deposits the prefix sum below `at` as a `Taken` row, then reads it as its one reader does.
+    struct Reader;
+    impl Query<Memory> for Reader {
+        type Key = u64;
+        type Value = Option<u64>;
+        const NAME: &'static str = "reader";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> Option<u64> {
+            let taken = db.take::<Taken>(&at).expect("never computes");
+            taken.map(|sum| *sum + 1)
+        }
+    }
+
+    /// The sum of the first four bytes, depositing it beside itself as a `Taken` row.
+    struct Owner;
+    impl Query<Memory> for Owner {
+        type Key = u64;
+        type Value = u64;
+        const NAME: &'static str = "owner";
+        const RETENTION: Retention = Retention::Held;
+        fn compute(db: &Db<Memory>, &at: &u64) -> u64 {
+            let sum = read(db, 0..at + 1).iter().map(|b| u64::from(*b)).sum();
+            db.deposit_beside::<Taken, Owner>(at, sum, &at);
+            sum
+        }
+    }
+
+    #[test]
+    fn a_consumed_row_is_released_once_its_reader_takes_it() {
+        let mut db = Db::new(Memory::new((1..=16).collect()));
+        assert_eq!(*db.get::<Owner>(&3).unwrap(), 10);
+        // The row stores one read, its owner's answer, never a copy of the owner's reads.
+        assert_eq!(db.stored::<Taken>(&3), 1);
+        assert!(db.holds::<Taken>(&3));
+        // The reader takes the row and depends on what it read; the entry is gone.
+        assert_eq!(*db.get::<Reader>(&3).unwrap(), Some(11));
+        assert!(!db.holds::<Taken>(&3));
+        assert_eq!(db.take::<Taken>(&3).unwrap(), None);
+        // A write below moves the owner the reader read through, which deposits the row anew.
+        db.inputs_mut().write(2, 100);
+        assert_eq!(*db.get::<Reader>(&3).unwrap(), Some(1 + 2 + 100 + 4 + 1));
+        assert!(!db.holds::<Taken>(&3));
     }
 
     #[test]
