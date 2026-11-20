@@ -43,16 +43,14 @@ fn listed(demangle: bool) -> Vec<(u64, String)> {
         .collect()
 }
 
-/// Whether the command line carries a name as one argument: radare2's `~`, `;`, `@`, `|`, `>`,
-/// quotes, backtick, `#`, `$(` and `&&` are its operators (line.rs, cmd.c:5241-5247).
-fn carried(name: &str) -> bool {
-    !name.contains(['~', ';', '@', '|', '>', '"', '\'', '`', '#'])
-        && !name.contains("&&")
-        && !name.contains("$(")
+/// `s <name>` through radare2's call line (D624): a line that starts with `'` is one command read
+/// whole, so every name a listing prints is typed as printed.
+fn sought(name: &str) -> String {
+    format!("'s {name}\ns\n")
 }
 
 /// `s <name>` lands on the function the row names, and `afi` names it the same way, under both
-/// settings; a name the command line cannot carry seeks by its flag spelling, which always can.
+/// settings; the call line carries every name, `Guard::~Guard()` included.
 #[test]
 fn every_name_afl_lists_seeks_to_its_function_and_afi_names_it_alike() {
     let flags = listed(false);
@@ -67,31 +65,85 @@ fn every_name_afl_lists_seeks_to_its_function_and_afi_names_it_alike() {
                 "{rows:?}"
             ),
         }
-        // The names the line cannot carry, which seek by their flag until D624.
-        let uncarried = (rows.iter())
-            .filter(|(_, name)| !carried(name))
-            .map(|(_, name)| name.as_str())
-            .collect::<Vec<_>>();
-        let expected: &[&str] = if demangle { &["Guard::~Guard()"] } else { &[] };
-        assert_eq!(uncarried, expected);
-        for ((address, name), (flagged, flag)) in rows.iter().zip(&flags) {
+        for ((address, name), (flagged, _)) in rows.iter().zip(&flags) {
             assert_eq!(address, flagged);
-            let sought = if carried(name) { name } else { flag };
-            assert!(carried(sought), "{flag}");
-            let (ran, out) = shell(demangle, &format!("s {sought}; s; afi~name"));
-            assert!(ran, "{sought}: {out}");
+            let (ran, out) = shell(demangle, &format!("{}afi~name", sought(name)));
+            assert!(ran, "{name}: {out}");
             let mut lines = out.lines();
             assert_eq!(
                 lines.next(),
                 Some(format!("{address:#x}").as_str()),
-                "{sought}"
+                "{name}"
             );
             assert_eq!(
                 lines.next(),
                 Some(format!("name: {name}").as_str()),
-                "{sought}"
+                "{name}"
             );
         }
+    }
+}
+
+/// Every `afl` name of 0pack and pumasim seeks through the call line: the uncarried set is empty
+/// (3,096 and 2,107 at 768391be5, cut at an operator). The bins are radare2's test bins:
+/// `R2S_TESTBINS=<radare2-testbins> cargo test -p r2s --features sleigh --test names -- --ignored`.
+#[test]
+#[ignore = "reads radare2's test bins, named by R2S_TESTBINS"]
+fn every_afl_name_of_0pack_and_pumasim_seeks_through_the_call_line() {
+    let bins =
+        PathBuf::from(std::env::var_os("R2S_TESTBINS").expect("R2S_TESTBINS names the bins"));
+    for binary in ["0pack", "pumasim"] {
+        let path = bins.join("elf").join(binary);
+        let afl = Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .args(["-q", "-c", "afl"])
+            .arg(&path)
+            .output()
+            .expect("the shell runs");
+        let rows = String::from_utf8_lossy(&afl.stdout)
+            .lines()
+            .map(|row| {
+                let mut fields = row.split_whitespace();
+                let address = fields.next().and_then(|hex| hex.strip_prefix("0x"));
+                let address = u64::from_str_radix(address.expect("an address"), 16).expect("hex");
+                (address, fields.skip(2).collect::<Vec<_>>().join(" "))
+            })
+            .collect::<Vec<_>>();
+        assert!(rows.len() > 1000, "{binary}: {} rows", rows.len());
+        let script = rows
+            .iter()
+            .map(|(_, name)| sought(name))
+            .collect::<String>();
+        let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .args(["-q", "-c", &script])
+            .arg(&path)
+            .output()
+            .expect("the shell runs");
+        let landed = String::from_utf8_lossy(&done.stdout).into_owned();
+        let landed = landed.lines().collect::<Vec<_>>();
+        // A demangled name more than one function prints (a C1 and a C2 constructor) seeks to one of them.
+        let mut owners = std::collections::BTreeMap::<&str, Vec<String>>::new();
+        for (address, name) in &rows {
+            owners
+                .entry(name)
+                .or_default()
+                .push(format!("{address:#x}"));
+        }
+        let uncarried = (rows.iter().zip(&landed))
+            .filter(|((_, name), at)| !owners[name.as_str()].iter().any(|owner| owner == **at))
+            .map(|((_, name), at)| format!("{name} -> {at}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            landed.len(),
+            rows.len(),
+            "{binary}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        assert!(
+            uncarried.is_empty(),
+            "{binary}: {} uncarried, first {:?}",
+            uncarried.len(),
+            &uncarried[..uncarried.len().min(5)]
+        );
     }
 }
 

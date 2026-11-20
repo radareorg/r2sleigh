@@ -36,8 +36,9 @@
 //! unquoted `\~` just before a `~`, a `\` or a quote, which radare2's grep
 //! search steps over unread. So is a line radare2 reads whole before it looks
 //! for statements (cmd.c:6861-6922): one that starts with `|`, a comment, or
-//! with `b64:'`, a call, and a `/*` comment, which runs to a line that starts
-//! with `*/` and, in a script, to its end. Every statement of a script is cut
+//! with `b64:'`, an encoded call, and a `/*` comment, which runs to a line that
+//! starts with `*/` and, in a script, to its end. A line that starts with `'`
+//! is radare2's call line, one command read whole (D624). Every statement of a script is cut
 //! and its grep parsed before the first one runs, and a refused statement runs
 //! nothing. Where radare2 reads the rest of the line some other way, after a
 //! comment, a malformed prefix, a repeat count with no command or a command
@@ -68,6 +69,8 @@ pub(crate) struct Statement {
     pub(crate) at: Option<String>,
     /// What its `~` asks for.
     pub(crate) grep: Option<Suffix>,
+    /// Whether the line cut its command at a bare `;`, `~` or `@`, which a call line reads as text.
+    pub(crate) cut: bool,
 }
 
 /// A command, its argument read the way radare2's handler for it reads one.
@@ -121,10 +124,12 @@ impl Reader {
     }
 }
 
-/// One line's statements. radare2 reads a line that starts with `|` as a
-/// comment and one that starts with `b64:'` as a call, whole, before it looks
-/// for statements (cmd.c:6868, 6916-6919).
+/// One line's statements. radare2 reads a line that starts with `'` or `b64:'` as a call, and
+/// one that starts with `|` as a comment, whole, before it looks for statements (6.2.4 cmd.c:6814, 6844).
 fn read_line(line: &str) -> Line {
+    if let Some(call) = line.strip_prefix('\'') {
+        return vec![called(call)];
+    }
     if line.starts_with('|') && !line.starts_with("|?") {
         return vec![Err(RAW_COMMENT.to_owned())];
     }
@@ -132,6 +137,46 @@ fn read_line(line: &str) -> Line {
         return vec![Err(ENCODED_CALL.to_owned())];
     }
     statements(line)
+}
+
+/// radare2's call line, after its `'`: one command, its text whole, where no `;`, `~`, `@`, `|`,
+/// `>` or quote means anything (`handle_command_call`, 6.2.4 cmd.c:3756-3800). `'@addr'cmd` and
+/// `'0x..'cmd` run at that address. `O(n)` in the line.
+fn called(call: &str) -> Result<Statement, String> {
+    if call == "?" {
+        return Err(CALL_HELP.to_owned());
+    }
+    let addressed = call
+        .strip_prefix('@')
+        .or(call.starts_with("0x").then_some(call));
+    let (at, command) = match addressed {
+        Some(rest) => {
+            let (address, command) = rest
+                .split_once('\'')
+                .ok_or_else(|| CALL_ADDRESS.to_owned())?;
+            (Some(address.to_owned()), command)
+        }
+        None => (None, call),
+    };
+    let end = command.find(blank).unwrap_or(command.len());
+    let (verb, argument) = command.split_at(end);
+    if verb.contains(['"', '\'', '\\']) {
+        return Err(VERB_QUOTED.to_owned());
+    }
+    let command = match verb {
+        "?e" => echo(argument).map(Command::Echo)?,
+        "w" => written(argument).map(Command::Write)?,
+        _ => Command::Plain {
+            verb: verb.to_owned(),
+            argument: argument.trim_matches(blank).to_owned(),
+        },
+    };
+    Ok(Statement {
+        command,
+        at,
+        grep: None,
+        cut: false,
+    })
 }
 
 /// Every statement of one line, each parsed or refused on its own.
@@ -144,6 +189,10 @@ const COMMENT: &str = "line: `#` starts a comment in radare2, which r2s does not
                        nothing after it on the line runs";
 const RAW_COMMENT: &str = "line: a line that starts with `|` is a comment in radare2 \
                            (cmd.c:6916), which r2s does not implement";
+const CALL_HELP: &str =
+    "line: `'?` is radare2's help for the call line, which r2s does not implement";
+const CALL_ADDRESS: &str = "line: a call that starts `'@` or `'0x` names its address up to a second \
+                            `'`, then the command (cmd.c:3772-3796)";
 const ENCODED_CALL: &str = "line: a line that starts with `b64:'` is radare2's base64-encoded \
                             call, read whole (cmd.c:3832), which r2s does not implement";
 const COMMENT_BLOCK: &str = "line: `/*` opens a comment in radare2, which r2s does not \
@@ -623,6 +672,8 @@ impl Lexer {
             .lexemes
             .get(range.end)
             .map_or(self.end, |lexeme| lexeme.offset);
+        // A statement a bare `;` ended was cut there, which a call line reads as text.
+        let ended = range.end < self.lexemes.len();
         let lexemes = trimmed(&self.lexemes[range]);
         refuse_operators(lexemes)?;
         let written = lexemes
@@ -637,7 +688,10 @@ impl Lexer {
         {
             return Err(QUOTED.to_owned());
         }
-        cut(line, lexemes, stop)
+        cut(line, lexemes, stop).map(|statement| Statement {
+            cut: statement.cut || ended,
+            ..statement
+        })
     }
 }
 
@@ -698,7 +752,13 @@ fn cut(line: &str, lexemes: &[Lexeme], stop: usize) -> Result<Statement, String>
         .filter(|text| !text.is_empty())
         .map(|text| Suffix::parse(text, alone))
         .transpose()?;
-    Ok(Statement { command, at, grep })
+    let cut = at.is_some() || grep.is_some() || tilde.is_some();
+    Ok(Statement {
+        command,
+        at,
+        grep,
+        cut,
+    })
 }
 
 /// Cut at the first bare `@`, except in `?@`, radare2's help for `@`
@@ -1237,5 +1297,36 @@ mod tests {
         assert_eq!(lines(&mut reader, "?e a\n"), [[false]]);
         assert_eq!(lines(&mut reader, "*/ ?e b\n"), [[false]]);
         assert_eq!(lines(&mut reader, "?e c\n"), [[true]]);
+    }
+
+    #[test]
+    fn a_call_line_is_one_command_read_whole() {
+        let plain = |verb: &str, argument: &str| Command::Plain {
+            verb: verb.to_owned(),
+            argument: argument.to_owned(),
+        };
+        let mut reader = Reader::default();
+        let mut read = |script: &str| reader.script(script).remove(0).remove(0);
+        let name = read("'s LIEF::corrupted::~corrupted() ; a@b|c>d\"e").expect("a call");
+        let whole = "LIEF::corrupted::~corrupted() ; a@b|c>d\"e";
+        assert_eq!(name.command, plain("s", whole));
+        assert!(name.at.is_none() && name.grep.is_none() && !name.cut);
+        let at = read("'@0x10'pd 2~x").expect("an addressed call");
+        assert_eq!(
+            (at.command, at.at.as_deref()),
+            (plain("pd", "2~x"), Some("0x10"))
+        );
+        let hex = read("'0x10'pd").expect("a hex-addressed call");
+        assert_eq!(
+            (hex.command, hex.at.as_deref()),
+            (plain("pd", ""), Some("0x10"))
+        );
+        assert_eq!(read("'?e a;b").expect("an echo").command, echo("a;b"));
+        assert!(read("'@0x10 pd").is_err());
+        assert!(read("'?").is_err());
+        // Only the line's first character makes a call: a `'` later still heads a quoted statement.
+        assert!(statements("?e a;'s b")[1].is_err());
+        // A statement cut at an operator says so, for the seek's hint.
+        assert!(one("s a~b").expect("cut").cut && !one("s a").expect("whole").cut);
     }
 }

@@ -31,11 +31,22 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
         None => dispatch(session, &statement.command),
     };
     session.grepped = false;
-    let output = output?;
+    let output = output.map_err(|error| cut_seek(statement, error))?;
     Ok(match grep {
         Some(grep) => grep.apply(&output)?,
         None => output,
     })
+}
+
+/// A seek the line cut at an operator that then named nothing: the call line reads it whole.
+fn cut_seek(statement: &Statement, error: String) -> String {
+    match &statement.command {
+        Command::Plain { verb, .. } if verb == "s" && statement.cut => format!(
+            "{error}; the line cut the name at `;`, `~` or `@`: a line that starts with `'` \
+             takes it whole, as in 's <name>"
+        ),
+        _ => error,
+    }
 }
 
 /// `@`: run a command somewhere else and leave the cursor where it was.

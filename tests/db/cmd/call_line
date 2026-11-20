@@ -1,0 +1,45 @@
+# D624: radare2's call line. A line that starts with `'` is one command read whole, so a name
+# holding `~`, `;` or `@` is typed as a listing prints it (6.2.4 cmd.c:3756-3800, 6814).
+
+NAME=a destructor's name is typed whole after a quote
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=<<EOF
+'s Guard::~Guard()
+s
+EOF
+EXPECT=<<EOF
+0x124a
+EOF
+RUN
+
+NAME=a call line at an address
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=<<EOF
+'@main'pd 1
+EOF
+EXPECT=<<EOF
+            0x00001407      f30f1efa       endbr64
+EOF
+RUN
+
+NAME=a call line's address needs its closing quote
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=<<EOF
+'@main pd 1
+EOF
+EXPECT_ERR=<<EOF
+r2s: line: a call that starts `'@` or `'0x` names its address up to a second `'`, then the command (cmd.c:3772-3796)
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a seek cut at an operator names the call line
+FILE=tests/fixtures/cxx_try_catch_gcc_x64_O0
+CMDS=s Guard::~Guard()
+EXPECT_ERR=<<EOF
+r2s: unknown address or flag 'Guard::'; the line cut the name at `;`, `~` or `@`: a line that starts with `'` takes it whole, as in 's <name>
+EOF
+EXPECT=<<EOF
+EOF
+RUN

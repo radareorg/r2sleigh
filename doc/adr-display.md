@@ -479,3 +479,8 @@ tests whether a setter's call is the next call line.
   most 2 and less than the verb's length, ties by table order
   (`O(|VERBS| x len^2)`).
 
+- D624, the call line. A line that starts with `'` is radare2's call: one
+  command read whole, so a name holding `~`, `;`, `@` or `>` (every
+  destructor, every template) is typed as a listing prints it:
+  `'s LIEF::corrupted::~corrupted()`. A seek the line cut at an operator
+  that names nothing says so and shows the form.
