@@ -254,8 +254,6 @@ pub struct Emission {
     indent: usize,
     /// The proof line's typed clauses, which its text was spelled from (D621).
     clauses: crate::render::proof::ProofClauses,
-    /// Each point a line may break at, in print order (D620).
-    breaks: Vec<BreakPoint>,
 }
 
 /// A point a definition's line may break at without changing its bytes: after a binary operator,
@@ -289,11 +287,6 @@ impl Emission {
     /// The proof line's typed clauses: what a typed reader counts where the text is not read.
     pub const fn proof_clauses(&self) -> &crate::render::proof::ProofClauses {
         &self.clauses
-    }
-
-    /// Each point a line may break at, by line then offset.
-    pub fn break_points(&self) -> &[BreakPoint] {
-        &self.breaks
     }
 
     pub(crate) fn with_clauses(self, clauses: crate::render::proof::ProofClauses) -> Self {
@@ -621,7 +614,6 @@ impl<'c> CodeGenerator<'c> {
         prelude.push_str(&definition);
         let mut depths = std::mem::take(&mut self.depths);
         depths.resize(definition.lines().count(), 0);
-        let breaks = break_points(&definition, &std::mem::take(&mut self.breaks));
         Emission {
             depths,
             proof_line: self.proof_line.take().map(|line| line - 1),
@@ -636,7 +628,6 @@ impl<'c> CodeGenerator<'c> {
             calls: crate::report::calls(func),
             roles: std::mem::take(&mut self.roles),
             clauses: crate::render::proof::ProofClauses::default(),
-            breaks,
         }
     }
 
@@ -1741,6 +1732,22 @@ impl RenderedFunction {
     /// The tree that C was written from, for a consumer that walks rather than parses.
     pub const fn function(&self) -> &CFunction {
         &self.function
+    }
+
+    /// Each point a line of the definition may break at, by line then offset (D620): the tree
+    /// written again, so no rendering holds them. Empty where that text is not the definition's
+    /// bytes. `O(tokens)`.
+    pub fn break_points(&self) -> Vec<BreakPoint> {
+        let ready = EmissionReadyFunction {
+            function: self.function.clone(),
+            locations: None,
+        };
+        let mut generator = CodeGenerator::new(CodeGenConfig::default());
+        let definition = generator.generate_function(&ready);
+        match definition == self.emission.definition() {
+            true => break_points(&definition, &generator.breaks),
+            false => Vec::new(),
+        }
     }
 }
 
