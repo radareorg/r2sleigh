@@ -1,6 +1,5 @@
-//! Which values are one location's successive contents (ROADMAP D470, doc/adr-one-ir.md "D470 as
-//! built"): values of one canonical storage, joined along the merges that read them, whose live
-//! ranges do not interfere. A necessary condition only: r2dec proves the text's renaming itself.
+//! Which values are one location's successive contents: one storage, joined along read merges,
+//! live ranges disjoint (ROADMAP D470; doc/adr-one-ir.md "D470 as built").
 
 use crate::graph::{InstPayload, SsaGraph, ValueId};
 use crate::liveness::{ComponentLiveness, ValueLiveness};

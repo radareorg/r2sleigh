@@ -106,6 +106,14 @@ pub fn render(
     let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
     let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
     let role = |stmt: &CStmt| statement_role(stmt, &evidence, &selections);
+    let mut body = classes(
+        input,
+        (&c, values.as_ref()),
+        body,
+        &mut occurrences,
+        &labels,
+        &role,
+    );
     certify_control(input, &body, &occurrences, &labels, &role)?;
     crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
@@ -401,6 +409,89 @@ fn select(
     let mut selections = std::collections::BTreeSet::new();
     crate::structure::shape::select(body, &convert, block_of, &mut selections);
     selections
+}
+
+/// D470: each class's members spelled as one symbol where the finished text proves it, then each
+/// loop whose arms that emptied rotated; each stage kept only under the control certificate.
+fn classes(
+    input: &RenderInput<'_>,
+    (c, values): (&CFunction, Option<&values::Values<'_>>),
+    body: CStmt,
+    marks: &mut Occurrences,
+    labels: &BTreeMap<u64, String>,
+    role: &dyn Fn(&CStmt) -> StatementRole,
+) -> CStmt {
+    let Some(values) = values else {
+        return body;
+    };
+    let members = class_members(input, c, values);
+    if members.is_empty() {
+        return body;
+    }
+    let certified = |stmt: &CStmt, marks: &Occurrences| {
+        let certificate = control_certificate(input, stmt, marks, labels, role);
+        match certificate.ok() {
+            true => Ok(()),
+            false => Err(format!(
+                "{certificate} {:?}",
+                certificate.violations.first()
+            )),
+        }
+    };
+    let symbols = c.symbols.borrow();
+    let same_type = |a, b| symbols.ty(a) == symbols.ty(b);
+    let mut deleted = Vec::new();
+    let body = stage("local classes", body, marks, &certified, |body, _| {
+        let renamed = crate::structure::classes::rename(body, &members, symbols.len(), &same_type);
+        r2il::refusal_evidence!(
+            "local-classes",
+            "{}: {} members, {} joined, kept {:?}, spelled {:?}",
+            input.name().unwrap_or_default(),
+            renamed.members,
+            renamed.joined,
+            renamed.kept,
+            (renamed.spelled.iter())
+                .map(|(from, to)| format!("{}>{}", symbols.name(*from), symbols.name(*to)))
+                .collect::<Vec<_>>()
+        );
+        deleted = renamed.deleted;
+        deleted.sort();
+        renamed.joined != 0
+    });
+    if deleted.is_empty() {
+        return body;
+    }
+    stage("loop rotation", body, marks, &certified, |body, marks| {
+        crate::structure::classes::rotate_emptied(body, &deleted, marks) != 0
+    })
+}
+
+/// The carriers whose values r2ssa classes with another carrier's, by class then value.
+fn class_members(
+    input: &RenderInput<'_>,
+    c: &CFunction,
+    values: &values::Values<'_>,
+) -> Vec<crate::structure::classes::Member> {
+    let classes = &input.artifact().facts().classes;
+    let symbols = c.symbols.borrow();
+    let mut members = (values.named())
+        .filter(|(_, symbol)| symbols.get(*symbol).role == crate::symbol::SymbolRole::Carrier)
+        .map(|(value, symbol)| crate::structure::classes::Member {
+            class: classes.class_of(value).0,
+            value: value.0,
+            symbol,
+        })
+        .collect::<Vec<_>>();
+    members.sort();
+    let shared = |at: usize| {
+        let class = members[at].class;
+        (at > 0 && members[at - 1].class == class)
+            || members.get(at + 1).is_some_and(|next| next.class == class)
+    };
+    let keep = (0..members.len()).map(shared).collect::<Vec<_>>();
+    let mut keep = keep.into_iter();
+    members.retain(|_| keep.next().unwrap_or(false));
+    members
 }
 
 /// What the certificate reads a statement as: a selection the stage recorded, or one ending control.

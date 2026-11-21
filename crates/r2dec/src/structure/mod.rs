@@ -4,6 +4,7 @@
 
 pub(crate) mod certify;
 pub(crate) mod chain;
+pub(crate) mod classes;
 pub(crate) mod condition;
 pub(crate) mod guard;
 pub(crate) mod latch;

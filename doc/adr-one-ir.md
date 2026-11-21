@@ -450,6 +450,10 @@ Open, with the fact that stopped each:
 
 ## D470 local classes: step 0 (round 16, design and proof)
 
+**Withdrawn (round 17).** This design dropped copies at spell time and proved it by listing where
+each r2dec pass assigns the class local; its three counterexamples share that cause. It is kept as
+the record; "D470 as built" below replaces it, and `current_at` is not built (it had no other reader).
+
 **Invariant I.** For every class `C`, member `m`, and point `q` where the rendered C reads `C`'s
 local `L` to mean `m`, the last assignment to `L` executed on every path to `q` is `m`'s.
 
@@ -600,3 +604,61 @@ answered, and one new counterexample stands, so no r2dec edit lands (round 16).
   proof; the Tests rule's premise that a terminator never reads a bound member directly (shape:
   `movsxd rax, [tbl+rax*4]; jmp rax`); an unbound phi member's role in the Lemma; the closure of
   `arm_read` under dropped copies, asserted at class build.
+
+## D470 as built: renaming under a text certificate (round 17)
+
+r2ssa states which values are one location's successive contents; r2dec renames on the finished
+text only where that text proves it. The proof names no r2dec pass.
+
+**Classes (r2ssa, `crates/r2ssa/src/local_classes.rs`).** Every value starts alone. For each
+merge in `InstId` order that `phi_is_unread` does not exclude, each operand that is an
+instruction's or merge's output of the same canonical storage (register or temporary, one
+width) joins the merge's class where `ComponentLiveness::interferes` is false, the smaller
+component absorbed. A class is named by its smallest member. Formals, entry values, constants and
+memory versions are never members. `O(V alpha(V))` finds plus the segment sweeps; a dense
+`Vec<u32>` by `ValueId` on `PreparedFunctionFacts::classes`. It is a necessary condition only.
+`StorageSpans` is a different fact: it joins op updates and merge sources of any storage.
+
+**Theorem (renaming).** Let T be the finished tree, one symbol per value; G a set of symbols of
+one C type; T' is T with every symbol of G spelled as one member L and each statement that then
+reads `L = L;` deleted. Hypothesis H: for every statement W of T writing a member x, every other
+member y live in T just after W makes W exactly `x = y;`. Then T and T' compute the same value at
+every read. Proof, by induction over execution steps with the relation "every member live at the
+current point of T holds L's value in T'": a read of a live member reads L; a write `x = e;`
+reads equal values in `e`, and every other member live after it is its right side by H, so x, y
+and L agree; a deleted `x = y;` leaves L, which held the live y. Base: no member is live at entry
+(a member live at entry is refused). Liveness may over-approximate (more edges, more reads): H
+then holds for fewer sets. A write may not be missed, so any occurrence of a member that is not a
+plain read or the left side of a statement-level `x = e;` refuses it.
+
+**The reader (r2dec, `crates/r2dec/src/structure/classes.rs`).** Between `select` and the final
+`certify_control`, the finished tree is read as C runs it: a node per simple statement and per
+test, edges for `if`, `while`, `do`, `for` (init, test, update), `switch` with fallthrough and
+`default`, `break`, `continue`, `goto` to its label, `return`; a trap falls through (an edge more
+is sound). An unknown or repeated label refuses the function. Candidates are `Carrier` symbols
+whose values share an r2ssa class with another carrier and that the text spells. Text liveness is a backward worklist from each read, each node entered once per
+candidate: `O(statements + live ranges)`. Per class, members join in `ValueId` order where H
+holds both ways against every group member and the C types are equal; the group is spelled as
+its member the text declares first, so no name is new. Each `L = L;` becomes an empty statement
+under its markers, so the control certificate reads the same tree. A second stage moves the
+deleted copies' markers out of a `for (;;)`'s last test's arms and reruns `rotate` on that loop:
+`rotate` moves the test and drops only a `break` or `continue` arm. Each stage stands only under
+the control certificate (`statement_role` with the selections).
+
+**Witnesses.** Round 2's gapped merge: the `J -> K` copy is spelled `q = <residual>;`, renamed
+`p = <residual>;`, not `L = L;`, so it stays. Round 1's latch copy `r = p;` with `r` read after
+`p = r + 1;` and the forwarded read past a redefinition both fail H and keep their symbols. Inline
+tests: `structure::classes::tests`.
+
+**Departures from the round 17 chain file, recorded.** The group's symbol is its member the text
+declares first, not its first `ValueId` (fnv1a32's update has the smaller id; either is sound, the
+declared-first one keeps the name the loop is entered with). Step 6's markers: neither in-place
+nor dropped; the deleted copies' empty statements move before the loop's last test, and only for
+a loop that then rotates. `render/values.rs` gains one read-only getter, `Values::named`, because
+the symbol-to-value map has no other owner. `rotate` recurses, so an inner `for (;;)` with no
+deleted copy inside a rotated loop may rotate too.
+
+**Measured (round 17, DecBench 2,621 functions).** Carrier locals declared 77,428 to 61,682
+(-15,746); 1,278 functions hold candidates, 21,977 members, 15,746 joined (71.6%), kept 236 by
+interference and 80 live at entry; the pinned census 3,371 to 3,149. Moved goldens are judged in
+ROADMAP "Judged golden moves".
