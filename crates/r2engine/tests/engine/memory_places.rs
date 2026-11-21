@@ -87,3 +87,67 @@ fn argv_lays_out_no_record() {
     let text = rendered(ARGV, 0xd);
     assert!(!text.contains("struct fcn_"), "{text}");
 }
+
+/// `q = p->f_38; q->f_1, q->f_8 read, q->f_10 written`: `q`'s record (ADR test 4, D644).
+const LOADED: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x38, // 1000 mov rax, [rdi + 0x38]
+    0x8b, 0x48, 0x08, // 1004 mov ecx, [rax + 8]
+    0x0f, 0xb6, 0x50, 0x01, // 1007 movzx edx, byte [rax + 1]
+    0x48, 0x89, 0x48, 0x10, // 100b mov [rax + 0x10], rcx
+    0x01, 0xd0, // 100f add eax, edx
+    0xc3, // 1011 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1012 padding
+];
+
+/// The same reads through a pointer the caller left on the stack: no store proven to reach it.
+const RELOADED: &[u8] = &[
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1000 mov rax, [rsp + 8]
+    0x8b, 0x48, 0x08, // 1005 mov ecx, [rax + 8]
+    0x0f, 0xb6, 0x50, 0x01, // 1008 movzx edx, byte [rax + 1]
+    0x01, 0xd1, // 100c add ecx, edx
+    0x89, 0xc8, // 100e mov eax, ecx
+    0xc3, // 1010 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1011 padding
+];
+
+/// `p = c ? p->next : p; return p->a`: the parameter and the pointer its field holds merge, so
+/// the record's pointer field leads back to it (ADR test 6, refusing half).
+const LIST_STEP: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0x8b, 0x08, // 1004 mov ecx, [rax]
+    0x85, 0xf6, // 1006 test esi, esi
+    0x74, 0x03, // 1008 je 0x100d
+    0x48, 0x89, 0xc7, // 100a mov rdi, rax
+    0x0f, 0xb6, 0x07, // 100d movzx eax, byte [rdi]
+    0x01, 0xc8, // 1010 add eax, ecx
+    0xc3, // 1012 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1013 padding
+];
+
+/// ADR test 4: a pointer loaded from a parameter's field has a record; its accesses are members.
+#[test]
+fn a_pointer_loaded_from_a_field_has_a_record() {
+    let text = rendered(LOADED, 0x12);
+    for member in ["f_1;", "f_8;", "f_10;"] {
+        assert!(text.contains(member), "{member}: {text}");
+    }
+    assert!(text.contains("->f_8)"), "{text}");
+}
+
+/// ADR test 5: a pointer reloaded from a slot no proven store reaches has no record.
+#[test]
+fn a_reloaded_pointer_with_no_proven_store_has_no_record() {
+    let text = rendered(RELOADED, 0x11);
+    assert!(!text.contains("->f_"), "{text}");
+}
+
+/// ADR test 6: a record whose pointer field leads back to it is refused, with the reason.
+#[test]
+fn a_record_its_pointer_field_leads_back_to_is_refused() {
+    let text = rendered(LIST_STEP, 0x13);
+    assert!(!text.contains("->f_"), "{text}");
+    assert!(text.contains("(Recursive)"), "{text}");
+}

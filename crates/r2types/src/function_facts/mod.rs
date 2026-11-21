@@ -1133,21 +1133,26 @@ impl SourceOwnedFunctionFacts {
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
         enriched.apply_exact_source_signature(source, solved);
+        let stated = |record: &crate::records::InferredRecord| crate::ParameterRecord {
+            tag: record.tag.clone(),
+            fields: record.fields.clone(),
+            spans: record.spans.clone(),
+            refused: record.refused.clone(),
+        };
         enriched.types.records = crate::Records {
-            definitions: (solved.records.values())
+            definitions: (solved.classes.iter().flatten())
                 .map(|record| (record.tag.clone(), record.definition.clone()))
                 .collect(),
             parameters: (solved.records.iter())
-                .map(|(slot, record)| {
-                    let parameter = crate::ParameterRecord {
-                        tag: record.tag.clone(),
-                        fields: record.fields.clone(),
-                        spans: record.spans.clone(),
-                        refused: record.refused.clone(),
-                    };
-                    (*slot, parameter)
-                })
+                .map(|(slot, record)| (*slot, stated(record)))
                 .collect(),
+            classes: (solved.classes.iter())
+                .map(|record| record.as_ref().map(stated))
+                .collect(),
+            loaded: solved.evidence.loaded_records().to_vec(),
+            recursive: (solved.evidence.records().iter())
+                .filter(|class| class.recursive)
+                .count(),
         };
         enriched.apply_return_type_fact(solved.returns.clone());
         // The types are final here; the projection the seal holds is built from them once.
@@ -1306,6 +1311,8 @@ pub(crate) struct SolvedFunction {
     pub(crate) returns: ReturnTypeFact,
     /// Each parameter whose class's accesses lay out a record (doc/adr-memory-places.md).
     pub(crate) records: BTreeMap<usize, crate::records::InferredRecord>,
+    /// Every record class's layout, by class index; `None` where refused.
+    pub(crate) classes: Vec<Option<crate::records::InferredRecord>>,
 }
 
 impl SolvedFunction {
@@ -1325,12 +1332,16 @@ impl SolvedFunction {
             crate::evidence::solve_evidence_types(source, signatures, &signedness, ptr_bits);
         let returns =
             ReturnTypeFact::decide(source, signatures, &evidence).signed_by(source, &signedness);
-        let records = crate::records::parameter_records(source, &evidence);
+        let crate::records::ClassRecords {
+            parameters: records,
+            classes,
+        } = crate::records::class_records(source, &evidence);
         Self {
             signedness,
             evidence,
             returns,
             records,
+            classes,
         }
     }
 }

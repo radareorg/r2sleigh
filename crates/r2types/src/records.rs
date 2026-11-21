@@ -43,22 +43,33 @@ pub enum RecordRefusal {
     NoMember,
 }
 
-/// Each parameter whose class's accesses lay out a record, by slot.
-pub(crate) fn parameter_records(
-    source: &r2ssa::SsaArtifact,
-    evidence: &EvidenceTypes,
-) -> BTreeMap<usize, InferredRecord> {
+/// Every record class's layout, by the class index `EvidenceTypes::records` gives: `None` where
+/// it is recursive or lays out nothing. The record a parameter roots is under its slot too.
+pub(crate) struct ClassRecords {
+    pub(crate) parameters: BTreeMap<usize, InferredRecord>,
+    pub(crate) classes: Vec<Option<InferredRecord>>,
+}
+
+/// Each record class's layout (doc/adr-memory-places.md, invariants 2 to 6).
+pub(crate) fn class_records(source: &r2ssa::SsaArtifact, evidence: &EvidenceTypes) -> ClassRecords {
     let entry = source.function().entry;
     let ptr_bits = source
         .machine_context()
         .memory_model()
         .default_address_bits();
-    let mut out = BTreeMap::new();
-    for slot in source.facts().boundaries.parameters.keys() {
-        let Ok(slot) = usize::try_from(*slot) else {
-            continue;
+    let mut parameters = BTreeMap::new();
+    let mut classes = Vec::new();
+    for class in evidence.records() {
+        let tag = match class.name {
+            crate::evidence::RecordName::Parameter(slot) => format!("fcn_{entry:x}_arg{slot}"),
+            crate::evidence::RecordName::At(at) => format!("fcn_{entry:x}_at_{at:x}"),
         };
-        let accesses = (evidence.record(slot).iter())
+        if class.recursive {
+            r2il::refusal_evidence!("record", "{entry:#x} {tag}: Recursive");
+            classes.push(None);
+            continue;
+        }
+        let accesses = (class.accesses.iter())
             .map(|(offset, width, value)| {
                 let solved = (value.and_then(|value| evidence.value_type(value)))
                     .filter(|ty| {
@@ -70,33 +81,39 @@ pub(crate) fn parameter_records(
                 (*offset, *width, solved)
             })
             .collect::<Vec<_>>();
-        if accesses.is_empty() {
-            continue;
-        }
-        match layout(&accesses) {
-            Ok((definition, fields, spans, refused)) => {
+        let laid = (!accesses.is_empty()).then(|| layout(&accesses));
+        let record = match laid {
+            Some(Ok((definition, fields, spans, refused))) => {
                 for (offset, width, reason) in &refused {
                     r2il::refusal_evidence!(
                         "record-span",
-                        "{entry:#x} arg{slot}: {width}@{offset}: {reason:?}"
+                        "{entry:#x} {tag}: {width}@{offset}: {reason:?}"
                     );
                 }
-                let tag = format!("fcn_{entry:x}_arg{slot}");
-                let record = InferredRecord {
+                Some(InferredRecord {
                     tag,
                     definition,
                     fields,
                     spans,
                     refused,
-                };
-                out.insert(slot, record);
+                })
             }
-            Err(reason) => {
-                r2il::refusal_evidence!("record", "{entry:#x} arg{slot}: {reason:?}");
+            Some(Err(reason)) => {
+                r2il::refusal_evidence!("record", "{entry:#x} {tag}: {reason:?}");
+                None
             }
+            None => None,
+        };
+        if let (crate::evidence::RecordName::Parameter(slot), Some(record)) = (class.name, &record)
+        {
+            parameters.insert(slot, record.clone());
         }
+        classes.push(record);
     }
-    out
+    ClassRecords {
+        parameters,
+        classes,
+    }
 }
 
 type Laid = (

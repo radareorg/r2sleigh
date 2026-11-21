@@ -266,6 +266,22 @@ pub struct Records {
     pub definitions: BTreeMap<String, crate::AggregateDefinition>,
     /// Each parameter that points to one: its tag, members, spans and refused accesses.
     pub parameters: BTreeMap<usize, ParameterRecord>,
+    /// Every record class, `None` where refused (`Recursive`, `OneWidth`, no member).
+    pub classes: Vec<Option<ParameterRecord>>,
+    /// The class each field-based loaded pointer roots, by its load's access id, sorted.
+    pub loaded: Vec<(r2ssa::StructuredAccessId, usize)>,
+    /// How many classes a pointer field leads back to: refused as `Recursive` until D645.
+    pub recursive: usize,
+}
+
+impl Records {
+    /// The record the pointer `load` loaded points to, where one is laid out: `O(log L)`.
+    pub fn loaded(&self, load: r2ssa::StructuredAccessId) -> Option<&ParameterRecord> {
+        let at = (self.loaded)
+            .binary_search_by_key(&load, |(load, _)| *load)
+            .ok()?;
+        self.classes.get(self.loaded[at].1)?.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

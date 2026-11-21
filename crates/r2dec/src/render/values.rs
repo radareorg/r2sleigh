@@ -906,30 +906,57 @@ impl<'a> Values<'a> {
                 inferred.insert(slot, (record, definition, base));
             }
         }
-        // One pass over the places: each access through a pointing parameter, `O(A log M)`.
+        // One pass over the places: each access through a pointing parameter or a loaded pointer
+        // whose record the unit defines, `O(A log M)`.
+        let structured = &self.artifact.facts().structured;
         let places = self.artifact.certificates().places.iter();
         let cells = places.filter_map(|place| {
-            let (r2ssa::PlaceBase::Parameter(slot), r2ssa::Place::Field { offset, width }) =
-                (place.base, place.place)
-            else {
+            let r2ssa::Place::Field { offset, width } = place.place else {
                 return None;
             };
-            let (record, definition, base) = inferred.get(&slot)?;
-            let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
-            if (record
-                .refused
-                .binary_search_by_key(&(offset, width), refused))
-            .is_ok()
-            {
-                return None;
-            }
-            let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
+            let named = |record: &r2types::ParameterRecord| {
+                let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
+                if (record
+                    .refused
+                    .binary_search_by_key(&(offset, width), refused))
+                .is_ok()
+                {
+                    return None;
+                }
+                let definition = records.definitions.get(&record.tag)?;
+                let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
+                Some(name.clone())
+            };
             let cell = self.roots.access(place.access)?.canonical;
-            let member = CExpr::PtrMember {
-                base: Box::new(base.clone()),
-                member: name.clone(),
-            };
-            Some((cell, MemberCell::At(CExpr::addr_of(member))))
+            match place.base {
+                r2ssa::PlaceBase::Parameter(slot) => {
+                    let (record, _, base) = inferred.get(&slot)?;
+                    let member = CExpr::PtrMember {
+                        base: Box::new(base.clone()),
+                        member: named(record)?,
+                    };
+                    Some((cell, MemberCell::At(CExpr::addr_of(member))))
+                }
+                // A member through a loaded pointer: the variable holding the pointer, cast.
+                r2ssa::PlaceBase::Loaded(load) => {
+                    let record =
+                        (records.loaded(load)).filter(|record| tags.defines(&record.tag, false))?;
+                    let member = named(record)?;
+                    let result = structured.memory_accesses.get(&load)?.value?;
+                    let word = self.roots.access(load)?.canonical;
+                    let pointer = CType::Pointer(Box::new(CType::Struct(record.tag.clone())));
+                    Some((
+                        cell,
+                        MemberCell::Through {
+                            pointer,
+                            member,
+                            result,
+                            word,
+                        },
+                    ))
+                }
+                _ => None,
+            }
         });
         let cells = cells.collect::<Vec<_>>();
         if !cells.is_empty() {

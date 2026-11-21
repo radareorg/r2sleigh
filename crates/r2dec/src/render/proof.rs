@@ -80,7 +80,7 @@ fn proof_columns(
 type Clauses<'a> = (
     &'a ProofClauses,
     ((bool, bool), &'a [Disputed]),
-    usize,
+    (usize, usize, usize),
     &'a [String],
     &'a [(usize, r2types::PointerRefusal)],
 );
@@ -230,6 +230,27 @@ pub(crate) fn note_unproven_constructs(
             &mut detail,
             "; tag `{tag}` is stated as both a struct and a union, so a pointer to it is spelled at its class"
         );
+    }
+    let (laid_out, through_loaded, recursive) = laid_out;
+    match through_loaded {
+        0 => {}
+        1 => detail.push_str("; 1 structure laid out from a loaded pointer's accesses"),
+        n => {
+            let _ = write!(
+                &mut detail,
+                "; {n} structures laid out from loaded pointers' accesses"
+            );
+        }
+    }
+    match recursive {
+        0 => {}
+        1 => detail.push_str("; 1 record refused: a pointer field leads back to it (Recursive)"),
+        n => {
+            let _ = write!(
+                &mut detail,
+                "; {n} records refused: a pointer field leads back to each (Recursive)"
+            );
+        }
     }
     match laid_out {
         0 => {}

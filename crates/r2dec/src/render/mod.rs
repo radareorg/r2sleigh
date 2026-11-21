@@ -164,7 +164,15 @@ fn open_proof_line(
                 (input.open_second_result(), input.integer_lane_unread_only()),
                 &input.body_disputed_lanes(),
             ),
-            input.records().definitions.len(),
+            {
+                let records = input.records();
+                let laid = records.classes.iter().flatten().count();
+                (
+                    records.parameters.len(),
+                    laid - records.parameters.len(),
+                    records.recursive,
+                )
+            },
             &tags.conflicting(),
             &input.unproven_parameters(),
         ),

@@ -216,6 +216,12 @@ DecBench at the head: typed address sites 4,721 to 14,207 (+9,486); loads 34,819
 
 Not built here: `certified_parameter_pointers` reads the records and stays a second owner (D74 held). A local copy needs no declaration: it is spelled through the parameter.
 
+### D644: loaded pointer records
+
+The solver keeps, per class, its pointer fields: offset to a node every value loaded from that field joins (`pointer_field`); a union merges the smaller field map into the larger and joins colliding pointees through a pending queue, so each union is one fewer class, `O((V + A) α(V) + A log A)`. A field is a pointer field when the value loaded from it bases another access. Only field-based pointers take part: a load is a record base when its own place is a field of a parameter or of another field-based pointer (`field_based`, one pass, `O(A)`); a pointer loaded from a frame slot, a global or an unplaced address joins nothing (invariant 3; no reaching store join is built). A class whose pointer fields lead back to it (Tarjan over the record classes) is refused `Recursive`, named on the proof line; D645 admits the cycles a phi closes. A class is named by its lowest parameter slot (`fcn_<entry>_arg<slot>`), else by its lowest accessing instruction (`fcn_<entry>_at_<addr>`). r2dec spells a member through a loaded pointer as `&((struct T *)q)->f_K`, `q` the variable holding the loaded word (`MemberCell::Through`, as D359 does); no local's declaration changes. The address is `q + K` by the printed layout whatever `q` points at, so a wrong join costs refused accesses, never a wrong address; the cast asserts `struct T`'s alignment, the premise already listed (Premises 1).
+
+DecBench from D643's head: typed address sites 14,207 to 20,401 (+6,194); loads, stores and residual sites 0 functions moved. 272 records laid out through loaded pointers; 2 records refused `Recursive` (diffutils diff O2-noinline 0xc290 loses its parameter record, 31 sites back to byte arithmetic; one more function). 301 functions move: member addresses through a cast 6,225 lines, struct definitions 3,929, proof lines 300, the 32 lines of 0xc290's refusal, and in find O2 0xa990 and O2-noinline 0xbde0 2 lines each where D470's text renaming reuses `rbx_1` once the addresses no longer read it. 2,658 `offsetof` assertions hold; compile errors 2 before and after. Goldens 500 of 500 unchanged.
+
 ## As built: frame objects (D654, D655)
 
 Open.
