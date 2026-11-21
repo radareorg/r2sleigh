@@ -885,7 +885,7 @@ impl<'a> Values<'a> {
         if !self.little_endian {
             return members;
         }
-        let fields = &self.artifact.certificates().parameter_fields;
+        let places = &self.artifact.certificates().places;
         let through = self.accesses_by_parameter(&pointing);
         for (slot, tag, base, stated) in pointing {
             if let Some(cells) = stated
@@ -906,7 +906,7 @@ impl<'a> Values<'a> {
             ) else {
                 continue;
             };
-            let Some(r2ssa::ParameterFields::Constant(accesses)) = fields.get(&key) else {
+            let Some(r2ssa::ParameterReach::Fields(accesses)) = places.parameter(key) else {
                 continue;
             };
             let cells = accesses.iter().map(|access| {

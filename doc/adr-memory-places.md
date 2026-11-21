@@ -187,13 +187,13 @@ The loaded pointer class (11,041 parsed sites). An access is based on a loaded p
 | an indexed parameter or pointee address | 25 | `Element` (D649) |
 | no load root (a merge of two pointers, or an index) | 1,391 with a pointee expression, 19,246 without | none |
 
-D644's pin: at most 7,081 accesses join by field, 292 more only through a proven reaching store.
+D644's pin is in engine accesses, not `pdd` sites: at most 7,081 accesses join by field, 292 more only through a proven reaching store. A promoted or folded access prints no site, so the `pdd` count D644 grades sits below these.
 
 Readers of `PointeeObjectKey` equality as must alias (invariant 10):
 
-1. `build_memory_ssa` (`semantic/objects.rs`): accesses of one pointee object at one offset are one location. Refused as a proof of same content: a pointer loaded before a write that re-points its field and dereferenced after a second load of the same field shares the key, and no version tells them apart (`p1 = a->f; f(); p2 = a->f; p2->x = v; y = p1->x` reads `v`'s version).
+1. `build_memory_ssa` (`semantic/objects.rs`): accesses of one pointee object at one offset are one location. Refused as a proof of same content (read, untested): a pointer loaded before a write that re-points its field and dereferenced after a second load of the same field shares the key, and no version tells them apart (`p1 = a->f; f(); p2 = a->f; p2->x = v; y = p1->x` reads `v`'s version).
 2. `same_content_reads` (`function/mod.rs`): two reads of one object, offset and width under the same versions hold one content. Over pointee objects, 60 DecBench pairs read through one pointer load (proven: one pointer) and 37 through two loads of one path (unproven, case 1). Refusing the 37 can change liveness and so the output; it is recorded here, and D642 keeps the builder's map.
-3. `collect_memory_round_trips` (`semantic/private_objects.rs`): keyed by the address value, not the key, so proven by value identity. Its "no other write" check reads writes of the same object only; a call between the read and the write is not one. Recorded as a found fact for its owner, not built here.
+3. `collect_memory_round_trips` (`semantic/private_objects.rs`): keyed by the address value, not the key, so proven by value identity. Its "no other write" check reads writes of the same object only; a call between the read and the write is not one. Read, untested; recorded for its owner, not built here.
 4. `backward_slice` (`slice.rs`): a diagnostic; it prints the versions and decides nothing.
 
 `ObjectId` is minted dense from 0 per function: 2,621 of 2,621 functions, 31,782 objects.
@@ -203,6 +203,8 @@ Parameter view: in 177 parameters the places alone (every access whose parameter
 ### D642: `MemoryPlaces`
 
 r2ssa `memory_places.rs`: one `AccessPlace` per structured access in `memory_accesses` order, base `Parameter`, `Loaded`, `Frame`, `Global` or `None`, place `Field`, `Element` (one positive stride with the access inside one stride) or `Unplaced` (`NotAffine`, `IndexPastStride`, `Unmodelled`, `NoBase`). `StructuredDataflowFacts::position` is the first position per instruction plus the ordinal, `O(1)`. A loaded root is a dense column over values filled once; a value on a cycle has none. `ObjectModel::objects` is a dense `ObjectTable`; `parameter_objects` and `pointee_objects` left the model (builder only); `global_objects` stays, a lookup by address. Other maps keyed by `ObjectId` or `StructuredAccessId` stay with LX. DecBench records 0 of 2,621 moved.
+
+Two deviations, recorded. `parameter_expressions` and `pointee_expressions` stay `address.rs`'s maps and feed the index; they are not yet views of it. The loaded-root column is a second affine walk beside `address.rs` (copies, constant adds, phis); D670 moves it into `address.rs` so one owner states every load-rooted affine form.
 
 ## As built: frame objects (D654, D655)
 

@@ -1097,10 +1097,14 @@ mod tests {
             .objects()
             .object_for_value(value("tmp:1000:30"), SpaceId::Ram)
             .expect("pointee object");
-        assert_eq!(
-            artifact.objects().access_path(object).as_deref(),
-            Some("*(arg0 + 0x38)")
-        );
+        assert!(matches!(
+            artifact.objects().object(object).map(|fact| &fact.kind),
+            Some(crate::ObjectKind::Pointee {
+                offset: 0x38,
+                size: 8,
+                ..
+            })
+        ));
         assert_eq!(artifact.objects().root_parameter(object), Some(0));
     }
 

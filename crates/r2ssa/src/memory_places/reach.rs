@@ -1,53 +1,23 @@
-//! What each parameter's pointee is read as: its constant-offset fields, or the first access
-//! that is not one (doc/adr-aggregates.md).
+//! The memory operations a parameter's value reaches, read against the places (doc/adr-aggregates.md).
 
-use super::*;
+use std::collections::BTreeMap;
 
-/// One certified access a parameter's value addresses, at a constant offset from it; ordered by
-/// offset, then width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ParameterFieldAccess {
-    pub offset: i64,
-    pub width: u32,
-    pub access: StructuredAccessId,
-    pub value: Option<ValueId>,
-    pub is_write: bool,
-}
+use r2il::SpaceId;
 
-/// Why a memory operation a parameter reaches is no constant field of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ParameterFieldRefusal {
-    /// No certificate covers the operation, so the layout would miss what it reads.
-    Uncertified,
-    /// Its address adds a variable to the parameter: an element, not a field.
-    Indexed,
-    /// Its address is not affine in the parameter, as through a merge of two offsets.
-    NotAffine,
-    /// A linked, guarded, atomic or block access, which a layout of plain fields does not model.
-    Unmodelled,
-}
+use super::{MemoryPlaces, ParameterReach, Place, PlaceBase, ReachedField};
+use crate::graph::{InstId, InstPayload};
+use crate::semantic::{SourceBoundaryFacts, StackReloadSourceCertificate, StructuredDataflowFacts};
+use crate::{SSAOp, SsaGraph, ValueId};
 
-/// Every memory operation a parameter's value reaches, as constant fields, or the first one that
-/// is not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParameterFields {
-    Constant(Vec<ParameterFieldAccess>),
-    Refused {
-        inst: InstId,
-        reason: ParameterFieldRefusal,
-    },
-}
-
-/// Each formal's pointee fields. Reach runs through every operation and merge P feeds and its
-/// home's reloads, and ends at a load's output, a new root; each value is expanded once.
-pub(crate) fn collect_parameter_fields(
+/// Each formal's reach. It runs through every operation and merge P feeds and its home's
+/// reloads, and ends at a load's output, a new base; each value is expanded once.
+pub(super) fn parameters(
+    places: &MemoryPlaces,
     graph: &SsaGraph,
     boundaries: &SourceBoundaryFacts,
-    addresses: &crate::AddressProvenanceFacts,
+    structured: &StructuredDataflowFacts,
     stack_reloads: &crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
-    memory_accesses: &BTreeMap<StructuredAccessId, MemoryAccessCertificate>,
-    memory_accesses_by_inst: &crate::dense::IdMap<InstId, ByDirection<Vec<StructuredAccessId>>>,
-) -> BTreeMap<u32, ParameterFields> {
+) -> BTreeMap<u32, ParameterReach> {
     let mut reloads_of = crate::dense::IdMap::<ValueId, Vec<ValueId>>::default();
     for reload in stack_reloads.values() {
         if reload.relation == crate::view::ViewRelation::Identity
@@ -65,14 +35,7 @@ pub(crate) fn collect_parameter_fields(
         if operations.is_empty() {
             continue;
         }
-        let fields = fields_of(
-            *slot,
-            &operations,
-            addresses,
-            memory_accesses,
-            memory_accesses_by_inst,
-        );
-        out.insert(*slot, fields);
+        out.insert(*slot, fields_of(*slot, &operations, places, structured));
     }
     out
 }
@@ -141,48 +104,65 @@ fn reached_memory_operations(
     operations
 }
 
+/// The reached operations' places as fields of `slot`, or the first that is not one.
 fn fields_of(
     slot: u32,
     operations: &[(InstId, Reached)],
-    addresses: &crate::AddressProvenanceFacts,
-    memory_accesses: &BTreeMap<StructuredAccessId, MemoryAccessCertificate>,
-    memory_accesses_by_inst: &crate::dense::IdMap<InstId, ByDirection<Vec<StructuredAccessId>>>,
-) -> ParameterFields {
+    places: &MemoryPlaces,
+    structured: &StructuredDataflowFacts,
+) -> ParameterReach {
     let mut fields = Vec::new();
     for &(inst, reached) in operations {
-        let refused = |reason| ParameterFields::Refused { inst, reason };
         let is_write = match reached {
             Reached::Read => false,
             Reached::Write => true,
-            Reached::Unmodelled => return refused(ParameterFieldRefusal::Unmodelled),
+            Reached::Unmodelled => {
+                return ParameterReach::Refused {
+                    inst,
+                    base: PlaceBase::Parameter(slot),
+                    place: Some(Place::Unplaced(super::Unplaced::Unmodelled)),
+                };
+            }
         };
-        let ids =
-            (memory_accesses_by_inst.get(inst)).map_or(&[][..], |ids| ids.get(is_write).as_slice());
-        let certified = ids.iter().filter_map(|id| memory_accesses.get(id));
         let mut any = false;
-        for certificate in certified {
+        for access in structured.accesses_at(inst) {
+            if access.is_write != is_write {
+                continue;
+            }
             any = true;
-            let Some(expression) = addresses.parameter_expression(certificate.address) else {
-                return refused(ParameterFieldRefusal::NotAffine);
+            let Some(placed) = (structured.position(access.id)).and_then(|at| places.at(at)) else {
+                return ParameterReach::Refused {
+                    inst,
+                    base: PlaceBase::None,
+                    place: None,
+                };
             };
-            if usize::try_from(slot) != Ok(expression.parameter) {
-                return refused(ParameterFieldRefusal::NotAffine);
+            match (placed.base, placed.place) {
+                (PlaceBase::Parameter(base), Place::Field { offset, width }) if base == slot => {
+                    fields.push(ReachedField {
+                        offset,
+                        width,
+                        access: access.id,
+                        value: access.value,
+                    });
+                }
+                (base, place) => {
+                    return ParameterReach::Refused {
+                        inst,
+                        base,
+                        place: Some(place),
+                    };
+                }
             }
-            if !expression.terms.is_empty() {
-                return refused(ParameterFieldRefusal::Indexed);
-            }
-            fields.push(ParameterFieldAccess {
-                access: certificate.access,
-                offset: expression.offset,
-                width: certificate.width,
-                value: certificate.value,
-                is_write,
-            });
         }
         if !any {
-            return refused(ParameterFieldRefusal::Uncertified);
+            return ParameterReach::Refused {
+                inst,
+                base: PlaceBase::None,
+                place: None,
+            };
         }
     }
     fields.sort();
-    ParameterFields::Constant(fields)
+    ParameterReach::Fields(fields)
 }

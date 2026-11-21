@@ -2,7 +2,6 @@
 
 mod call_results;
 mod expressions;
-mod fields;
 mod returns;
 mod shared;
 pub(crate) use shared::exact_copy_chain_to_entry_storage;
@@ -10,7 +9,6 @@ mod stack;
 
 pub use call_results::*;
 pub(crate) use expressions::*;
-pub use fields::*;
 pub use returns::*;
 pub use shared::*;
 pub use stack::*;
@@ -458,8 +456,8 @@ pub struct PreparedFunctionCertificates {
     pub stack_reloads: crate::dense::IdMap<ValueId, StackReloadSourceCertificate>,
     pub returns: Vec<ReturnValueCertificate>,
     pub returns_by_inst: crate::dense::IdMap<InstId, usize>,
-    /// What each formal's pointee is read as (doc/adr-aggregates.md).
-    pub parameter_fields: BTreeMap<u32, ParameterFields>,
+    /// Each access's base and place, and what each formal reaches (doc/adr-memory-places.md).
+    pub places: crate::MemoryPlaces,
 }
 
 /// Remove the certified byte stride from one offset without manufacturing a
@@ -1348,14 +1346,8 @@ pub(crate) fn collect_prepared_function_certificates(
     let (returns, returns_by_inst) =
         collect_return_value_certificates(boundaries, graph, machine_context, &stack_reloads);
     let compiler_inserted = unobserved_compiler_inserted(function, graph, &returns);
-    let parameter_fields = collect_parameter_fields(
-        graph,
-        boundaries,
-        addresses,
-        &stack_reloads,
-        &memory_accesses,
-        &memory_accesses_by_inst,
-    );
+    let places = crate::MemoryPlaces::collect(graph, addresses, objects, structured)
+        .with_parameters(graph, boundaries, structured, &stack_reloads);
 
     Ok(PreparedFunctionCertificates {
         loops,
@@ -1387,7 +1379,7 @@ pub(crate) fn collect_prepared_function_certificates(
         stack_reloads,
         returns,
         returns_by_inst,
-        parameter_fields,
+        places,
     })
 }
 

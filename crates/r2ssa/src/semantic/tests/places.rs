@@ -1,7 +1,7 @@
-//! What a parameter's pointee is read as (doc/adr-aggregates.md).
+//! Each access's base and place, and what a parameter's value reaches (doc/adr-memory-places.md).
 
 use super::*;
-use crate::semantic::{ParameterFieldRefusal, ParameterFields};
+use crate::{ParameterReach, Place, PlaceBase, Unplaced};
 
 const RDI: u64 = 8;
 const SP: u64 = 32;
@@ -66,16 +66,20 @@ fn returned(block: &mut R2ILBlock) {
     });
 }
 
-fn offsets(fields: Option<&ParameterFields>) -> Option<Vec<(i64, u32)>> {
-    match fields? {
-        ParameterFields::Constant(accesses) => Some(
+fn offsets(reach: Option<&ParameterReach>) -> Option<Vec<(i64, u32)>> {
+    match reach? {
+        ParameterReach::Fields(accesses) => Some(
             accesses
                 .iter()
                 .map(|access| (access.offset, access.width))
                 .collect(),
         ),
-        ParameterFields::Refused { .. } => None,
+        ParameterReach::Refused { .. } => None,
     }
+}
+
+fn reach(artifact: &SsaArtifact) -> Option<&ParameterReach> {
+    artifact.certificates().places.parameter(0)
 }
 
 /// `-O0` spills the parameter to its home and reloads it for each field.
@@ -106,10 +110,10 @@ fn a_spilled_parameter_s_constant_offsets_are_its_fields() {
     let artifact = parameter_artifact(vec![block]);
 
     assert_eq!(
-        offsets(artifact.certificates().parameter_fields.get(&0)),
+        offsets(reach(&artifact)),
         Some(vec![(0, 1), (2, 2), (4, 4), (8, 8)]),
         "{:?}",
-        artifact.certificates().parameter_fields
+        artifact.certificates().places
     );
 }
 
@@ -126,10 +130,7 @@ fn a_followed_pointer_field_is_a_field_and_its_pointee_is_not() {
     returned(&mut block);
     let artifact = parameter_artifact(vec![block]);
 
-    assert_eq!(
-        offsets(artifact.certificates().parameter_fields.get(&0)),
-        Some(vec![(0, 4), (8, 8)])
-    );
+    assert_eq!(offsets(reach(&artifact)), Some(vec![(0, 4), (8, 8)]));
 }
 
 /// A loop that walks `p += 8` reaches its accesses through a merge of two offsets.
@@ -162,14 +163,14 @@ fn a_walked_parameter_has_no_fields() {
 
     assert!(
         matches!(
-            artifact.certificates().parameter_fields.get(&0),
-            Some(ParameterFields::Refused {
-                reason: ParameterFieldRefusal::NotAffine | ParameterFieldRefusal::Indexed,
+            reach(&artifact),
+            Some(ParameterReach::Refused {
+                place: None | Some(Place::Unplaced(_) | Place::Element { .. }),
                 ..
             })
         ),
         "{:?}",
-        artifact.certificates().parameter_fields
+        artifact.certificates().places
     );
 }
 
@@ -193,10 +194,52 @@ fn a_linked_load_from_the_parameter_refuses_its_fields() {
     let artifact = parameter_artifact(vec![block]);
 
     assert!(matches!(
-        artifact.certificates().parameter_fields.get(&0),
-        Some(ParameterFields::Refused {
-            reason: ParameterFieldRefusal::Unmodelled,
+        reach(&artifact),
+        Some(ParameterReach::Refused {
+            place: Some(Place::Unplaced(Unplaced::Unmodelled)),
             ..
         })
     ));
+}
+
+/// `mov rax,[rdi+0x38]; mov ecx,[rax+8]`: the second access's base is the first, at `Field{8,4}`.
+#[test]
+fn the_access_through_a_loaded_pointer_states_a_place() {
+    let mut block = R2ILBlock::new(0x1000, 4);
+    let field = at(test_reg(RDI), 0x38, 0x10, &mut block);
+    let pointer = load(&mut block, field, 8, 0x18);
+    let inner = at(pointer, 8, 0x20, &mut block);
+    load(&mut block, inner, 4, 0x28);
+    returned(&mut block);
+    let artifact = parameter_artifact(vec![block]);
+
+    let places = artifact.certificates().places.iter().collect::<Vec<_>>();
+    let [first, second] = places.as_slice() else {
+        panic!("two accesses: {places:?}");
+    };
+    assert_eq!(
+        (first.base, first.place),
+        (
+            PlaceBase::Parameter(0),
+            Place::Field {
+                offset: 0x38,
+                width: 8
+            }
+        )
+    );
+    assert_eq!(
+        (second.base, second.place),
+        (
+            PlaceBase::Loaded(first.access),
+            Place::Field {
+                offset: 8,
+                width: 4
+            }
+        )
+    );
+    let position = artifact.facts().structured.position(second.access);
+    assert_eq!(
+        position.and_then(|at| artifact.certificates().places.at(at)),
+        Some(*second)
+    );
 }

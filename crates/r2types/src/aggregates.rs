@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use r2ssa::{ParameterFieldAccess, ParameterFields};
+use r2ssa::{ParameterReach, ReachedField};
 
 use crate::{AggregateDefinition, CTypeLike, EvidenceTypes, Signedness};
 
@@ -38,18 +38,18 @@ pub(crate) fn parameter_aggregates(
         .memory_model()
         .default_address_bits();
     let mut out = BTreeMap::new();
-    for (slot, fields) in &source.certificates().parameter_fields {
-        let accesses = match fields {
-            ParameterFields::Constant(accesses) => accesses,
-            ParameterFields::Refused { inst, reason } => {
+    for (slot, reach) in source.certificates().places.parameters() {
+        let accesses = match reach {
+            ParameterReach::Fields(accesses) => accesses,
+            ParameterReach::Refused { inst, base, place } => {
                 r2il::refusal_evidence!(
                     "aggregate",
-                    "{entry:#x} arg{slot}: {reason:?} at {inst:?}"
+                    "{entry:#x} arg{slot}: {base:?} {place:?} at {inst:?}"
                 );
                 continue;
             }
         };
-        let Ok(slot) = usize::try_from(*slot) else {
+        let Ok(slot) = usize::try_from(slot) else {
             continue;
         };
         match layout(accesses, evidence, ptr_bits) {
@@ -75,7 +75,7 @@ pub(crate) fn parameter_aggregates(
 /// The members C lays out at the accessed offsets: each field at its offset, the bytes between
 /// two fields an explicit pad. `accesses` is sorted by offset, then width.
 fn layout(
-    accesses: &[ParameterFieldAccess],
+    accesses: &[ReachedField],
     evidence: &EvidenceTypes,
     ptr_bits: u32,
 ) -> Result<(AggregateDefinition, BTreeMap<i64, usize>), LayoutRefusal> {
