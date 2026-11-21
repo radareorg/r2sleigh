@@ -102,3 +102,41 @@ fn a_byte_switch_names_each_case_as_the_byte_holds_it() {
         assert_eq!(c.matches(&format!("case {value}:")).count(), 1, "{c}");
     }
 }
+
+/// 0pack 0x673f25's dispatch (D648): `sub dil, 0x73; js default` clears the byte's top bit, so the
+/// `movzx` index reads 128 entries; the words past them belong to no arm of this table.
+fn sign_bounded_dispatch() -> &'static [u8] {
+    let mut code = vec![
+        0x40, 0x80, 0xef, 0x73, // 1000 sub dil, 0x73
+        0x78, 0x20, // 1004 js 0x1026
+        0x48, 0x8d, 0x0d, 0x23, 0x00, 0x00, 0x00, // 1006 lea rcx, [0x1030]
+        0x40, 0x0f, 0xb6, 0xff, // 100d movzx edi, dil
+        0x48, 0x63, 0x04, 0xb9, // 1011 movsxd rax, dword [rcx + rdi*4]
+        0x48, 0x01, 0xc8, 0xff, 0xe0, // 1015 add rax, rcx; jmp rax
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // 101a even arms: mov eax, 1; ret
+        0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3, // 1020 odd arms: mov eax, 2; ret
+        0x31, 0xc0, 0xc3, // 1026 default: xor eax, eax; ret
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1029 padding
+    ];
+    for arm in 0..128 {
+        let offset: i32 = if arm % 2 == 0 { -0x16 } else { -0x10 };
+        code.extend_from_slice(&offset.to_le_bytes());
+    }
+    // Another table's words follow, as at 0x7604c0: entry 128 would send control into this one.
+    code.extend_from_slice(&[0u8; 512]);
+    Box::leak(code.into_boxed_slice())
+}
+
+#[test]
+fn a_sign_test_on_a_byte_bounds_its_zero_extended_index() {
+    let code = sign_bounded_dispatch();
+    let size = 0x30;
+    let mut program = OpenProgram::of(Literal::of_code(code, &[("f", BASE, size)]));
+    let c = (program.rendered(BASE).expect("it renders"))
+        .response
+        .output
+        .into_text();
+    assert_eq!(c.matches("switch (").count(), 1, "{c}");
+    assert_eq!(c.matches("case ").count(), 128, "{c}");
+    assert!(!c.contains("case 128:") && !c.contains("case 128U:"), "{c}");
+}
