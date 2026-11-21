@@ -14,6 +14,7 @@ mod call_tables;
 mod chain_switch;
 mod control;
 mod conventions;
+mod declared_data;
 mod declared_types;
 mod default_deny;
 mod degraded;

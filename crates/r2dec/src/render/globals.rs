@@ -84,7 +84,7 @@ impl<'a> Globals<'a> {
                     .zip(declared.clone())
                     .map(|(fact, ty)| DataObjectTypeFact {
                         ty,
-                        provenance: fact.provenance,
+                        provenance: fact.provenance.clone(),
                     }),
                 type_refusal: self.types.refused().get(&address).cloned(),
             });

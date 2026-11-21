@@ -157,7 +157,18 @@ Gates: equivalence on x86-64 and aarch64, certification, the census with each mo
 
 ## As built: gate and declared objects (D640, D653, D656, D657, D659)
 
-Open.
+D640: `scripts/memory_sites.py` counts body sites from `pddj` records; at the base it prints loads 34,819,
+stores 20,361, residual sites 7,282 and typed address sites 4,721.
+
+D653: statement 1 is the loader's own write. `WriteKind::Copy` carries the copied symbol where the
+symbol states a size, so the write's width is that size. r2engine binds a row only where that write
+sits at the object's address and names the same symbol, and interns the row's type into the
+function's object graph after debug information's (`Interned::then`), keeping it only at the
+copy's width. The citation travels on `SourceDataObject` to `DataObjectTypeProvenance::Library`, and
+the proof line counts it. `optarg` and `optind` are built; `FILE *` objects wait on r2dec declaring
+`struct _IO_FILE` for a data object.
+
+Open: D656, D657, D659.
 
 ## As built: places and records (D641 to D645, D649, D652)
 

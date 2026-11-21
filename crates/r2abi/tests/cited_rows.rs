@@ -590,3 +590,29 @@ fn the_rows_a_header_states_are_cited_where_they_bind() {
     assert!(count("types-linux.sdb.txt,") <= 3);
     assert!(count("types-cxx.sdb.txt,") <= 42);
 }
+
+/// Each data object row cites the header line that declares it, and binds only in its library.
+#[test]
+fn every_object_row_cites_its_header_line() {
+    let text = table("objects.txt");
+    let rows = (text.lines().map(str::trim))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    assert!(rows.len() >= 5, "{rows:?}");
+    for row in &rows {
+        let fields = row.split('|').map(str::trim).collect::<Vec<_>>();
+        assert_eq!(fields.len(), 4, "{row}");
+        assert!(fields[3].contains(".h:"), "{row}");
+    }
+    let glibc = LibraryRows::embedded(CLibrary::Glibc);
+    assert!(
+        glibc
+            .object("stderr")
+            .is_some_and(|row| row.citation.contains("stdio.h:151"))
+    );
+    assert!(
+        LibraryRows::embedded(CLibrary::Musl)
+            .object("stderr")
+            .is_none()
+    );
+}

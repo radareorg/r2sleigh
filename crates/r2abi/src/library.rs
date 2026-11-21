@@ -244,6 +244,15 @@ pub struct LibraryRows {
     graph: TypeGraph,
     prototypes: Vec<Prototype>,
     rows: BTreeMap<LibraryId, BTreeMap<Box<str>, LibraryRow>>,
+    /// The data objects this C library's headers declare, by name (`data/objects.txt`).
+    objects: BTreeMap<Box<str>, ObjectRow>,
+}
+
+/// The type a C library's header declares one data object at, and the line it cites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectRow {
+    pub ty: crate::TypeId,
+    pub citation: Box<str>,
 }
 
 const PORTABLE: &str = include_str!("../data/types.sdb.txt");
@@ -263,6 +272,8 @@ const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
 const UCRT: &str = include_str!("../data/types-ucrt.sdb.txt");
 /// Whether a mangled member takes `this` where its name leaves it open, by the header declaring it.
 const CXX_OBJECTS: &str = include_str!("../data/cxx-objects.txt");
+/// The type each C library's header declares a data object at, with the line (D653).
+const OBJECTS: &str = include_str!("../data/objects.txt");
 
 /// One embedded table: whose rows, whether each row cites its source, and the text.
 struct Embedded {
@@ -320,6 +331,7 @@ impl Default for LibraryRows {
             graph: TypeGraph::default(),
             prototypes: Vec::new(),
             rows: BTreeMap::new(),
+            objects: BTreeMap::new(),
         }
     }
 }
@@ -359,8 +371,41 @@ impl LibraryRows {
         for embedded in shared.iter().chain(own) {
             rows.read_text(embedded, embedded.text);
         }
+        rows.read_objects(library);
         rows.quotient();
         rows
+    }
+
+    /// `library`'s `data/objects.txt` rows, each type read into this table's graph. O(lines).
+    fn read_objects(&mut self, library: CLibrary) {
+        for line in OBJECTS.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let [of, name, spelling, citation] =
+                line.split('|').map(str::trim).collect::<Vec<_>>()[..]
+            else {
+                continue;
+            };
+            let of = match of {
+                "glibc" => CLibrary::Glibc,
+                "bionic" => CLibrary::Bionic,
+                "musl" => CLibrary::Musl,
+                "libsystem" => CLibrary::LibSystem,
+                _ => continue,
+            };
+            if of != library || !citation.contains(".h") {
+                continue;
+            }
+            let ty = crate::spelling::read(spelling, &mut self.graph, &self.reading);
+            let citation = citation.into();
+            self.objects.insert(name.into(), ObjectRow { ty, citation });
+        }
+    }
+
+    /// The type this C library's header declares the data object `name` at.
+    pub fn object(&self, name: &str) -> Option<&ObjectRow> {
+        self.objects.get(name)
     }
 
     /// One uncited table's rows under `library`, for a test that states its own.
@@ -393,6 +438,7 @@ impl LibraryRows {
     fn quotient(&mut self) {
         let classes = self.graph.quotient();
         (self.prototypes.iter_mut()).for_each(|prototype| prototype.retype(&classes));
+        (self.objects.values_mut()).for_each(|object| object.ty = classes[object.ty.index()]);
     }
 
     /// The parameters only: a mangled name states no result, so the return type is refused.

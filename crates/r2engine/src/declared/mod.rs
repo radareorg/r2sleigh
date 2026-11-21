@@ -115,15 +115,60 @@ pub(crate) fn import_call(target: &NativeTarget<'_>) -> Option<r2ssa::call_reads
     Some(r2ssa::call_reads::ImportCall::cited(count))
 }
 
-/// Debug information's types for data objects, as one graph and a node per object.
+/// Who states a data object's type: the binary's debug information, or a library's row the
+/// loader's copy binds, at the copy's width.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ObjectType<'a> {
+    Debug(TypeId),
+    Library {
+        row: &'a r2abi::ObjectRow,
+        bytes: u64,
+    },
+}
+
+/// The library row for the object at `address`, where three statements agree (ADR invariant 12):
+/// the loader copies the symbol `name` there, the image's C library declares `name`, and the
+/// copy's width is the type's ([`object_types`] checks it). The name alone binds nothing. O(log W).
+pub(crate) fn copied_object<'a>(
+    target: &NativeTarget<'a>,
+    writes: &[crate::program::LoaderWrite],
+    address: u64,
+    name: &str,
+) -> Option<ObjectType<'a>> {
+    let write = r2abi::statement::write_at(writes, address)?;
+    let r2abi::statement::WriteKind::Copy {
+        symbol: Some(symbol),
+    } = &write.kind
+    else {
+        return None;
+    };
+    let row = (write.place == address && symbol == name)
+        .then(|| target.imports.rows().object(name))??;
+    Some(ObjectType::Library {
+        row,
+        bytes: write.width,
+    })
+}
+
+/// The stated types of data objects, as one graph and a node per object: debug information's
+/// first, then the library rows', each only at the width its copy holds.
 pub(crate) fn object_types(
     target: &NativeTarget<'_>,
-    types: &[Option<TypeId>],
+    types: &[Option<ObjectType<'_>>],
 ) -> (Vec<Option<u32>>, Option<r2source::SourceTypeGraph>) {
     let mut interned = Interned::new(target.declarations.graph(), model_of(target));
-    let nodes = (types.iter())
-        .map(|ty| ty.and_then(|ty| interned.node(ty)))
+    let mut nodes = (types.iter())
+        .map(|ty| match ty {
+            Some(ObjectType::Debug(ty)) => interned.node(*ty),
+            _ => None,
+        })
         .collect::<Vec<_>>();
+    let mut interned = interned.then(target.imports.rows().graph());
+    for (node, ty) in nodes.iter_mut().zip(types) {
+        if let Some(ObjectType::Library { row, bytes }) = ty {
+            *node = interned.sized(row.ty, *bytes);
+        }
+    }
     match nodes.iter().any(Option::is_some) {
         true => (nodes, interned.finish()),
         false => (nodes, None),
