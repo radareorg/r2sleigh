@@ -189,10 +189,8 @@ fn dynamic_image(tags: &[(u64, u64)]) -> Vec<u8> {
     out
 }
 
-/// A static PIE (rust_nonnull_x86_64's shape): `PT_DYNAMIC` for its own relative records, no
-/// interpreter, no `DT_NEEDED`, and `DF_1_PIE` (binutils `elf/common.h` 0x08000000): only its
-/// start-up builds it. Without the flag (`rust_nonnull_nopie`) nothing states it either way;
-/// `DT_NEEDED` or `DT_SONAME` states another image's loader.
+/// A static PIE (rust_nonnull_x86_64) states static; without `DF_1_PIE` (rust_nonnull_nopie) nothing
+/// is stated; `DT_NEEDED` or `DT_SONAME` states another loader (ROADMAP D663).
 #[test]
 fn static_is_what_the_interpreter_and_the_dynamic_table_state() {
     let stated = |tags: &[(u64, u64)]| posture(&dynamic_image(tags)).statically_linked;

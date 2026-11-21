@@ -74,9 +74,8 @@ fn of<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, 
     posture
 }
 
-/// Whether only the image's own start-up builds it. No interpreter means none does (gABI "Program
-/// Interpreter"); `DF_1_PIE` without `DT_NEEDED` is a static PIE (binutils `elf/common.h`).
-/// `dynamic` is `None` with no `PT_DYNAMIC`, `Some(false)` where its table is unreadable.
+/// Whether only the image's own start-up builds it (ROADMAP D663); `dynamic` is `None` with no
+/// `PT_DYNAMIC`, `Some(false)` where its table is unreadable.
 fn linked_alone(
     interpreter: bool,
     dynamic: Option<bool>,

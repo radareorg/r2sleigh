@@ -251,16 +251,8 @@ fn ordinal_dylib(
 /// identification bytes and the type, machine and version fields.
 const ELF_ENTRY_FIELD: u64 = 0x18;
 
-/// Every function an initialiser or terminator array names, as the container states the array.
-///
-/// Found by the section's stated type -- ELF's `SHT_INIT_ARRAY`,
-/// `SHT_FINI_ARRAY` and `SHT_PREINIT_ARRAY`, Mach-O's
-/// `S_MOD_INIT_FUNC_POINTERS` and `S_MOD_TERM_FUNC_POINTERS` -- never by its
-/// name, and by the dynamic table's `DT_*_ARRAY` tags, which the loader reads
-/// where no section header remains. Each slot is read as the loader leaves it:
-/// a rebased pointer is the address the container states it writes there,
-/// which a PIE linked without applying its relocations does not hold in the
-/// file at all. `O(n log n)` in slots.
+/// Every function an initialiser array names, by section type or `DT_*_ARRAY` tag (never by name),
+/// each slot read as the loader leaves it (ROADMAP D662). `O(n log n)` in slots.
 fn initialisers(
     sections: &[Section],
     dynamic: Vec<loader::DynamicArray>,

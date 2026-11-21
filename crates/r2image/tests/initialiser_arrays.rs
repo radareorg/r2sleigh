@@ -12,9 +12,8 @@ const DT_PREINIT_ARRAY: u64 = 32;
 const DT_PREINIT_ARRAYSZ: u64 = 33;
 const DT_DEBUG: u64 = 21;
 
-/// An `ET_EXEC` with one read, write and execute `PT_LOAD` and a `PT_DYNAMIC`: `ret` at 0x200,
-/// 0x210, 0x220 and 0x230; the init array at 0x300 (two slots), fini at 0x310, preinit at 0x318.
-/// `tags` is the dynamic table; with `init_section`, a section header states the init array too.
+/// An `ET_EXEC` with `ret` at 0x200 to 0x230 and the arrays at 0x300 (init, two slots), 0x310 (fini),
+/// 0x318 (preinit); `tags` is its dynamic table, `init_section` adds `.init_array`'s header.
 fn image(tags: &[(u64, u64)], init_section: bool) -> Vec<u8> {
     let mut out = vec![0u8; 0x400];
     for code in [0x200, 0x210, 0x220, 0x230] {
