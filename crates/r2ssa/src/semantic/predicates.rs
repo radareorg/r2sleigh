@@ -125,7 +125,8 @@ pub(crate) fn collect_compare_defs(
     // A compared operand is named by its copy class: the values with its bits
     // at its width, as the one identity fact states them.
     let views = prep.map(|facts| &facts.views);
-    let operand = |value: ValueId| crate::view::class_value(graph, views, value);
+    let class = |value: ValueId| crate::view::class_value(graph, views, value);
+    let operand = |value: ValueId| compared_operand(graph, value, class);
     let constant = |value: ValueId| graph.var(value).constant_bits();
     let mut sub_sources = SourcePairs::new(len);
     let mut signed_overflow_sources = SourcePairs::new(len);
@@ -197,6 +198,23 @@ pub(crate) fn collect_compare_defs(
         normalized,
         evaluated,
     }
+}
+
+/// The value a comparison reads: `x & x` and `x | x` are `x` for every bit pattern (idempotence),
+/// so where both inputs are one class they name it, else `value`'s class. `O(1)`, D604.
+pub(crate) fn compared_operand(
+    graph: &SsaGraph,
+    value: ValueId,
+    class: impl Fn(ValueId) -> ValueId,
+) -> ValueId {
+    let idempotent =
+        (graph.def_inst(value).and_then(|inst| graph.op(inst))).and_then(|op| match *op {
+            SSAOp::IntAnd { a, b, .. } | SSAOp::IntOr { a, b, .. } if class(a) == class(b) => {
+                Some(class(a))
+            }
+            _ => None,
+        });
+    idempotent.unwrap_or_else(|| class(value))
 }
 
 /// Carry each comparison through the operations that keep it: copies,
@@ -493,5 +511,102 @@ pub(crate) fn compare_components<V>(op: &SSAOp<V>) -> Option<(&V, CompareKind, &
         SSAOp::IntLessEqual { dst, a, b } => Some((dst, CompareKind::LessEqual, a, b)),
         SSAOp::IntSLessEqual { dst, a, b } => Some((dst, CompareKind::SignedLessEqual, a, b)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cfg::{BasicBlock, CFG};
+    use crate::function::{SSABlock, SSAFunction};
+
+    /// `tmp = a OP b; zf = tmp == 0; if zf goto 0x1010`, the predicate of its one branch.
+    fn tested(
+        op: fn(SSAVar, SSAVar, SSAVar) -> SSAOp<SSAVar>,
+        a: &SSAVar,
+        b: &SSAVar,
+    ) -> (PredicateFact, SsaGraph) {
+        let (entry, taken, next) = (0x1000, 0x1010, 0x1008);
+        let tmp = SSAVar::new("tmp:and", 1, 8);
+        let zf = SSAVar::new("ZF", 1, 1);
+        let mut head = SSABlock::new(entry, 8);
+        head.push(op(tmp.clone(), a.clone(), b.clone()));
+        head.push(SSAOp::IntEqual {
+            dst: zf.clone(),
+            a: tmp,
+            b: SSAVar::constant(0, 8),
+        });
+        head.push(SSAOp::CBranch {
+            target: SSAVar::constant(taken, 8),
+            cond: zf,
+        });
+        let mut cfg = CFG::new(entry);
+        let shape = [
+            (
+                entry,
+                BlockTerminator::ConditionalBranch {
+                    true_target: taken,
+                    false_target: next,
+                },
+            ),
+            (taken, BlockTerminator::Return),
+            (next, BlockTerminator::Return),
+        ];
+        for (addr, terminator) in shape {
+            let mut basic = BasicBlock::new(addr);
+            basic.size = 8;
+            basic.terminator = terminator;
+            cfg.add_block(basic);
+        }
+        cfg.rebuild_edges();
+        let blocks = [head, SSABlock::new(taken, 1), SSABlock::new(next, 1)];
+        let function = SSAFunction::from_exact_test_blocks(&blocks, cfg);
+        let graph = SsaGraph::from_function(&function);
+        let facts = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
+        let fact = facts
+            .predicates
+            .values()
+            .next()
+            .expect("one branch")
+            .clone();
+        (fact, graph)
+    }
+
+    fn and(dst: SSAVar, a: SSAVar, b: SSAVar) -> SSAOp<SSAVar> {
+        SSAOp::IntAnd { dst, a, b }
+    }
+
+    fn or(dst: SSAVar, a: SSAVar, b: SSAVar) -> SSAOp<SSAVar> {
+        SSAOp::IntOr { dst, a, b }
+    }
+
+    /// `test rax, rax; je`: the comparison is `rax == 0`, on the register's own value.
+    #[test]
+    fn a_test_of_a_register_with_itself_compares_the_register() {
+        let rax = SSAVar::new("RAX", 0, 8);
+        for op in [and, or] {
+            let (fact, graph) = tested(op, &rax, &rax);
+            let rax = graph.value_id_for_var(&rax).expect("rax");
+            let zero = graph.value_id_for_var(&SSAVar::constant(0, 8)).expect("0");
+            for comparison in [fact.comparison, fact.evaluated_comparison] {
+                assert_eq!(
+                    comparison,
+                    Some(CompareProvenance {
+                        kind: CompareKind::Equal,
+                        lhs: rax,
+                        rhs: zero,
+                    })
+                );
+            }
+        }
+    }
+
+    /// `test rax, rbx; je` compares the conjunction, which is neither register.
+    #[test]
+    fn a_test_of_two_registers_compares_their_conjunction() {
+        let (rax, rbx) = (SSAVar::new("RAX", 0, 8), SSAVar::new("RBX", 0, 8));
+        let (fact, graph) = tested(and, &rax, &rbx);
+        let tmp = graph.value_id_for_var(&SSAVar::new("tmp:and", 1, 8));
+        assert_eq!(fact.comparison.map(|comparison| comparison.lhs), tmp);
     }
 }

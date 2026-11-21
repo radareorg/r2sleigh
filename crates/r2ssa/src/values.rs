@@ -1187,7 +1187,7 @@ fn narrow(
     }
 }
 
-/// The comparison a condition is, read off the operation that defines it.
+/// The comparison a condition is, read off the operation that defines it, on the values it reads.
 fn comparison_of(
     graph: &SsaGraph,
     condition: ValueId,
@@ -1196,10 +1196,11 @@ fn comparison_of(
     let InstPayload::Op(op) = &inst.payload else {
         return None;
     };
+    let operand = |value: ValueId| crate::semantic::compared_operand(graph, value, |value| value);
     Some(crate::semantic::CompareProvenance {
         kind: comparison_kind(op)?,
-        lhs: *graph.inputs(inst.id).first()?,
-        rhs: *graph.inputs(inst.id).get(1)?,
+        lhs: operand(*graph.inputs(inst.id).first()?),
+        rhs: operand(*graph.inputs(inst.id).get(1)?),
     })
 }
 
