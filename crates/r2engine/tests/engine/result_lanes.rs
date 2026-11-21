@@ -1113,3 +1113,35 @@ fn a_function_with_no_closed_lane_zero_way_in_keeps_the_bits_above_a_narrow_call
         assert!(!text.contains("integer result register"), "{case}: {text}");
     }
 }
+
+/// AArch64 `fmov d0, x0; ret` and its x86-64 twin `movq xmm0, rdi; ret`; `fsub d0, d0, d0; ret`.
+const A64_FMOV: &[u8] = &[0x00, 0x00, 0x67, 0x9e, 0xc0, 0x03, 0x5f, 0xd6];
+const X86_MOVQ: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xc7, 0xc3];
+const A64_FSUB: &[u8] = &[0x00, 0x38, 0x60, 0x1e, 0xc0, 0x03, 0x5f, 0xd6];
+
+fn described(program: Literal) -> r2engine::program::info::FunctionInfo {
+    (OpenProgram::of(program).function_info(BASE)).expect("it is described")
+}
+
+/// V0 is a result lane as X0 is (AAPCS64 6.9; `AARCH64.cspec` lists it first among its outputs):
+/// what reaches it at a return is read, so the formal behind it stays, as XMM0's does (D660).
+#[test]
+fn an_aarch64_float_result_lane_is_read_at_a_return_as_xmm0_is() {
+    let code = |bytes: &'static [u8]| Literal::of_code(bytes, &[("f", BASE, bytes.len() as u64)]);
+    let twin = described(code(X86_MOVQ));
+    let fmov = described(code(A64_FMOV).in_aarch64());
+    let fsub = described(code(A64_FSUB).in_aarch64());
+    let homes = |info: &r2engine::program::info::FunctionInfo| {
+        (info.arguments.iter())
+            .map(|argument| argument.storage)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(homes(&twin).len(), 1, "{twin:?}");
+    assert_eq!(homes(&fmov).len(), 1, "{fmov:?}");
+    assert_eq!(homes(&fsub).len(), 1, "{fsub:?}");
+    assert_ne!(
+        fmov.unproven.and_then(|unproven| unproven.cause),
+        Some(r2types::UnprovenCause::EntryInput),
+        "{fmov:?}"
+    );
+}

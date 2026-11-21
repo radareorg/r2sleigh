@@ -371,8 +371,8 @@ fn an_argument_register_handed_back_untouched_stays_unproven_where_a_call_reads_
     }
 }
 
-/// AArch64 `fmov d0, #1.0; ret` hands x0 back untouched beside the float it writes, and a caller
-/// `bl f; str w0, [x1]` reads x0: no write of x0 proves a result there.
+/// AArch64 `fmov d0, #1.0; ret` hands x0 back untouched beside the float it writes (`Written`, D660),
+/// and a caller `bl f; str w0, [x1]` reads x0: no write of x0 proves a result there.
 const A64_FLOAT_BESIDE_ITS_ARGUMENT: &[u8] = &[
     0x00, 0x10, 0x6e, 0x1e, // 1000 fmov d0, #1.0
     0xc0, 0x03, 0x5f, 0xd6, // 1004 ret
@@ -392,7 +392,7 @@ fn an_argument_handed_back_beside_a_written_float_stays_unproven_where_a_call_re
     )
     .in_aarch64();
     let text = rendered(program);
-    assert!(text.contains("unproven (EntryInput)"), "{text}");
+    assert!(text.contains("unproven (Written)"), "{text}");
     assert!(!text.contains("return (uint64_t)arg0;"), "{text}");
 }
 

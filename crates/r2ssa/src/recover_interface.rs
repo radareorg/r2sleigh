@@ -2100,8 +2100,15 @@ fn recover_interface_inner(
                         float_unwritten: false,
                     });
                 }
-                // An argument handed back beside a written float: the callers' reads choose.
+                // An argument handed back beside a written float: the callers' reads choose, and what
+                // feeds the float lane is observed, as the integer lane's would be (AAPCS64 6.9).
                 None if handed_back => {
+                    candidate_live_out = float_live_out;
+                    if result_register_written(func, graph, float, Some(&facts), (true, false))
+                        .is_some()
+                    {
+                        result_causes.insert(SourceResultCause::Written);
+                    }
                     result_carriers = Some(r2source::SourceResultCarriers {
                         integer: candidate,
                         float: Some(float),
