@@ -1546,3 +1546,7 @@ The 6 calls round 12's patch refused (find O2-noinline `0x12588` and two more to
 
 Two facts for the build: `CalleeFacts::derive` (`crates/r2engine/src/lib.rs`) already runs the callee's own type analysis (`build_source_owned_type_analysis`), so `FunctionDeclaration` needs no new per-callee edge; and under `aa` a header reads the closed decision (bzip2 `fcn_f870` prints `void`), so the declaration is derived from the decided callee.
 
+
+### D350 step 0, re-counted (round 18, rd18-prototypes)
+
+After D546, D661 and D660 (64254c0cd), `scripts/extern_agree.py` on DecBench: 440 of 6,319 pairs differ (443 of 6,323 at the base 5f39d32a6), 11 callees declared two ways (13), 30 `declaration-disagrees` (30); census 3 of 200 (rv_O0g_stripped `fcn_1549` to `fcn_1521`: extern `uint64_t (r2sleigh_word_u64, r2sleigh_word_u64)`, header `r2sleigh_result_u64 (r2sleigh_word_u64, r2sleigh_word_u32)`; syscalls_static_O2 `entry0` to `fcn_401030`: `uint64_t ()` against `r2sleigh_result_u64 ()`; two_units `helper`, the name collision). By the pair's shape: result and parameters 217, tag 105, result 52, parameter type 36, arity 30. D546's argument homes leave the six `fcn_12370` and `fcn_13aa0` sites passing XMM0, so the lane fit no longer refuses them. Two literal red-first candidates (a callee whose header is `r2sleigh_result_u32` read at 64 bits by its caller; the same callee reading EDI) are green at 64254c0cd: in a two-function literal the extern equals the header. The red evidence is the census log above. Build not started in round 18.
