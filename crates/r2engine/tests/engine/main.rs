@@ -32,6 +32,7 @@ mod listing;
 mod load_base;
 mod machine;
 mod member_calls;
+mod memory_places;
 mod names;
 mod native;
 mod notes;

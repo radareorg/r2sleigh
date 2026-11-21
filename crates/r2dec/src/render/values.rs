@@ -872,8 +872,8 @@ impl<'a> Values<'a> {
         Some(values)
     }
 
-    /// Each cell a parameter that points to its inferred structure addresses, as that member. All
-    /// or nothing per parameter: one access with no member keeps the byte spelling for every one.
+    /// Each cell a parameter that points to its inferred record addresses, as the member or span
+    /// the record states at the access's offset; an access it refuses keeps its byte spelling.
     fn members_of(
         &self,
         input: &RenderInput<'_>,
@@ -885,8 +885,9 @@ impl<'a> Values<'a> {
         if !self.little_endian {
             return members;
         }
-        let places = &self.artifact.certificates().places;
         let through = self.accesses_by_parameter(&pointing);
+        let records = input.records();
+        let mut inferred = BTreeMap::new();
         for (slot, tag, base, stated) in pointing {
             if let Some(cells) = stated
                 .then(|| self.projected_members(slot, &base, through.get(slot)?))
@@ -895,34 +896,44 @@ impl<'a> Values<'a> {
                 self.place(&mut members, cells);
                 continue;
             }
-            let Some(structure) = input.parameter_structures().get(&slot) else {
+            let Some(record) = (records.parameters.get(&slot)).filter(|record| record.tag == tag)
+            else {
                 continue;
             };
-            let (Some(definition), Ok(key)) = (
-                (structure.tag == tag)
-                    .then(|| input.inferred_aggregates().get(&tag))
-                    .flatten(),
-                u32::try_from(slot),
-            ) else {
-                continue;
-            };
-            let Some(r2ssa::ParameterReach::Fields(accesses)) = places.parameter(key) else {
-                continue;
-            };
-            let cells = accesses.iter().map(|access| {
-                let (_, name) = definition
-                    .members
-                    .get(*structure.fields.get(&access.offset)?)?;
-                let cell = self.roots.access(access.access)?.canonical;
-                let member = CExpr::PtrMember {
-                    base: Box::new(base.clone()),
-                    member: name.clone(),
-                };
-                Some((cell, MemberCell::At(CExpr::addr_of(member))))
-            });
-            if let Some(cells) = cells.collect::<Option<Vec<_>>>() {
-                self.place(&mut members, cells);
+            if let (Some(definition), Ok(slot)) =
+                (records.definitions.get(&tag), u32::try_from(slot))
+            {
+                inferred.insert(slot, (record, definition, base));
             }
+        }
+        // One pass over the places: each access through a pointing parameter, `O(A log M)`.
+        let places = self.artifact.certificates().places.iter();
+        let cells = places.filter_map(|place| {
+            let (r2ssa::PlaceBase::Parameter(slot), r2ssa::Place::Field { offset, width }) =
+                (place.base, place.place)
+            else {
+                return None;
+            };
+            let (record, definition, base) = inferred.get(&slot)?;
+            let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
+            if (record
+                .refused
+                .binary_search_by_key(&(offset, width), refused))
+            .is_ok()
+            {
+                return None;
+            }
+            let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
+            let cell = self.roots.access(place.access)?.canonical;
+            let member = CExpr::PtrMember {
+                base: Box::new(base.clone()),
+                member: name.clone(),
+            };
+            Some((cell, MemberCell::At(CExpr::addr_of(member))))
+        });
+        let cells = cells.collect::<Vec<_>>();
+        if !cells.is_empty() {
+            self.place(&mut members, cells);
         }
         if let Some(cells) = self.member_rooted(tags) {
             self.place(&mut members, cells);

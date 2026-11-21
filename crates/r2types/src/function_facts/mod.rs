@@ -1133,18 +1133,22 @@ impl SourceOwnedFunctionFacts {
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
         enriched.apply_exact_source_signature(source, solved);
-        enriched.types.inferred_aggregates = (solved.aggregates.values())
-            .map(|aggregate| (aggregate.tag.clone(), aggregate.definition.clone()))
-            .collect();
-        enriched.types.parameter_structures = (solved.aggregates.iter())
-            .map(|(slot, aggregate)| {
-                let structure = crate::ParameterStructure {
-                    tag: aggregate.tag.clone(),
-                    fields: aggregate.fields.clone(),
-                };
-                (*slot, structure)
-            })
-            .collect();
+        enriched.types.records = crate::Records {
+            definitions: (solved.records.values())
+                .map(|record| (record.tag.clone(), record.definition.clone()))
+                .collect(),
+            parameters: (solved.records.iter())
+                .map(|(slot, record)| {
+                    let parameter = crate::ParameterRecord {
+                        tag: record.tag.clone(),
+                        fields: record.fields.clone(),
+                        spans: record.spans.clone(),
+                        refused: record.refused.clone(),
+                    };
+                    (*slot, parameter)
+                })
+                .collect(),
+        };
         enriched.apply_return_type_fact(solved.returns.clone());
         // The types are final here; the projection the seal holds is built from them once.
         enriched.canonicalize_type_facts();
@@ -1300,8 +1304,8 @@ pub(crate) struct SolvedFunction {
         IdMap<r2ssa::ValueId, BTreeSet<crate::signedness::ScalarSignednessEvidence>>,
     pub(crate) evidence: crate::EvidenceTypes,
     pub(crate) returns: ReturnTypeFact,
-    /// Each parameter whose accesses lay out a structure (doc/adr-aggregates.md).
-    pub(crate) aggregates: BTreeMap<usize, crate::aggregates::InferredAggregate>,
+    /// Each parameter whose class's accesses lay out a record (doc/adr-memory-places.md).
+    pub(crate) records: BTreeMap<usize, crate::records::InferredRecord>,
 }
 
 impl SolvedFunction {
@@ -1321,12 +1325,12 @@ impl SolvedFunction {
             crate::evidence::solve_evidence_types(source, signatures, &signedness, ptr_bits);
         let returns =
             ReturnTypeFact::decide(source, signatures, &evidence).signed_by(source, &signedness);
-        let aggregates = crate::aggregates::parameter_aggregates(source, &evidence);
+        let records = crate::records::parameter_records(source, &evidence);
         Self {
             signedness,
             evidence,
             returns,
-            aggregates,
+            records,
         }
     }
 }
@@ -2171,7 +2175,7 @@ impl FunctionFacts {
         source: &r2ssa::SsaArtifact,
         solved: &SolvedFunction,
     ) -> bool {
-        let (aggregates, evidence) = (&solved.aggregates, &solved.evidence);
+        let (records, evidence) = (&solved.records, &solved.evidence);
         let context = source.machine_context();
         let Some(interface) = context.function_interface() else {
             return false;
@@ -2185,7 +2189,7 @@ impl FunctionFacts {
         let widths = (interface.parameters().iter()).any(|spec| !spec.basis().states_type());
         let certified_pointers = widths.then(|| {
             let signs = &solved.signedness;
-            crate::signature_infer::certified_parameter_pointers(source, aggregates, signs)
+            crate::signature_infer::certified_parameter_pointers(source, records, signs)
         });
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {

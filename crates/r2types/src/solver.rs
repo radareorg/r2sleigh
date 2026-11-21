@@ -56,6 +56,13 @@ pub fn solve_constraints<K: SolverNode>(
         match constraint {
             Constraint::Equal { a, b, .. } => solver.equal(a, b),
             Constraint::Subtype { var, ty, .. } => solver.bound(var, *ty),
+            Constraint::Field {
+                base,
+                offset,
+                width,
+                value,
+                ..
+            } => solver.field(base, *offset, *width, value.as_ref()),
         }
     }
     solver.into_solved()
@@ -76,6 +83,8 @@ pub struct IncrementalSolver<K> {
     classes: NodeClasses,
     /// Each class's type, held at its root.
     types: Vec<Option<TypeId>>,
+    /// Each class's record accesses `(offset, width, value)`, held at its root (doc/adr-memory-places.md).
+    records: Vec<Vec<(i64, u32, Option<VarId>)>>,
     meets: FxHashMap<(TypeId, TypeId), TypeId>,
 }
 
@@ -86,6 +95,7 @@ impl<K: SolverNode> IncrementalSolver<K> {
             nodes: NodeInterner::default(),
             classes: NodeClasses::default(),
             types: Vec::new(),
+            records: Vec::new(),
             meets: FxHashMap::default(),
         }
     }
@@ -112,6 +122,42 @@ impl<K: SolverNode> IncrementalSolver<K> {
         };
         let root = self.classes.union(a, b);
         self.types[root] = met;
+        // The smaller record moves into the larger: each access moves `O(log N)` times in all.
+        let other = if root == a { b } else { a };
+        let (mut kept, mut moved) = (
+            std::mem::take(&mut self.records[root]),
+            std::mem::take(&mut self.records[other]),
+        );
+        if kept.len() < moved.len() {
+            std::mem::swap(&mut kept, &mut moved);
+        }
+        kept.append(&mut moved);
+        self.records[root] = kept;
+    }
+
+    /// `base` points at a record with a `width`-byte member at `offset` that moves `value`.
+    pub fn field(&mut self, base: &K, offset: i64, width: u32, value: Option<&K>) {
+        let value = value.map(|value| self.intern(value));
+        let base = self.intern(base);
+        let class = self.classes.find(base);
+        self.records[class].push((offset, width, value));
+    }
+
+    /// The record accesses of `node`'s class, by offset then width, each with its value node.
+    /// `O(k log k)` for the class's `k` accesses.
+    pub fn record(&mut self, node: &K) -> Vec<(i64, u32, Option<K>)> {
+        let Some(id) = self.nodes.get(node) else {
+            return Vec::new();
+        };
+        let class = self.classes.find(id);
+        let mut accesses = (self.records[class].iter())
+            .map(|(offset, width, value)| {
+                let value = value.map(|value| self.nodes.nodes[value].clone());
+                (*offset, *width, value)
+            })
+            .collect::<Vec<_>>();
+        accesses.sort_by_key(|(offset, width, _)| (*offset, *width));
+        accesses
     }
 
     /// `node` lies below `ty`.
@@ -177,6 +223,7 @@ impl<K: SolverNode> IncrementalSolver<K> {
         let id = self.nodes.intern(node, &mut self.classes);
         if id == self.types.len() {
             self.types.push(None);
+            self.records.push(Vec::new());
         }
         id
     }

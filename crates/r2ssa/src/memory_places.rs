@@ -1,8 +1,6 @@
 //! Where each memory access lands: one base and one place, or a typed refusal
 //! (doc/adr-memory-places.md, invariants 1 and 10).
 
-use std::collections::BTreeMap;
-
 use r2il::SpaceId;
 
 use crate::graph::InstId;
@@ -63,33 +61,10 @@ pub struct AccessPlace {
     pub place: Place,
 }
 
-/// One field access a parameter's value reaches, from its place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ReachedField {
-    pub offset: i64,
-    pub width: u32,
-    pub access: StructuredAccessId,
-    pub value: Option<ValueId>,
-}
-
-/// What a parameter's value reaches: field places only, or the first operation that is not one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParameterReach {
-    Fields(Vec<ReachedField>),
-    /// `place` is the reached access's, `None` where the operation has no access.
-    Refused {
-        inst: InstId,
-        base: PlaceBase,
-        place: Option<Place>,
-    },
-}
-
-/// Each access's place, a column in `StructuredDataflowFacts::memory_accesses` order, and what
-/// each parameter's value reaches.
+/// Each access's place, a column in `StructuredDataflowFacts::memory_accesses` order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryPlaces {
     places: Vec<AccessPlace>,
-    parameters: BTreeMap<u32, ParameterReach>,
 }
 
 impl MemoryPlaces {
@@ -128,32 +103,7 @@ impl MemoryPlaces {
                 }
             })
             .collect::<Vec<_>>();
-        Self {
-            places,
-            parameters: BTreeMap::new(),
-        }
-    }
-
-    /// What each parameter reaches, from these places (`reach`).
-    pub(crate) fn with_parameters(
-        mut self,
-        graph: &SsaGraph,
-        boundaries: &crate::semantic::SourceBoundaryFacts,
-        structured: &StructuredDataflowFacts,
-        stack_reloads: &crate::dense::IdMap<ValueId, crate::semantic::StackReloadSourceCertificate>,
-    ) -> Self {
-        self.parameters = reach::parameters(&self, graph, boundaries, structured, stack_reloads);
-        self
-    }
-
-    /// What the value of the parameter at `slot` reaches; `None` where it reaches no memory.
-    pub fn parameter(&self, slot: u32) -> Option<&ParameterReach> {
-        self.parameters.get(&slot)
-    }
-
-    /// Every parameter's reach, by slot.
-    pub fn parameters(&self) -> impl Iterator<Item = (u32, &ParameterReach)> {
-        self.parameters.iter().map(|(slot, reach)| (*slot, reach))
+        Self { places }
     }
 
     /// The access at `position` (`StructuredDataflowFacts::position`): `O(1)`.
@@ -166,8 +116,6 @@ impl MemoryPlaces {
         self.places.iter()
     }
 }
-
-mod reach;
 
 /// Whether the instruction is a plain load or store.
 fn plain(graph: &SsaGraph, inst: InstId) -> bool {

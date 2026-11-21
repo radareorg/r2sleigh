@@ -4,7 +4,8 @@
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
-pub(crate) mod aggregates;
+pub(crate) mod records;
+pub use records::SpanRefusal;
 pub(crate) mod analysis;
 pub(crate) mod callee;
 pub(crate) mod constraint;
@@ -42,7 +43,7 @@ pub use evidence::{DeclaredBound, EvidenceTypes};
 pub use facts::{
     CalleeFact, CalleeLinkage, CalleeModelPolicyEvidence, CalleeReturnRelation,
     FieldAccessCertificate, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
-    FunctionTypeFacts, ParameterStructure, SignatureBasis, SignatureCertificateSource,
+    FunctionTypeFacts, ParameterRecord, Records, SignatureBasis, SignatureCertificateSource,
 };
 pub(crate) use function_facts::exact_source_return_type;
 pub use function_facts::{

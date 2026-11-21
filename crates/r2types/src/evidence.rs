@@ -51,6 +51,9 @@ pub struct EvidenceTypes {
     /// Each parameter entry value handed whole to callees whose bodies access through it: the
     /// widths they access at (D610).
     handed: r2ssa::dense::IdMap<r2ssa::ValueId, r2ssa::AccessWidths>,
+    /// Each parameter's record accesses `(offset, width, value)`, by slot, from its class's
+    /// `Field` constraints (doc/adr-memory-places.md).
+    records: BTreeMap<usize, Vec<(i64, u32, Option<r2ssa::ValueId>)>>,
 }
 
 /// The declared pointers met so far at one entry value; a conflict stays one (D262).
@@ -281,6 +284,11 @@ impl EvidenceTypes {
         self.declared.get(value)
     }
 
+    /// The record accesses of the parameter at `slot`'s class, by offset then width.
+    pub fn record(&self, slot: usize) -> &[(i64, u32, Option<r2ssa::ValueId>)] {
+        self.records.get(&slot).map_or(&[], Vec::as_slice)
+    }
+
     /// The widths callees access at through parameter entry value `value`, where one handed it
     /// whole loads or stores through it (D610).
     pub fn handed_dereferenced(&self, value: r2ssa::ValueId) -> Option<r2ssa::AccessWidths> {
@@ -308,6 +316,7 @@ pub fn solve_evidence_types(
     builder.gather_allocation_element_widths(callsite_signatures);
 
     builder.gather_indexed_pointer_bases();
+    builder.gather_fields();
     builder.read_back()
 }
 
@@ -891,6 +900,31 @@ impl<'a> EvidenceBuilder<'a> {
         }
     }
 
+    /// One `Field` per access a parameter places at a constant offset: `O(A)`.
+    fn gather_fields(&mut self) {
+        let source = self.source;
+        let parameters = &source.facts().boundaries.parameters;
+        let structured = &source.facts().structured;
+        for place in source.certificates().places.iter() {
+            let (r2ssa::PlaceBase::Parameter(slot), r2ssa::Place::Field { offset, width }) =
+                (place.base, place.place)
+            else {
+                continue;
+            };
+            let Some(base) = parameters
+                .get(&slot)
+                .and_then(|parameter| parameter.value())
+            else {
+                continue;
+            };
+            let value = (structured.memory_accesses.get(&place.access))
+                .and_then(|access| access.value)
+                .map(EvidenceNode::Value);
+            let base = EvidenceNode::Value(base);
+            self.solver.field(&base, offset, width, value.as_ref());
+        }
+    }
+
     fn read_back(&mut self) -> EvidenceTypes {
         // A spelling names the solved type only when it is that type. The class
         // carries it because every member of an equality class is one variable.
@@ -927,6 +961,23 @@ impl<'a> EvidenceBuilder<'a> {
             };
             if let Some(resolved) = self.spell(&class_spellings, node, ty) {
                 types.value_types.insert(value, resolved);
+            }
+        }
+        for (slot, parameter) in &self.source.facts().boundaries.parameters {
+            let (Some(value), Ok(slot)) = (parameter.value(), usize::try_from(*slot)) else {
+                continue;
+            };
+            let record = (self.solver.record(&EvidenceNode::Value(value)).into_iter())
+                .map(|(offset, width, value)| {
+                    let value = value.and_then(|node| match node {
+                        EvidenceNode::Value(value) => Some(value),
+                        EvidenceNode::Object(_) => None,
+                    });
+                    (offset, width, value)
+                })
+                .collect::<Vec<_>>();
+            if !record.is_empty() {
+                types.records.insert(slot, record);
             }
         }
 

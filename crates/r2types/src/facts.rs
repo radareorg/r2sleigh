@@ -247,12 +247,25 @@ pub struct FunctionSignatureSpec {
     pub basis: SignatureBasis,
 }
 
-/// The structure a parameter points to as its accesses lay it out.
+/// The record a parameter points to as its accesses lay it out (doc/adr-memory-places.md).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParameterStructure {
+pub struct ParameterRecord {
     pub tag: String,
     /// The member each accessed offset is, by its index in the definition's members.
     pub fields: BTreeMap<i64, usize>,
+    /// Wider accesses spelled as a byte copy at the member at their offset.
+    pub spans: std::collections::BTreeSet<(i64, u32)>,
+    /// Accesses neither a member nor a span, with why; they keep their byte arithmetic.
+    pub refused: Vec<(i64, u32, crate::SpanRefusal)>,
+}
+
+/// The records this function's parameters' accesses lay out (doc/adr-memory-places.md).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Records {
+    /// Each record's definition, by tag.
+    pub definitions: BTreeMap<String, crate::AggregateDefinition>,
+    /// Each parameter that points to one: its tag, members, spans and refused accesses.
+    pub parameters: BTreeMap<usize, ParameterRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,11 +475,8 @@ pub struct FunctionTypeFacts {
     /// What each parameter's type in the merged signature rests on, one row per convention slot
     /// (doc/adr-provenance.md, C2; D261).
     pub parameter_types: crate::ParameterTypes,
-    /// The structures this function's parameters' accesses lay out, by tag (doc/adr-aggregates.md).
-    pub inferred_aggregates: BTreeMap<String, crate::AggregateDefinition>,
-    /// Each parameter that points to an inferred structure: its tag, and the member at each
-    /// accessed offset (doc/adr-aggregates.md).
-    pub parameter_structures: BTreeMap<usize, ParameterStructure>,
+    /// The records this function's parameters' accesses lay out.
+    pub records: Records,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
@@ -483,10 +493,7 @@ pub struct FunctionTypeFacts {
 pub struct FunctionTypeFactInputs {
     pub merged_signature: Option<FunctionSignatureSpec>,
     pub parameter_types: crate::ParameterTypes,
-    pub inferred_aggregates: BTreeMap<String, crate::AggregateDefinition>,
-    /// Each parameter that points to an inferred structure: its tag, and the member at each
-    /// accessed offset (doc/adr-aggregates.md).
-    pub parameter_structures: BTreeMap<usize, ParameterStructure>,
+    pub records: Records,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
@@ -523,8 +530,7 @@ impl FunctionTypeFacts {
         FunctionTypeFacts::builder(FunctionTypeFactInputs {
             merged_signature: self.merged_signature,
             parameter_types: self.parameter_types,
-            inferred_aggregates: self.inferred_aggregates,
-            parameter_structures: self.parameter_structures,
+            records: self.records,
             register_params: self.register_params,
             callee_facts: self.callee_facts,
             program_data_objects: self.program_data_objects,
@@ -786,8 +792,7 @@ impl FunctionTypeFactsBuilder {
         let FunctionTypeFactInputs {
             merged_signature,
             parameter_types,
-            inferred_aggregates,
-            parameter_structures,
+            records,
             register_params,
             callee_facts,
             program_data_objects,
@@ -803,8 +808,7 @@ impl FunctionTypeFactsBuilder {
         FunctionTypeFacts {
             merged_signature,
             parameter_types,
-            inferred_aggregates,
-            parameter_structures,
+            records,
             register_params,
             callee_facts,
             program_data_objects,

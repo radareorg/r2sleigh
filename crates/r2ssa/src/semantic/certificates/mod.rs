@@ -1346,8 +1346,7 @@ pub(crate) fn collect_prepared_function_certificates(
     let (returns, returns_by_inst) =
         collect_return_value_certificates(boundaries, graph, machine_context, &stack_reloads);
     let compiler_inserted = unobserved_compiler_inserted(function, graph, &returns);
-    let places = crate::MemoryPlaces::collect(graph, addresses, objects, structured)
-        .with_parameters(graph, boundaries, structured, &stack_reloads);
+    let places = crate::MemoryPlaces::collect(graph, addresses, objects, structured);
 
     Ok(PreparedFunctionCertificates {
         loops,

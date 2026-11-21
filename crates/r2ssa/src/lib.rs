@@ -181,9 +181,7 @@ pub use machine_context::{
     SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult,
     SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
 };
-pub use memory_places::{
-    AccessPlace, MemoryPlaces, ParameterReach, Place, PlaceBase, ReachedField, Unplaced,
-};
+pub use memory_places::{AccessPlace, MemoryPlaces, Place, PlaceBase, Unplaced};
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, NamedObligation, ObligationInventoryFailure,
     ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION, SeedReason,

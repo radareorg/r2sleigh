@@ -164,7 +164,7 @@ fn open_proof_line(
                 (input.open_second_result(), input.integer_lane_unread_only()),
                 &input.body_disputed_lanes(),
             ),
-            input.inferred_aggregates().len(),
+            input.records().definitions.len(),
             &tags.conflicting(),
             &input.unproven_parameters(),
         ),

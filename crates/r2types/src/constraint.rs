@@ -50,12 +50,23 @@ pub enum Constraint<K = SSAVar> {
         ty: TypeId,
         source: ConstraintSource,
     },
+    /// `base` points at a record with a `width`-byte member at `offset` moving `value`. It only
+    /// tightens: it adds a member to the class's record and never removes or retypes one.
+    Field {
+        base: K,
+        offset: i64,
+        width: u32,
+        value: Option<K>,
+        source: ConstraintSource,
+    },
 }
 
 impl<K> Constraint<K> {
     pub fn source(&self) -> ConstraintSource {
         match self {
-            Self::Equal { source, .. } | Self::Subtype { source, .. } => *source,
+            Self::Equal { source, .. }
+            | Self::Subtype { source, .. }
+            | Self::Field { source, .. } => *source,
         }
     }
 }
