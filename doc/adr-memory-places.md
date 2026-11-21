@@ -172,19 +172,34 @@ D656 step 0 (local probe over `aa; ax`, not committed): a `.bss` cell is one who
 all read or write one width at its start, with no formed address (a `DATA:---` reference or a
 `R_*_RELATIVE` word) at or below it in `.bss`, nothing exported there and no relocation naming it.
 
-| Image | Accessed cells | Formed address at or below | Two widths or overlap | Exported or relocated | Cells | Sites |
+Cells and the index's references to them, both builds of each DecBench image summed (`pdd` sites:
+parsed from the DecBench records):
+
+| Image | Accessed cells | Formed address at or below | Two widths or overlap | Exported or relocated | Cells | References |
 |---|---|---|---|---|---|---|
-| DecBench (34 images) | 1,248 | 1,076 | 23 | 77 | 72 | 914 (516 loads, 398 stores) |
-| pumasim | 1,242 | 1,196 | 44 | 2 | 0 | |
-| 0pack | 141 | 135 | 5 | 0 | 1 | |
+| gzip | 292 | 217 | 20 | 9 | 46 | 943 (898 `pdd` sites) |
+| minigzip, minigzip64, minigzipsh | 30 | 0 | 0 | 18 | 12 | 54 |
+| sdiff | 70 | 50 | 0 | 14 | 6 | 14 |
+| bzip2recover, find, grep, xmlwf | 372 | 320 | 14 | 30 | 8 | 16 |
+| bzip2, cmp, diff, diff3, example, example64, examplesh, libz | 484 | 478 | 0 | 6 | 0 | 0 |
+| DecBench | 1,248 | 1,065 | 34 | 77 | 72 | 1,027 (914 `pdd` sites: 516 loads, 398 stores) |
+| pumasim | 1,242 | 1,171 | 69 | 2 | 0 | 0 |
+| 0pack | 141 | 130 | 10 | 0 | 1 | 2 |
+
+gzip's cells sit below its first formed `.bss` address; the CRT's formed `0x17400` is one past
+`.data` and outside `.bss`, which a C object cannot span.
 
 The reference index already carries each access's width (`Role::Read`, `Role::Write`), so carrying
-it costs nothing. Reading the index costs: cold pumasim `pdd @ 0x23fdf0` 119.28 G to 174.36 G
-instructions (+46%, peak RSS 374 to 415 MiB), cold 0pack `pdd @ 0x62ecf0` 73.80 G to 104.15 G
-(+41%, 288 to 317 MiB), Mac release. A cold `pdd` builds no index today.
+it costs nothing. No `pdd` builds the index today, and reading it costs (Mac release):
+
+| Request | Without the index | With it | Peak RSS |
+|---|---|---|---|
+| cold pumasim `pdd @ 0x23fdf0` | 119.28 G | 174.36 G (+46%) | 374 to 415 MiB |
+| cold 0pack `pdd @ 0x62ecf0` | 73.80 G | 104.15 G (+41%) | 288 to 317 MiB |
+| pumasim `aa; pdd @ 0x3b6b20` | 50.81 G | 106.36 G (+109%) | 208 to 285 MiB |
 
 D657 held: the floor is 914 sites, but its licence needs the program's accesses, and the one
-program wide reader of them (the reference index) costs over 40% on a cold request. D657 needs a
+program wide reader of them (the reference index) costs 41% to 109% on the timed requests. D657 needs a
 design that states access widths without listing every body.
 
 D659 step 0: `doc/adr-decompiler-rewrite.md`, "D659 step 0".
