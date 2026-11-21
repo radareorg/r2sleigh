@@ -168,7 +168,26 @@ copy's width. The citation travels on `SourceDataObject` to `DataObjectTypeProve
 the proof line counts it. `optarg` and `optind` are built; `FILE *` objects wait on r2dec declaring
 `struct _IO_FILE` for a data object.
 
-Open: D656, D657, D659.
+D656 step 0 (local probe over `aa; ax`, not committed): a `.bss` cell is one whose walked accesses
+all read or write one width at its start, with no formed address (a `DATA:---` reference or a
+`R_*_RELATIVE` word) at or below it in `.bss`, nothing exported there and no relocation naming it.
+
+| Image | Accessed cells | Formed address at or below | Two widths or overlap | Exported or relocated | Cells | Sites |
+|---|---|---|---|---|---|---|
+| DecBench (34 images) | 1,248 | 1,076 | 23 | 77 | 72 | 914 (516 loads, 398 stores) |
+| pumasim | 1,242 | 1,196 | 44 | 2 | 0 | |
+| 0pack | 141 | 135 | 5 | 0 | 1 | |
+
+The reference index already carries each access's width (`Role::Read`, `Role::Write`), so carrying
+it costs nothing. Reading the index costs: cold pumasim `pdd @ 0x23fdf0` 119.28 G to 174.36 G
+instructions (+46%, peak RSS 374 to 415 MiB), cold 0pack `pdd @ 0x62ecf0` 73.80 G to 104.15 G
+(+41%, 288 to 317 MiB), Mac release. A cold `pdd` builds no index today.
+
+D657 held: the floor is 914 sites, but its licence needs the program's accesses, and the one
+program wide reader of them (the reference index) costs over 40% on a cold request. D657 needs a
+design that states access widths without listing every body.
+
+D659 step 0: `doc/adr-decompiler-rewrite.md`, "D659 step 0".
 
 ## As built: places and records (D641 to D645, D649, D652)
 
