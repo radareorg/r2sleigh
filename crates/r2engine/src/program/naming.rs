@@ -399,7 +399,7 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         let Some(cells) = section_stubs(source, decoder, linkage, &slots, alignment) else {
             continue;
         };
-        held.push((section.range(), cells));
+        held.push((vec![section.range()], cells));
     }
     // Where no section states the linkage code, its lazy slots do (D530).
     let covered = |at: u64| {
@@ -409,9 +409,9 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
             .any(|(start, end)| (start..end).contains(&at))
     };
     let lazy = lazy_stubs(source, decoder, &slots, alignment, &covered);
-    held.extend(lazy.map(|(range, cells)| ((range.start, range.end), cells)));
-    for (range, cells) in held {
-        sections.push(range);
+    held.extend(lazy);
+    for (ranges, cells) in held {
+        sections.extend(ranges);
         for (start, Cell { symbol, size }) in cells {
             match symbol {
                 Some(symbol) => _ = named.entry(start).or_insert(Stub { symbol, size }),
@@ -597,7 +597,8 @@ fn section_stubs(
 }
 
 /// Linkage code no section states, and its cells by start.
-type LazyStubs = (std::ops::Range<u64>, Vec<(u64, Cell)>);
+/// The linkage code's `(start, end)` stretches, in address order, and its stubs.
+type LazyStubs = (Vec<(u64, u64)>, Vec<(u64, Cell)>);
 
 /// The stubs no section states, from the lazy slots' file words, which point into the linkage code
 /// (ELF gABI lazy binding): at each slot's own stub (D636) or, none such, at PLT[0] (AAELF64; D530).
@@ -690,7 +691,7 @@ fn lazy_stubs(
         align,
     };
     let cells = section_stubs(source, decoder, linkage, slots, alignment)?;
-    Some((range, cells))
+    Some((vec![(range.start, range.end)], cells))
 }
 
 /// What decodes one instruction where the container states its bytes.
@@ -798,12 +799,20 @@ fn own_stubs<S: Source>(
             .any(|(start, cell)| (*start..*start + cell.size).contains(&at))
     };
     (disjoint && outside(resolver)).then_some(())?;
-    let first = cells.first()?.0.min(resolver);
-    let last = (cells.iter())
-        .map(|(start, cell)| start + cell.size)
-        .chain([resolved])
-        .max()?;
-    Some((first..last, cells))
+    // Only the decoded runs are linkage: bytes between them are unread, so no start there is dropped.
+    let mut runs = (cells.iter())
+        .map(|(start, cell)| (*start, start + cell.size))
+        .chain([(resolver, resolved)])
+        .collect::<Vec<_>>();
+    runs.sort_unstable();
+    let mut held = Vec::<(u64, u64)>::with_capacity(runs.len());
+    for (start, end) in runs {
+        match held.last_mut() {
+            Some(last) if last.1 >= start => last.1 = last.1.max(end),
+            _ => held.push((start, end)),
+        }
+    }
+    Some((held, cells))
 }
 
 /// Whether one instruction's operations make a choice no stub makes.

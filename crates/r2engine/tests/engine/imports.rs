@@ -310,15 +310,24 @@ fn rel(end: u64, to: u64) -> [u8; 4] {
 /// x86-64 linkage no section states, lazy words at each stub's `pushq`: PLT0 0x1000, stubs 0x1010 to
 /// 0x1030, `caller: mov edi, 1; jmp 0x1010` at 0x1040, GOT 0x1050.
 fn x86_lazy_plt() -> &'static [u8] {
-    let (got, mut code) = (BASE + 0x50, vec![0xcc_u8; 0x80]);
+    x86_lazy_plt_after(0)
+}
+
+/// The same with `gap` bytes of ordinary code (`mov eax, 1; ret`, then `int3`) after PLT0: the
+/// stubs, `caller` and the GOT each move up by `gap`.
+fn x86_lazy_plt_after(gap: usize) -> &'static [u8] {
+    let (got, mut code) = (BASE + 0x50 + gap as u64, vec![0xcc_u8; 0x80 + gap]);
     code[0..2].copy_from_slice(&[0xff, 0x35]); // push [GOT+8]
     code[2..6].copy_from_slice(&rel(BASE + 6, got + 8));
     code[6..8].copy_from_slice(&[0xff, 0x25]); // jmp [GOT+16]
     code[8..0xc].copy_from_slice(&rel(BASE + 0xc, got + 0x10));
     code[0xc..0x10].copy_from_slice(&[0x0f, 0x1f, 0x40, 0x00]);
+    if gap >= 6 {
+        code[0x10..0x16].copy_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]);
+    }
     for index in 0..3_u8 {
         let (at, slot) = (
-            0x10 + 0x10 * usize::from(index),
+            0x10 + gap + 0x10 * usize::from(index),
             got + 0x18 + 8 * u64::from(index),
         );
         let stub = BASE + at as u64;
@@ -331,10 +340,12 @@ fn x86_lazy_plt() -> &'static [u8] {
         let held = (slot - BASE) as usize;
         code[held..held + 8].copy_from_slice(&word);
     }
-    code[0x40..0x45].copy_from_slice(&[0xbf, 1, 0, 0, 0]);
-    code[0x45] = 0xe9;
-    code[0x46..0x4a].copy_from_slice(&rel(BASE + 0x4a, BASE + 0x10));
-    code[0x50..0x68].fill(0);
+    let caller = 0x40 + gap;
+    code[caller..caller + 5].copy_from_slice(&[0xbf, 1, 0, 0, 0]);
+    code[caller + 5] = 0xe9;
+    let end = BASE + caller as u64 + 10;
+    code[caller + 6..caller + 10].copy_from_slice(&rel(end, BASE + 0x10 + gap as u64));
+    code[0x50 + gap..0x68 + gap].fill(0);
     Box::leak(code.into_boxed_slice())
 }
 
@@ -412,6 +423,28 @@ fn an_x86_64_stub_no_section_states_is_the_jump_ending_at_its_lazy_word() {
     let info = program.function_info(caller).expect("it is described");
     let blocks = (info.blocks.iter()).map(|block| (block.addr, block.size));
     assert_eq!(blocks.collect::<Vec<_>>(), [(caller, 10)]);
+}
+
+/// Linkage code is the bytes its stubs and resolver decode as: code between PLT0 and the first stub
+/// is no linkage, so a start an unwind table states there stays a start (Codex on #422).
+#[test]
+fn code_between_the_resolver_and_its_stubs_is_no_linkage() {
+    let literal = Literal::of_code(x86_lazy_plt_after(0x10), &[("caller", BASE + 0x50, 10)]);
+    let program = OpenProgram::of(lazily_linked(
+        literal,
+        BASE + 0x60,
+        &["_Exit", "abort", "puts"],
+    ));
+    let linkage = program.imports();
+    let stubs = (linkage.stubs.keys()).copied().collect::<Vec<_>>();
+    assert_eq!(stubs, [BASE + 0x20, BASE + 0x30, BASE + 0x40]);
+    let held = |at: u64| linkage.holds(at);
+    assert!(held(BASE) && held(BASE + 0x20) && held(BASE + 0x4f));
+    assert!(
+        !held(BASE + 0x10) && !held(BASE + 0x15),
+        "{:x?}",
+        linkage.sections
+    );
 }
 
 /// Under IBT the lazy word is a `.plt` entry whose preceding instruction is padding, and no word is
