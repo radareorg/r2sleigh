@@ -176,6 +176,8 @@ fn size_of(ty: &str) -> Option<i64> {
 pub fn afv_locals(afv: &str) -> std::collections::BTreeMap<String, (i64, String)> {
     afv.lines()
         .filter_map(|line| {
+            // radare2's line, before the fate the frame model states after ` ; ` (D633).
+            let line = line.split_once(" ; ").map_or(line, |(row, _)| row);
             let (declared, at) = line.strip_prefix("var ")?.split_once(" @ entry.sp")?;
             let (ty, name) = declared.rsplit_once(' ')?;
             let offset = match at.split_at(1) {

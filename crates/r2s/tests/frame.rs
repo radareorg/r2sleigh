@@ -103,3 +103,30 @@ fn a_table_indexed_by_a_remainder_is_one_array_of_its_proven_length() {
         assert!(stored, "{symbol}:\n{afv}\n{out}");
     }
 }
+
+/// `afv` states each slot's fate after radare2's line (D633): a promoted spill, a save of `rbp`,
+/// and `main`'s slots in the `frame` array `pdd` declares, listed by its byte 0.
+#[test]
+fn afv_states_each_slot_s_fate_in_the_one_frame_model() {
+    let fixture = "branchy_gcc_x64_O0";
+    let gate = afv(fixture, "0x401156");
+    assert!(
+        gate.contains("var uint32_t stack_m12 @ entry.sp-0xc ; promoted, pdd reads arg0\n"),
+        "{gate}"
+    );
+    let dtors = afv(fixture, "0x401120");
+    assert!(
+        dtors.contains("var uint64_t stack_m8 @ entry.sp-0x8 ; save of rbp\n"),
+        "{dtors}"
+    );
+    let main = afv(fixture, "0x401764");
+    assert!(
+        main.contains("var uint8_t frame[568] @ entry.sp-0x238\n"),
+        "{main}"
+    );
+    assert!(
+        main.contains("var uint64_t stack_m552 @ entry.sp-0x228 ; in frame at +0x10\n"),
+        "{main}"
+    );
+    assert!(pdd(fixture, "0x401764").contains("uint8_t frame[568];"));
+}

@@ -3,7 +3,6 @@
 
 mod calls;
 mod control;
-mod frame;
 pub(crate) mod globals;
 mod input;
 pub(crate) mod proof;
