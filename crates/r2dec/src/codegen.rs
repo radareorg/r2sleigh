@@ -257,7 +257,7 @@ pub struct Emission {
 }
 
 /// A point a definition's line may break at without changing its bytes: after a binary operator,
-/// after an argument comma, before `?` and `:` (D620).
+/// after an argument comma, before `?` and `:`, after a comment's space, after a cast (D620).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BreakPoint {
     /// The definition's line, from 0.
@@ -266,6 +266,8 @@ pub struct BreakPoint {
     pub offset: u32,
     /// The parentheses open at the point.
     pub depth: u16,
+    /// After a cast, its place in a run of casts from 1; 0 at an operator or a space.
+    pub cast: u16,
 }
 
 impl Emission {
@@ -454,10 +456,12 @@ pub(crate) struct CodeGenerator<'c> {
     depths: Vec<u8>,
     /// The one-based line of `output` the proof comment is written on.
     proof_line: Option<usize>,
-    /// Each break point as a byte of `output` and the parentheses open there.
-    breaks: Vec<(usize, u16)>,
+    /// Each break point as a byte of `output`, the parentheses open there and its cast index.
+    breaks: Vec<(usize, u16, u16)>,
     /// The parentheses open where the next byte is written.
     nesting: u16,
+    /// The casts written just before the next one, which continues their run.
+    casts: u16,
 }
 
 impl<'c> CodeGenerator<'c> {
@@ -483,12 +487,24 @@ impl<'c> CodeGenerator<'c> {
             proof_line: None,
             breaks: Vec::new(),
             nesting: 0,
+            casts: 0,
         }
     }
 
     /// A line may break at the next byte written.
     fn may_break(&mut self) {
-        self.breaks.push((self.output.len(), self.nesting));
+        self.breaks.push((self.output.len(), self.nesting, 0));
+    }
+
+    /// A comment's text, breaking after each space: C17 6.4.9 lexes the comment as one token, and
+    /// a line break inside it is white space. `O(text)`.
+    fn emit_comment_breaking(&mut self, text: &str) {
+        for word in escape_comment_text(text).split_inclusive(' ') {
+            self.output.push_str(word);
+            if word.ends_with(' ') {
+                self.may_break();
+            }
+        }
     }
 
     /// `(`, which a break inside sits one level under.
@@ -1080,7 +1096,7 @@ impl<'c> CodeGenerator<'c> {
                     self.emit_indent();
                     let start = self.output.len();
                     self.output.push_str("/* ");
-                    self.emit_comment_text(text);
+                    self.emit_comment_breaking(text);
                     self.output.push_str(" */");
                     self.mark(CRole::Comment, start);
                     self.output.push('\n');
@@ -1101,7 +1117,7 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push_str("; ");
                 let start = self.output.len();
                 self.output.push_str("/* ");
-                self.emit_comment_text(&marker.to_string());
+                self.emit_comment_breaking(&marker.to_string());
                 self.output.push_str(" */");
                 self.mark(CRole::Comment, start);
                 self.output.push('\n');
@@ -1202,6 +1218,13 @@ impl<'c> CodeGenerator<'c> {
         self.output.push('(');
         self.emit_type(ty);
         self.output.push(')');
+        // After a cast the line may break, ranked after every operator (D620).
+        let index = self.casts.saturating_add(1);
+        self.breaks.push((self.output.len(), self.nesting, index));
+        self.casts = match inner.unobserved() {
+            CExpr::Cast { .. } => index,
+            _ => 0,
+        };
         self.wide_literal = matches!(ty, CType::Int { bits, .. } if *bits > 64)
             && matches!(inner.unobserved(), CExpr::UIntLit(_));
         self.emit_expr(inner, my_prec);
@@ -1672,10 +1695,10 @@ fn operand_precedence_floor(parent: BinaryOp, operand: &CExpr, default: u8) -> u
 }
 
 /// Each break point as its line and byte in `definition`, in print order: one pass, `O(bytes)`.
-fn break_points(definition: &str, breaks: &[(usize, u16)]) -> Vec<BreakPoint> {
+fn break_points(definition: &str, breaks: &[(usize, u16, u16)]) -> Vec<BreakPoint> {
     let mut points = Vec::with_capacity(breaks.len());
     let (mut line, mut start, mut scanned) = (0u32, 0usize, 0usize);
-    for &(at, depth) in breaks {
+    for &(at, depth, cast) in breaks {
         for (index, byte) in definition.as_bytes()[scanned..at].iter().enumerate() {
             if *byte == b'\n' {
                 line += 1;
@@ -1688,6 +1711,7 @@ fn break_points(definition: &str, breaks: &[(usize, u16)]) -> Vec<BreakPoint> {
             line,
             offset,
             depth,
+            cast,
         });
     }
     points

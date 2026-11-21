@@ -102,3 +102,21 @@ fn a_byte_switch_names_each_case_as_the_byte_holds_it() {
         assert_eq!(c.matches(&format!("case {value}:")).count(), 1, "{c}");
     }
 }
+
+/// `cmp edi, 1; je A; cmp edi, 2; je B; test edi, edi; je C; xor eax, eax; ret`, three returns:
+/// `edi & edi` is `edi`, so the third test is a case of the same value (D604).
+const TEST_LAST: &[u8] = &[
+    0x83, 0xff, 0x01, 0x74, 0x0c, 0x83, 0xff, 0x02, 0x74, 0x0d, 0x85, 0xff, 0x74, 0x0f, 0x31, 0xc0,
+    0xc3, 0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, 0xb8, 0x1e, 0x00,
+    0x00, 0x00, 0xc3,
+];
+
+#[test]
+fn a_test_of_the_value_with_itself_is_its_zero_case() {
+    let c = c_of(TEST_LAST);
+    assert_eq!(c.matches("switch (").count(), 1, "{c}");
+    for value in ["0U", "1U", "2U"] {
+        assert_eq!(c.matches(&format!("case {value}:")).count(), 1, "{c}");
+    }
+    assert!(!c.contains("if ("), "{c}");
+}

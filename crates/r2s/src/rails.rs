@@ -192,7 +192,7 @@ fn moved(roles: &Roles, window: std::ops::Range<usize>, shift: usize, painted: &
 }
 
 /// `rest` (from byte `skipped`, laid after `prefix` cells) wrapped past [`WIDTH`]: greedy, lowest
-/// depth then latest offset (Oppen, TOPLAS 1980). `O(line length)`; doc/adr-display.md, D620.
+/// [`rank`] then latest offset (Oppen, TOPLAS 1980). `O(line length)`; doc/adr-display.md, D620.
 fn wrapped(
     rest: &str,
     skipped: usize,
@@ -227,7 +227,7 @@ fn wrapped(
                 overflow = Some(at).filter(|at| *at < end);
                 break;
             }
-            if best.is_none_or(|kept| point.depth <= kept.depth) {
+            if best.is_none_or(|kept| rank(point) <= rank(&kept)) {
                 best = Some(*point);
             }
             next += 1;
@@ -242,6 +242,12 @@ fn wrapped(
         next = points.partition_point(|point| (point.offset as usize) <= from);
     }
     cuts
+}
+
+/// A point's rank, lowest first: any operator or space before any cast, then depth, a cast's
+/// depth counting its place in its run (D620).
+fn rank(point: &r2engine::BreakPoint) -> (bool, u16) {
+    (point.cast > 0, point.depth.saturating_add(point.cast))
 }
 
 /// One `│` and three spaces per level in `Rail`; past [`FOLD`] levels, `│ N>` and a space.
