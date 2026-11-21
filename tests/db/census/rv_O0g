@@ -44,19 +44,17 @@ EXPECT=<<EOF
 r2sleigh_result_u64 _init(void)
 {
     uint64_t rax_1;
-    uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fe8U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
-            rax_3 = rax_1;
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:11 covering 1 op (render::values) */
-            rax_3 = r2sleigh_residual_u64(3);
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            rax_1 = r2sleigh_residual_u64(3);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         }
     }
 }

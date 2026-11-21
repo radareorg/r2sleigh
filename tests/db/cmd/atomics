@@ -154,9 +154,8 @@ uint32_t flags_set(uint32_t* flags, uint32_t bits)
     uint32_t tmp_lane_401154_1_0_1;
     uint32_t tmp_401154_4_1;
     uint8_t zf_2;
-    uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 28 source obligations: 25 rendered, 3 elided, 0 refused; 9 statements rendered */
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 25 rendered, 3 elided, 0 refused; 8 statements rendered */
     {
         tmp_401140_0_1 = r2sleigh_load_u32((void*)(uint64_t)flags);
         rax_2 = (uint64_t)(uint32_t)tmp_401140_0_1;
@@ -164,11 +163,10 @@ uint32_t flags_set(uint32_t* flags, uint32_t bits)
             tmp_lane_401154_1_0_1 = (uint32_t)rax_2;
             tmp_401154_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401154_1_0_1, (uint32_t)((uint32_t)rax_2 | (uint32_t)bits));
             zf_2 = (uint8_t)((uint32_t)tmp_lane_401154_1_0_1 == (uint32_t)tmp_401154_4_1);
-            rax_4 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401154_1_0_1 : (uint32_t)tmp_401154_4_1)) : (uint64_t)(uint32_t)tmp_401154_4_1;
-            rax_2 = rax_4;
+            rax_2 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401154_1_0_1 : (uint32_t)tmp_401154_4_1)) : (uint64_t)(uint32_t)tmp_401154_4_1;
         } while ((uint8_t)((uint32_t)zf_2 ^ (uint32_t)(uint8_t)1U));
         {
-            return (uint32_t)rax_4;
+            return (uint32_t)rax_2;
         }
     }
 }
@@ -181,9 +179,8 @@ uint32_t flags_clear(uint32_t* flags, uint32_t bits)
     uint32_t tmp_lane_401174_1_0_1;
     uint32_t tmp_401174_4_1;
     uint8_t zf_2;
-    uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 29 source obligations: 26 rendered, 3 elided, 0 refused; 10 statements rendered */
+    /* r2dec proof: no individual construct is marked; 29 source obligations: 26 rendered, 3 elided, 0 refused; 9 statements rendered */
     {
         tmp_lane_401160_0_1_1 = (uint32_t)~(uint32_t)bits;
         tmp_401162_0_1 = r2sleigh_load_u32((void*)(uint64_t)flags);
@@ -192,11 +189,10 @@ uint32_t flags_clear(uint32_t* flags, uint32_t bits)
             tmp_lane_401174_1_0_1 = (uint32_t)rax_2;
             tmp_401174_4_1 = r2sleigh_atomic_compare_exchange_u32_seq_cst((void*)(uint64_t)flags, (uint32_t)tmp_lane_401174_1_0_1, (uint32_t)((uint32_t)rax_2 & (uint32_t)tmp_lane_401160_0_1_1));
             zf_2 = (uint8_t)((uint32_t)tmp_lane_401174_1_0_1 == (uint32_t)tmp_401174_4_1);
-            rax_4 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401174_1_0_1 : (uint32_t)tmp_401174_4_1)) : (uint64_t)(uint32_t)tmp_401174_4_1;
-            rax_2 = rax_4;
+            rax_2 = zf_2 ? (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_2 >> 32U) << 32U | (uint64_t)(zf_2 ? (uint32_t)tmp_lane_401174_1_0_1 : (uint32_t)tmp_401174_4_1)) : (uint64_t)(uint32_t)tmp_401174_4_1;
         } while ((uint8_t)((uint32_t)zf_2 ^ (uint32_t)(uint8_t)1U));
         {
-            return (uint32_t)rax_4;
+            return (uint32_t)rax_2;
         }
     }
 }

@@ -290,6 +290,35 @@ Every disagreement is one side stating an object the other states as something e
 holds two objects with different names or types. The first P4 code row is D633, from the
 largest class: the frame model states each slot's fate, and `afv` lists it by that fate.
 
+## D633 as built (round 17)
+
+`afv` and `pdd` read one frame model. r2ssa owns the frame array's layout (`FrameLayout`,
+moved from r2dec `render/frame.rs`, which is deleted) and each slot's fate (`SlotFate`):
+
+| Fate | Where it is proven | `afv` suffix |
+|---|---|---|
+| promoted | slot promotion's values (`SsaArtifact::promoted_slots`, `O(values)`); `holds` is the one value every version copies, no merge | `; promoted`, `; promoted, pdd reads arg0` where that value is a formal parameter |
+| save | a certified frame round trip (`StackFrameRoundTripCertificate.storage`), or a promoted slot holding a preserved register's entry lane (`saved_register`) | `; save of rbp` |
+| home | `stack_slot_role` states a parameter home | `; home of n`, with `, in frame at +0x8` where the array is listed |
+| member | the object's byte in `FrameLayout` (`SsaArtifact::slot_fates`, a dense column by `ObjectId`, `O(slots log slots)`) | `; in frame at +0x10` |
+
+`afv` lists `var uint8_t frame[N] @ entry.sp-<start>` where a listed slot is a member; `pddj`
+places `frame` at the same entry offset (`stack:-0x238`, `stack:+0x0` before). A promoted slot
+has no `ObjectId` (promotion removes its memory accesses), so promoted fates are a sorted list by
+offset beside the column; this departs from the ruled "column by `ObjectId`" for that class.
+
+`frame_agree.py` on the committed census: 0 of 582 offsets agreed at eb327af9a (`afv-only` 528,
+`pdd-only` 54); at D633 579 of 582 agree (`name` 0, `type` 0, `afv-only` 0, the twice classes
+0). The 3 left are `pdd-only` frame arrays: shapes_gcc_x64_O0 `mixed_fold` 0x40182c, 0x401515,
+rv_O0g 0x144c, where the only frame object is a parameter home the rendering also reads at
+narrower widths, so `pdd` names the home through `frame` while `afv` lists no member. Whether a
+rendering names an object is decided at spell time (`values.rs` declares `frame` on first use);
+stating it upstream is P4's next row. The 579 rows by fate: promoted 285
+(137 name the parameter `pdd` reads, each checked against the rendering's parameters, 0 wrong),
+home 115, member 108, the array 51, save 20. "Home" is a fifth fate the ruling did not list: a
+role `stack_slot_role` states, which agrees standing alone. `frame_agree.py --committed` runs in
+`scripts/quality-gate.sh` with these counts as its bounds.
+
 ## Consequences
 
 - Equivalence and the census change at P4.3 and P4.4, and each change is read

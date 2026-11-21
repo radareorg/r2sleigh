@@ -38,6 +38,10 @@
                                                    o1: no exit inlined, o2: exits reversed, o3: merges
                                                    reversed); fails when a verdict differs from
                                                    natural's (ROADMAP D58) or an order moves no text
+  census.py carriers DIR...                        the carrier locals each function declares (ROADMAP
+                                                   D470): `pddj` locals at no stack offset, read from
+                                                   `<project>_<binary>.json` records holding
+                                                   `variables`, as the DecBench runner writes them
   census.py heap [--top N] [INSTRUCTIONS=]PROFILE...
                                                    bytes live at each dhat profile's heap peak by
                                                    allocation site (a `--features dhat-heap` build
@@ -790,6 +794,21 @@ def orders(args):
         sys.exit(1)
 
 
+def carrier_count(record):
+    """The locals a `pddj` record declares at no stack offset (D470's base)."""
+    return sum(1 for v in record.get("variables") or [] if v.get("kind") == "local" and v.get("location") == "carrier")
+
+
+def carriers(args):
+    functions, declared = 0, 0
+    for directory in args.dirs:
+        for path in sorted(Path(directory).glob("*.json")):
+            for record in json.loads(path.read_text()).values():
+                functions += 1
+                declared += carrier_count(record)
+    print(f"carriers: {declared} carrier locals declared over {functions} functions")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -852,6 +871,9 @@ def main():
     p.add_argument("--show", type=int, default=20)
     p.add_argument("binaries", nargs="+")
     p.set_defaults(func=orders)
+    p = sub.add_parser("carriers")
+    p.add_argument("dirs", nargs="+")
+    p.set_defaults(func=carriers)
     p = sub.add_parser("heap")
     p.add_argument("--top", type=int, default=30)
     p.add_argument("profiles", nargs="+")

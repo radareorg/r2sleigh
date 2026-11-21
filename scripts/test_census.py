@@ -444,5 +444,17 @@ class StatsRatchet(unittest.TestCase):
         self.assertEqual(census.STAT.findall(text), [("sealed.computed", "12"), ("frames_built", "7")])
 
 
+class CarrierLocals(unittest.TestCase):
+    def test_only_locals_at_no_stack_offset_count(self):
+        record = {"variables": [
+            {"name": "arg0", "kind": "param", "location": "arg:0"},
+            {"name": "rdi_1", "kind": "local", "location": "carrier"},
+            {"name": "local_8", "kind": "local", "location": "stack:-0x8"},
+            {"name": "rdi_2", "kind": "local", "location": "carrier"},
+        ]}
+        self.assertEqual(census.carrier_count(record), 2)
+        self.assertEqual(census.carrier_count({"cause": "timeout"}), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

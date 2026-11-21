@@ -16,7 +16,8 @@ Phases:
   6. Targeted cargo mutants for crates/r2ssa/src/var.rs
   7. Harness contracts
   8. Certification gate contracts
-  9. Equivalence gate
+  9. Frame agreement (scripts/frame_agree.py, D633)
+ 10. Equivalence gate
 
 Environment:
   R2SLEIGH_MUTANTS_JOBS     Jobs for cargo mutants, default: 2
@@ -247,6 +248,15 @@ run python3 scripts/test_census.py
 run python3 scripts/test_compile_check.py
 run python3 scripts/test_c_types.py
 run python3 scripts/test_differential_truth.py
+
+phase "Frame agreement"
+# D633: `afv` and `pdd` read one frame model. The bounds are the counts measured
+# on the committed census when it landed; the 3 `pdd-only` are frame arrays a
+# rendering declares for a parameter home it reads at narrower widths.
+run cargo build -p r2s --features sleigh
+run python3 scripts/frame_agree.py --committed --r2s "${CARGO_TARGET_DIR:-target}/debug/r2s" \
+    --bound afv-only=0 --bound pdd-only=3 --bound name=0 --bound type=0 \
+    --bound afv-twice=0 --bound pdd-twice=0 --bound reads=0 --bound rows=579
 
 phase "Equivalence gate"
 # Replaces the plugin-driven 54-cell cutover corpus, which could no longer run:

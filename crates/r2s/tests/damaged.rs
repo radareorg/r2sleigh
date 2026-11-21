@@ -27,8 +27,8 @@ fn run(args: &[&str], name: &str, script: &str) -> (bool, String, String) {
     )
 }
 
-/// Each crackme whose section table `object` refuses opens and lists the same functions, entry0
-/// among them; `iS` lists none. `main` waits on D636 (the BROKEN golden in `posture`).
+/// Each crackme whose section table `object` refuses lists the same functions, `iS` none: entry0,
+/// `__libc_start_main`'s stub (D636), and `main` and `__libc_csu_*`, which entry0 hands it.
 #[test]
 fn a_refused_section_table_leaves_the_segments_and_the_dynamic_table() {
     let damaged = [
@@ -49,10 +49,21 @@ fn a_refused_section_table_leaves_the_segments_and_the_dynamic_table() {
             "{name}: {refused}"
         );
         let functions = lines.map(str::to_owned).collect::<Vec<_>>();
-        assert!(
-            functions.iter().any(|row| row.starts_with("0x004005c0 ")),
-            "{name}: entry0"
-        );
+        for (start, what) in [
+            ("0x004005c0 ", "entry0"),
+            (
+                "0x00400578    1      6 sym.imp.__libc_start_main",
+                "the stub",
+            ),
+            ("0x004006a4 ", "main"),
+            ("0x00400730 ", "__libc_csu_fini"),
+            ("0x00400740 ", "__libc_csu_init"),
+        ] {
+            assert!(
+                functions.iter().any(|row| row.starts_with(start)),
+                "{name}: {what}: {functions:?}"
+            );
+        }
         listings.push(functions);
     }
     assert!(listings.windows(2).all(|pair| pair[0] == pair[1]));

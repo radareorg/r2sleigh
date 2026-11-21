@@ -15,7 +15,8 @@ use crate::program::Binding;
 use r2il::R2ILOp;
 use r2sleigh_lift::Disassembler;
 
-/// Sleigh fetches a whole window whatever the instruction needs.
+/// Sleigh fetches a whole window whatever the instruction needs: its longest instruction
+/// (`ParserContext::MAX_INSTRUCTION_LEN`, `context.hh:113`).
 const DECODE_WINDOW: usize = 16;
 
 /// How strongly a binding names its address: a global before a weak alias before a local one.
@@ -398,7 +399,7 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
         let Some(cells) = section_stubs(source, decoder, linkage, &slots, alignment) else {
             continue;
         };
-        held.push((section.range(), cells));
+        held.push((vec![section.range()], cells));
     }
     // Where no section states the linkage code, its lazy slots do (D530).
     let covered = |at: u64| {
@@ -408,9 +409,9 @@ pub fn imports(source: &impl Source, decoder: &Disassembler, alignment: u32) -> 
             .any(|(start, end)| (start..end).contains(&at))
     };
     let lazy = lazy_stubs(source, decoder, &slots, alignment, &covered);
-    held.extend(lazy.map(|(range, cells)| ((range.start, range.end), cells)));
-    for (range, cells) in held {
-        sections.push(range);
+    held.extend(lazy);
+    for (ranges, cells) in held {
+        sections.extend(ranges);
         for (start, Cell { symbol, size }) in cells {
             match symbol {
                 Some(symbol) => _ = named.entry(start).or_insert(Stub { symbol, size }),
@@ -596,10 +597,11 @@ fn section_stubs(
 }
 
 /// Linkage code no section states, and its cells by start.
-type LazyStubs = (std::ops::Range<u64>, Vec<(u64, Cell)>);
+/// The linkage code's `(start, end)` stretches, in address order, and its stubs.
+type LazyStubs = (Vec<(u64, u64)>, Vec<(u64, Cell)>);
 
 /// The stubs no section states, from the lazy slots' file words, which point into the linkage code
-/// (ELF gABI lazy binding; AAELF64: each starts at PLT[0]); ROADMAP D530. `O(slots)` runs.
+/// (ELF gABI lazy binding): at each slot's own stub (D636) or, none such, at PLT[0] (AAELF64; D530).
 fn lazy_stubs(
     source: &impl Source,
     decoder: &Disassembler,
@@ -630,6 +632,19 @@ fn lazy_stubs(
     let lazy = (slots.keys())
         .filter_map(|slot| Some((*slot, word(*slot).filter(|at| code(*at))?)))
         .collect::<BTreeMap<_, _>>();
+    let fetch = Fetch {
+        source,
+        decoder,
+        endian,
+    };
+    let align = u64::from(alignment.max(1));
+    let own = (lazy.iter())
+        .filter_map(|(slot, word)| Some((*slot, stub_ending_at(&fetch, *slot, *word, align)?)))
+        .collect::<Vec<_>>();
+    // Every word at its own stub, or none: a mix states two layouts and names no stub.
+    if !own.is_empty() {
+        return (own.len() == lazy.len()).then(|| own_stubs(&fetch, &lazy, &own, slots))?;
+    }
     let start = lazy.values().copied().min()?;
     let mut end = None;
     let mut pc = start;
@@ -671,13 +686,133 @@ fn lazy_stubs(
         run = fresh_run(pc);
     }
     let range = start..end?;
-    let align = u64::from(alignment.max(1));
     let linkage = StubSpan {
         range: range.clone(),
         align,
     };
     let cells = section_stubs(source, decoder, linkage, slots, alignment)?;
-    Some((range, cells))
+    Some((vec![(range.start, range.end)], cells))
+}
+
+/// What decodes one instruction where the container states its bytes.
+struct Fetch<'a, S> {
+    source: &'a S,
+    decoder: &'a Disassembler,
+    endian: r2il::Endianness,
+}
+
+impl<S: Source> Fetch<'_, S> {
+    /// The instruction at `pc`, or none where it does not decode or reads a field the loader leaves unstated.
+    fn at(&self, pc: u64) -> Option<r2il::R2ILBlock> {
+        let window = self.source.read(pc, DECODE_WINDOW)?;
+        let loader = &self.source.container().loader_writes;
+        let code = crate::stated::code(loader, pc, window, self.endian);
+        let mut bytes = code.bytes.clone();
+        bytes.resize(DECODE_WINDOW, 0);
+        let lifted = (self.decoder.lift(&bytes, pc).ok()).filter(|lifted| lifted.size != 0)?;
+        (!code.unstated(&(pc..pc + u64::from(lifted.size)))).then_some(lifted)
+    }
+
+    /// The run from `pc` to its first transfer, as `(end, operations of its last instruction)`.
+    fn run(&self, pc: u64) -> Option<(u64, r2il::R2ILBlock)> {
+        let mut at = pc;
+        // A run no stub is as long ends the question: `STUB_INSTRUCTIONS` decodes at most.
+        for _ in 0..STUB_INSTRUCTIONS {
+            let lifted = self.at(at)?;
+            at += u64::from(lifted.size);
+            // A branch within the instruction (Sleigh's constant space) leaves nowhere.
+            if (lifted.ops.iter()).any(|op| op.is_control_flow() && !op.is_local_branch()) {
+                return Some((at, lifted));
+            }
+        }
+        None
+    }
+}
+
+/// The one aligned instruction ending at `word` that jumps through `slot`: unbound, `slot` holds the
+/// "address of the following pushq" (x86-64 psABI 1.0, 5.2, PLT; D636). `O(DECODE_WINDOW)` decodes.
+fn stub_ending_at<S: Source>(
+    fetch: &Fetch<'_, S>,
+    slot: u64,
+    word: u64,
+    align: u64,
+) -> Option<u64> {
+    let ends_through = |k: u64| {
+        let at = word.checked_sub(k)?;
+        let lifted = fetch.at(at)?;
+        let terminal = lifted.ops.len().checked_sub(1)?;
+        let through = r2ssa::terminal_indirect_loaded_slot(&lifted, terminal)
+            .is_some_and(|loaded| loaded.offset == slot);
+        (u64::from(lifted.size) == k && through && at % align == 0).then_some(at)
+    };
+    let mut found = (1..=DECODE_WINDOW as u64).filter_map(ends_through);
+    let start = found.next()?;
+    found.next().is_none().then_some(start)
+}
+
+/// Each slot's stub as a cell from its jump through the run at its word to the one resolver every
+/// run shares, which leaves through a reserved word (PLT0). `O(slots * STUB_INSTRUCTIONS)` decodes.
+fn own_stubs<S: Source>(
+    fetch: &Fetch<'_, S>,
+    lazy: &BTreeMap<u64, u64>,
+    own: &[(u64, u64)],
+    slots: &BTreeMap<u64, &str>,
+) -> Option<LazyStubs> {
+    let container = fetch.source.container();
+    let mut resolver = None;
+    let mut cells = Vec::with_capacity(own.len());
+    for (slot, start) in own {
+        let (end, last) = fetch.run(*lazy.get(slot)?)?;
+        // The run at the word pushes its index and jumps directly to the resolver.
+        let [.., R2ILOp::Branch { target }] = last.ops.as_slice() else {
+            return None;
+        };
+        (target.space == r2il::SpaceId::Ram).then_some(())?;
+        if *resolver.get_or_insert(target.offset) != target.offset {
+            return None;
+        }
+        let symbol = slots.get(slot).map(|name| (*name).to_owned());
+        cells.push((
+            *start,
+            Cell {
+                symbol,
+                size: end - start,
+            },
+        ));
+    }
+    let resolver = resolver?;
+    let (resolved, last) = fetch.run(resolver)?;
+    let terminal = last.ops.len().checked_sub(1)?;
+    let through = r2ssa::terminal_indirect_loaded_slot(&last, terminal)?;
+    let reserved = container
+        .loader_write_at(through.offset)
+        .is_some_and(|write| write.kind == r2abi::statement::WriteKind::Reserved);
+    reserved.then_some(())?;
+    cells.sort_unstable_by_key(|(start, _)| *start);
+    // Cells that overlap, or a resolver inside one, are no layout the psABI states.
+    let disjoint = cells
+        .windows(2)
+        .all(|pair| pair[0].0 + pair[0].1.size <= pair[1].0);
+    let outside = |at: u64| {
+        !cells
+            .iter()
+            .any(|(start, cell)| (*start..*start + cell.size).contains(&at))
+    };
+    (disjoint && outside(resolver)).then_some(())?;
+    // Only the decoded runs are linkage: bytes between them are unread, so no start there is dropped.
+    let mut runs = (cells.iter())
+        .map(|(start, cell)| (*start, start + cell.size))
+        .chain([(resolver, resolved)])
+        .collect::<Vec<_>>();
+    runs.sort_unstable();
+    let mut held = Vec::<(u64, u64)>::with_capacity(runs.len());
+    for (start, end) in runs {
+        match held.last_mut() {
+            Some(last) if last.1 >= start => last.1 = last.1.max(end),
+            _ => held.push((start, end)),
+        }
+    }
+    Some((held, cells))
 }
 
 /// Whether one instruction's operations make a choice no stub makes.

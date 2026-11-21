@@ -920,9 +920,14 @@ def our_frame(lines):
     """r2s's `afv`: each fact to its row; a refusal is one fact of its own."""
     found = {}
     for line in lines:
+        # radare2's line is the part before the fate r2s states after ` ; ` (D633).
+        line = line.split(" ; ", 1)[0]
         words = line.split()
         if line.startswith("refused:"):
             found[("refused", " ".join(words))] = " ".join(words)
+        elif words[:1] == ["var"] and re.fullmatch(r"frame\[\d+\]", words[-3]):
+            # The frame array has no radare2 counterpart: its byte 0 is no var's place (D633).
+            found.setdefault(("array", frame_key(words[-1])[1]), " ".join(words))
         elif words[:1] in (["arg"], ["var"]) and len(words) >= 3 and words[-2] == "@":
             found.setdefault(frame_key(words[-1]), " ".join(words))
         elif words[:1] == ["arg"] and len(words) >= 3:

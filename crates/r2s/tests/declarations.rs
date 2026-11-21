@@ -46,7 +46,7 @@ fn a_struct_parameter_costs_the_function_none_of_its_types() {
     let afv = run("rv_O0g", "afv @ sym.list_len");
     assert!(
         afv.lines()
-            .any(|line| line == "var int32_t c @ entry.sp-0xc"),
+            .any(|line| line == "var int32_t c @ entry.sp-0xc ; in frame at +0x1c"),
         "{afv}"
     );
     let result = common::returned(&out).unwrap_or_default();

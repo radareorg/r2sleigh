@@ -7,15 +7,25 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// A GCC-built x86-64 ELF carried in the tree, not stripped.
-fn hashes() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned/hashes_gcc_x64_O2")
+fn pinned(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/coverage/pinned")
+        .join(name)
 }
 
-/// The shell's stdout for `script`, run with stdout a pipe; it must succeed.
+fn hashes() -> PathBuf {
+    pinned("hashes_gcc_x64_O2")
+}
+
+/// The shell's stdout for `script` on hashes, run with stdout a pipe; it must succeed.
 fn piped(script: &str) -> String {
+    piped_on(&hashes(), script)
+}
+
+fn piped_on(binary: &std::path::Path, script: &str) -> String {
     let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
         .args(["-q", "-c", script])
-        .arg(hashes())
+        .arg(binary)
         .env_remove("NO_COLOR")
         .output()
         .expect("the shell runs");
@@ -23,22 +33,21 @@ fn piped(script: &str) -> String {
     String::from_utf8(done.stdout).expect("text")
 }
 
-/// Every function of hashes, by entry.
-fn entries() -> Vec<String> {
-    let listed = piped("afl");
-    let words = listed
-        .lines()
-        .filter_map(|line| line.split_whitespace().next());
-    words.map(str::to_owned).collect()
+/// One command per function of hashes, split by a fence, in `afl` order.
+fn each(command: &str) -> Vec<String> {
+    each_on(&hashes(), command)
 }
 
-/// One command per function, split by a fence, in `entries` order.
-fn each(command: &str) -> Vec<String> {
-    let script = (entries().iter())
+fn each_on(binary: &std::path::Path, command: &str) -> Vec<String> {
+    let listed = piped_on(binary, "afl");
+    let entries = listed
+        .lines()
+        .filter_map(|line| line.split_whitespace().next());
+    let script = entries
         .map(|entry| format!("?e ==F; {command} @ {entry}"))
         .collect::<Vec<_>>()
         .join("; ");
-    let out = piped(&script);
+    let out = piped_on(binary, &script);
     out.split("==F\n").skip(1).map(str::to_owned).collect()
 }
 
@@ -97,9 +106,19 @@ fn a_piped_pdd_is_the_definitions_bytes() {
 /// line is at most the column's 11 cells past its plain width.
 #[test]
 fn the_laid_out_pdd_strips_back_to_the_plain_one() {
-    let plain = each("pdd");
-    let laid = each("e asm.rails=true; e asm.pdd.addr=true; pdd");
-    let listed = each("pdf");
+    for name in [
+        "hashes_gcc_x64_O2",
+        "branchy_gcc_x64_O0",
+        "shapes_gcc_x64_O0",
+    ] {
+        strips_back(&pinned(name));
+    }
+}
+
+fn strips_back(binary: &std::path::Path) {
+    let plain = each_on(binary, "pdd");
+    let laid = each_on(binary, "e asm.rails=true; e asm.pdd.addr=true; pdd");
+    let listed = each_on(binary, "pdf");
     for ((plain, laid), listed) in plain.iter().zip(&laid).zip(&listed) {
         let instructions = (listed.lines())
             .filter_map(|line| line[line.find("0x")?..].split_whitespace().next())
@@ -108,9 +127,11 @@ fn the_laid_out_pdd_strips_back_to_the_plain_one() {
         let mut back: Vec<String> = Vec::new();
         let mut widths: Vec<usize> = Vec::new();
         for line in laid.lines() {
-            // A continuation is its statement's next bytes (D620).
+            // A continuation is its statement's next bytes (D620); a cut line ends at a break point,
+            // after a space or a cast, where a struct member line's predecessor ends in `;` or `{`.
             if let (Some(segment), Some(last), Some(width)) =
                 (continued(line), back.last_mut(), widths.last_mut())
+                && last.ends_with([' ', ')'])
             {
                 last.push_str(segment);
                 *width = (*width).max(line.chars().count());
@@ -206,23 +227,20 @@ fn the_railed_notes_count_the_proof_lines_type_clauses() {
     assert!(seen > 0, "hashes states a type or unassigned clause");
 }
 
-/// On a terminal no laid out line passes 160 cells (D620), except where an `r2dec gap` comment,
-/// which holds no break point, is the run past the room; the line without it fits.
+/// On a terminal no laid out line of a pinned function passes 160 cells (D620): a comment breaks
+/// at its spaces and a cast chain after a cast, where C reads the line break as white space.
 #[test]
-fn a_laid_out_line_fits_160_cells_or_holds_one_unbreakable_comment() {
-    let laid = each("e asm.rails=true; e asm.pdd.addr=true; pdd");
+fn no_laid_out_line_of_a_pinned_function_passes_160_cells() {
     let mut over = Vec::new();
-    for line in laid.iter().flat_map(|text| text.lines()) {
-        let width = line.chars().count();
-        if width <= 160 {
-            continue;
-        }
-        let before = line
-            .find("/* r2dec gap")
-            .map(|at| line[..at].chars().count());
-        if before.is_none_or(|before| before > 160) {
-            over.push(format!("{width}: {line}"));
-        }
+    for name in [
+        "hashes_gcc_x64_O2",
+        "branchy_gcc_x64_O0",
+        "shapes_gcc_x64_O0",
+    ] {
+        let laid = each_on(&pinned(name), "e asm.rails=true; e asm.pdd.addr=true; pdd");
+        let lines = laid.iter().flat_map(|text| text.lines());
+        let wide = lines.filter(|line| line.chars().count() > 160);
+        over.extend(wide.map(|line| format!("{name} {}: {line}", line.chars().count())));
     }
     assert!(
         over.is_empty(),

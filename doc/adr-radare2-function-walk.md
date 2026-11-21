@@ -141,6 +141,16 @@ As built:
 - A pad's edge back into the normal flow (a `catch` that returns) lands inside a normal block,
   which is not split: `afb` lists no edge there. Splitting it is D598's, with the pad's entry state.
 
+## D632's trace: code a pad reaches behind a dispatch (round 17)
+
+A pad's bytes join the survey only where a walk records the call that unwinds to it, so a pad
+whose call sites no walk reaches is never walked. 0pack: pad 0x6763c2 serves call sites
+0x674a2a..0x674a64 and 0x6760dd..0x676187 of `LIEF::DEX::File::raw(bool) const` (0x673c60), both
+behind its unresolved dispatch at 0x673f3d (D648); the pad's `jmp 0x46d0cb` into the function's
+`.cold.524` part is never followed, and `unaccounted_code` refuses there. The pads' walk follows
+such a jump as it follows any branch (`Walk::transfer`); nothing in it changes. pumasim's
+0x2ff6ef lies behind 0x2ff630's two dispatches (D646). Both wait on dispatch reads.
+
 ## Handed reader as built (D590)
 
 Discovery believes a constant a body hands to an import's code parameter (`__libc_start_main`'s
