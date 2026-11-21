@@ -707,11 +707,12 @@ wrong on the merged head); D620 leaves no laid line over 160 cells on the four p
 switches 147 to 159. D604 was reverted at the exit: its narrowing on `x` for `x & x` breaks the value solve's bound on 3
 more pumasim bodies, and `sym.process_display_basi` 0x52dd60 loses its 17-entry table (135 to 123 blocks). The exit paid D470's ten structure rises at their owners (6648dba6a) and fixed
 one Codex finding: D636's linkage is the runs its stubs and resolver decode, not one range across code between them (ce498541f).
-Against eb327af9a (contabo `instructions:u`, median of 3): cold pumasim `pdd @ 0x23fdf0` 121.757 to 121.801 G (+0.04%), cold
-0pack `pdd @ 0x62ecf0` 75.236 to 75.286 G (+0.07%), bash `aa; pdd @ 0x2e630` +0.04%, pumasim `aa; pdd @ 0x3b6b20` +0.01%, bash
-cold `pdf @ 0x1e1d0` 58.673 to 58.795 G (+0.21%; D470 +0.121%, D633/D636 +0.056%, D604/D650 +0.058%, one `cost_causes.txt`
-line); peak RSS flat (350, 266, 91, 214, 165 MiB); each cold answer equals its `aa;` twin; the Mac 50-function session peaks at
-467.8 MB (gate 549). 105 of 105 goldens without `aa` equal their `aa;` answers. The suite passes 3,865 tests (9 ignored);
+Against eb327af9a (contabo `instructions:u`, median of 3): cold pumasim `pdd @ 0x23fdf0` 121.757 to 121.831 G (+0.06%), cold
+0pack `pdd @ 0x62ecf0` 75.235 to 75.281 G (+0.06%), bash `aa; pdd @ 0x2e630` +0.01%, pumasim `aa; pdd @ 0x3b6b20` -0.03%, bash
+cold `pdf @ 0x1e1d0` 58.673 to 58.771 G (+0.17%; D470 +0.121%, D633/D636 +0.056%, one `cost_causes.txt` line); peak RSS flat
+(349, 266, 93, 215, 166 MiB); each cold answer equals its `aa;` twin; the Mac 50-function session peaks at 473 MB (gate 549;
+Mac peak RSS moves by up to 36 MB between two copies of one binary, so contabo's is the RSS row).
+105 of 105 goldens without `aa` equal their `aa;` answers. The suite passes 3,863 tests (9 ignored);
 equivalence holds 828 records on x86-64 (744 equal, 0 verdict moves on contabo) and both arches on CI; D490 0 unjudged;
 certification invents 0 (127 calls); void_soundness renders 0 of 1,858 read results void; history gate 0 of 9 moved; scan
 growth 1.998 to 2.003 (`rmw_round_trips` Ir 2.373 held in `OPEN`, D457); the refuter replays 11, 0 refuted.
