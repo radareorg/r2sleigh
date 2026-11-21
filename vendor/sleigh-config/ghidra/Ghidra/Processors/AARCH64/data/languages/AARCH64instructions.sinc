@@ -2587,6 +2587,20 @@ DecodeTMask64: "#"^tmask is b_31=1 & b_22=0 & b_1115=0x1e & b_1010 & b_1616
 [ tmask=((~(-1<<(((b_1010-b_1616)&0x1)+1)))&0x3)*0x5*0x11*0x101*0x10001*0x100000001; ]
 { export * [const]:8 tmask; }
 
+# Logical immediates: DecodeBitMasks(immediate=TRUE) is UNDEFINED when imms fills the element; the bit-field moves keep DecodeWMask.
+LogicalWMask32: DecodeWMask32 is b_15=0 & b_1014!=0x1f & DecodeWMask32 { export DecodeWMask32; }
+LogicalWMask32: DecodeWMask32 is b_1415=0x2 & b_1013!=0xf & DecodeWMask32 { export DecodeWMask32; }
+LogicalWMask32: DecodeWMask32 is b_1315=0x6 & b_1012!=0x7 & DecodeWMask32 { export DecodeWMask32; }
+LogicalWMask32: DecodeWMask32 is b_1215=0xe & b_1011!=0x3 & DecodeWMask32 { export DecodeWMask32; }
+LogicalWMask32: DecodeWMask32 is b_1115=0x1e & b_1010!=0x1 & DecodeWMask32 { export DecodeWMask32; }
+
+LogicalWMask64: DecodeWMask64 is b_22=1 & b_1015!=0x3f & DecodeWMask64 { export DecodeWMask64; }
+LogicalWMask64: DecodeWMask64 is b_22=0 & b_15=0 & b_1014!=0x1f & DecodeWMask64 { export DecodeWMask64; }
+LogicalWMask64: DecodeWMask64 is b_22=0 & b_1415=0x2 & b_1013!=0xf & DecodeWMask64 { export DecodeWMask64; }
+LogicalWMask64: DecodeWMask64 is b_22=0 & b_1315=0x6 & b_1012!=0x7 & DecodeWMask64 { export DecodeWMask64; }
+LogicalWMask64: DecodeWMask64 is b_22=0 & b_1215=0xe & b_1011!=0x3 & DecodeWMask64 { export DecodeWMask64; }
+LogicalWMask64: DecodeWMask64 is b_22=0 & b_1115=0x1e & b_1010!=0x1 & DecodeWMask64 { export DecodeWMask64; }
+
 ImmRConst32: "#"^ImmR is ImmR { export *[const]:4 ImmR; }
 ImmRConst64: "#"^ImmR is ImmR { export *[const]:8 ImmR; }
 

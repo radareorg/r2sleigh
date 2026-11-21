@@ -150,6 +150,7 @@ r2sleigh-lift
 | D278 | The AArch64 `extension="zero"` override goes upstream (gap G16) | the pull request linked in `vendor/README.md` and both r2abi citations | open |
 | D323 | `mov r32, imm32` lifts as a 32-bit write and its widening | census | built cd16feae0 |
 | D352 | x86 `int3` and `int1` are traps | `a_call_to_a_function_that_executes_int3_ends_its_caller` | built 5b8062a23 |
+| D664 | AArch64 logical immediates whose `imms` fills the element are UNDEFINED (Arm ARM `DecodeBitMasks`: `if immediate && (imms AND levels) == levels then UNDEFINED`): `e07f0032`, `e0ff40b2`, `007c0012` decoded and lifted as `orr w0, wzr, 0xffffffff`, `orr x0, xzr, -0x1`, `and w0, w0, 0xffffffff`. `DecodeWMask32`/`64` (`AARCH64instructions.sinc`) also feed BFM, SBFM and UBFM, where all ones is legal, so the 12 logical constructors read new `LogicalWMask32`/`64` rows, one per element size with its all ones `imms` excluded. Ghidra master `3fb3eec6a0` identical (patch at the scratchpad `upstream/ghidra-d664.md`, nothing opened). Owner the vendored core | `aarch64_logical_immediate_filling_its_element_decodes_to_nothing`: 69 words (each element size, each constructor) decode and lift nothing; `lsr`, `sxtw`, `mov w0, 0x55555555` still decode | built |
 
 r2ssa
 -----

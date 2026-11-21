@@ -223,10 +223,10 @@ is b_31=1 & AdrReloff & b_2428=0x10 & Rd_GPR64
 # CONSTRUCT x12000000/mask=xff800000 MATCHED 1 DOCUMENTED OPCODES
 # AUNIT --inst x12000000/mask=xff800000 --status pass
 
-:and Rd_GPR32wsp, Rn_GPR32, DecodeWMask32
-is sf=0 & opc=0 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32wsp & Rd_GPR64xsp
+:and Rd_GPR32wsp, Rn_GPR32, LogicalWMask32
+is sf=0 & opc=0 & b_2428=0x12 & b_2323=0 & LogicalWMask32 & Rn_GPR32 & Rd_GPR32wsp & Rd_GPR64xsp
 {
-	tmp_1:4 = Rn_GPR32 & DecodeWMask32;
+	tmp_1:4 = Rn_GPR32 & LogicalWMask32;
 	Rd_GPR64xsp = zext(tmp_1);
 }
 
@@ -234,10 +234,10 @@ is sf=0 & opc=0 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32ws
 # CONSTRUCT x92000000/mask=xff800000 MATCHED 1 DOCUMENTED OPCODES
 # AUNIT --inst x92000000/mask=xff800000 --status pass
 
-:and Rd_GPR64xsp, Rn_GPR64, DecodeWMask64
-is sf=1 & opc=0 & b_2428=0x12 & b_2323=0 & DecodeWMask64 & Rn_GPR64 & Rd_GPR64xsp
+:and Rd_GPR64xsp, Rn_GPR64, LogicalWMask64
+is sf=1 & opc=0 & b_2428=0x12 & b_2323=0 & LogicalWMask64 & Rn_GPR64 & Rd_GPR64xsp
 {
-	tmp_1:8 = Rn_GPR64 & DecodeWMask64;
+	tmp_1:8 = Rn_GPR64 & LogicalWMask64;
 	Rd_GPR64xsp = tmp_1;
 }
 
@@ -270,10 +270,10 @@ is sf=1 & opc=0 & b_2428=0xa & N=0 & RegShift64Log & Rn_GPR64 & Rd_GPR64
 # CONSTRUCT x72000000/mask=xff800000 MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst x72000000/mask=xff800000 --status pass --comment "flags"
 
-:ands Rd_GPR32, Rn_GPR32, DecodeWMask32
-is sf=0 & opc=3 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32 & Rd_GPR64
+:ands Rd_GPR32, Rn_GPR32, LogicalWMask32
+is sf=0 & opc=3 & b_2428=0x12 & b_2323=0 & LogicalWMask32 & Rn_GPR32 & Rd_GPR32 & Rd_GPR64
 {
-	tmp_1:4 = Rn_GPR32 & DecodeWMask32;
+	tmp_1:4 = Rn_GPR32 & LogicalWMask32;
 	resultflags(tmp_1);
 	Rd_GPR64 = zext(tmp_1);
 	affectLflags();
@@ -284,10 +284,10 @@ is sf=0 & opc=3 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32 &
 # CONSTRUCT xf2000000/mask=xff800000 MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst xf2000000/mask=xff800000 --status pass --comment "flags"
 
-:ands Rd_GPR64, Rn_GPR64, DecodeWMask64
-is sf=1 & opc=3 & b_2428=0x12 & b_2323=0 & DecodeWMask64 & Rn_GPR64 & Rd_GPR64
+:ands Rd_GPR64, Rn_GPR64, LogicalWMask64
+is sf=1 & opc=3 & b_2428=0x12 & b_2323=0 & LogicalWMask64 & Rn_GPR64 & Rd_GPR64
 {
-	tmp_1:8 = Rn_GPR64 & DecodeWMask64;
+	tmp_1:8 = Rn_GPR64 & LogicalWMask64;
 	resultflags(tmp_1);
 	Rd_GPR64 = tmp_1;
 	affectLflags();
@@ -2353,10 +2353,10 @@ is sf=1 & opc=2 & b_2428=0xa & N=1 & Rm_GPR64 & RegShift64Log & Rn_GPR64 & Rd_GP
 # CONSTRUCT x52000000/mask=xff800000 MATCHED 1 DOCUMENTED OPCODES
 # AUNIT --inst x52000000/mask=xff800000 --status pass
 
-:eor Rd_GPR32wsp, Rn_GPR32, DecodeWMask32
-is sf=0 & opc=2 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32wsp & Rd_GPR64xsp
+:eor Rd_GPR32wsp, Rn_GPR32, LogicalWMask32
+is sf=0 & opc=2 & b_2428=0x12 & b_2323=0 & LogicalWMask32 & Rn_GPR32 & Rd_GPR32wsp & Rd_GPR64xsp
 {
-	tmp_1:4 = Rn_GPR32 ^ DecodeWMask32;
+	tmp_1:4 = Rn_GPR32 ^ LogicalWMask32;
 	Rd_GPR64xsp = zext(tmp_1);
 }
 
@@ -2364,10 +2364,10 @@ is sf=0 & opc=2 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32ws
 # CONSTRUCT xd2000000/mask=xff800000 MATCHED 1 DOCUMENTED OPCODES
 # AUNIT --inst xd2000000/mask=xff800000 --status pass
 
-:eor Rd_GPR64xsp, Rn_GPR64, DecodeWMask64
-is sf=1 & opc=2 & b_2428=0x12 & b_2323=0 & DecodeWMask64 & Rn_GPR64 & Rd_GPR64xsp
+:eor Rd_GPR64xsp, Rn_GPR64, LogicalWMask64
+is sf=1 & opc=2 & b_2428=0x12 & b_2323=0 & LogicalWMask64 & Rn_GPR64 & Rd_GPR64xsp
 {
-	tmp_1:8 = Rn_GPR64 ^ DecodeWMask64;
+	tmp_1:8 = Rn_GPR64 ^ LogicalWMask64;
 	Rd_GPR64xsp = tmp_1;
 }
 
@@ -3936,11 +3936,11 @@ is sf=1 & opc=2 & b_2428=0x12 & b_2323=1 & FullImm_movz64_imm & Rd_GPR64
 # CONSTRUCT x320003e0/mask=xffe0ffe0 MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst x320003e0/mask=xffe0ffe0 --status pass
 
-:mov Rd_GPR32wsp, DecodeWMask32
-is sf=0 & opc=1 & b_2428=0x12 & b_2223=0 & N=0 & imm6=0 & DecodeWMask32 & aa_Xn=31 & Rd_GPR32wsp & Rd_GPR64xsp
+:mov Rd_GPR32wsp, LogicalWMask32
+is sf=0 & opc=1 & b_2428=0x12 & b_2223=0 & N=0 & imm6=0 & LogicalWMask32 & aa_Xn=31 & Rd_GPR32wsp & Rd_GPR64xsp
 {
 	# special case ORR
-	tmp_1:4 = DecodeWMask32;
+	tmp_1:4 = LogicalWMask32;
 	Rd_GPR64xsp = zext(tmp_1);
 }
 
@@ -3949,11 +3949,11 @@ is sf=0 & opc=1 & b_2428=0x12 & b_2223=0 & N=0 & imm6=0 & DecodeWMask32 & aa_Xn=
 # CONSTRUCT xb20003e0/mask=xffc0ffe0 MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst xb20003e0/mask=xffc0ffe0 --status pass
 
-:mov Rd_GPR64xsp, DecodeWMask64
-is sf=1 & opc=1 & b_2428=0x12 & b_2223=0 & imm6=0 & DecodeWMask64 & aa_Xn=31 & Rd_GPR64xsp
+:mov Rd_GPR64xsp, LogicalWMask64
+is sf=1 & opc=1 & b_2428=0x12 & b_2223=0 & imm6=0 & LogicalWMask64 & aa_Xn=31 & Rd_GPR64xsp
 {
 	# special case of ORR
-	tmp_1:8 = DecodeWMask64;
+	tmp_1:8 = LogicalWMask64;
 	Rd_GPR64xsp = tmp_1;
 }
 
@@ -4620,10 +4620,10 @@ is sf=1 & opc=1 & b_2428=0xa & N=1 & RegShift64Log & Rn_GPR64 & Rd_GPR64
 # CONSTRUCT x32000000/mask=xff800000 MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst x32000000/mask=xff800000 --status pass
 
-:orr Rd_GPR32wsp, Rn_GPR32, DecodeWMask32
-is sf=0 & opc=1 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32wsp & Rd_GPR64xsp
+:orr Rd_GPR32wsp, Rn_GPR32, LogicalWMask32
+is sf=0 & opc=1 & b_2428=0x12 & b_2323=0 & LogicalWMask32 & Rn_GPR32 & Rd_GPR32wsp & Rd_GPR64xsp
 {
-	tmp_1:4 = Rn_GPR32 | DecodeWMask32;
+	tmp_1:4 = Rn_GPR32 | LogicalWMask32;
 	Rd_GPR64xsp = zext(tmp_1);
 }
 
@@ -4632,10 +4632,10 @@ is sf=0 & opc=1 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd_GPR32ws
 # CONSTRUCT xb2000000/mask=xff800000 MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst xb2000000/mask=xff800000 --status pass
 
-:orr Rd_GPR64xsp, Rn_GPR64, DecodeWMask64
-is sf=1 & opc=1 & b_2428=0x12 & b_2323=0 & DecodeWMask64 & Rn_GPR64 & Rd_GPR64xsp
+:orr Rd_GPR64xsp, Rn_GPR64, LogicalWMask64
+is sf=1 & opc=1 & b_2428=0x12 & b_2323=0 & LogicalWMask64 & Rn_GPR64 & Rd_GPR64xsp
 {
-	tmp_1:8 = Rn_GPR64 | DecodeWMask64;
+	tmp_1:8 = Rn_GPR64 | LogicalWMask64;
 	Rd_GPR64xsp = tmp_1;
 }
 
@@ -7072,10 +7072,10 @@ is b_1931=0b1101010100001 & b_1618=0b000 & b_1215=0b1000 & b_0811=0b0111 & b_050
 # CONSTRUCT x7200001f/mask=xff80001f MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst x7200001f/mask=xff80001f --status pass --comment "flags"
 
-:tst Rn_GPR32, DecodeWMask32
-is sf=0 & opc=3 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd=0x1f
+:tst Rn_GPR32, LogicalWMask32
+is sf=0 & opc=3 & b_2428=0x12 & b_2323=0 & LogicalWMask32 & Rn_GPR32 & Rd=0x1f
 {
-	tmp_2:4 = DecodeWMask32;
+	tmp_2:4 = LogicalWMask32;
 	tmp_1:4 = Rn_GPR32 & tmp_2;
 	resultflags(tmp_1);
 	affectLflags();
@@ -7086,10 +7086,10 @@ is sf=0 & opc=3 & b_2428=0x12 & b_2323=0 & DecodeWMask32 & Rn_GPR32 & Rd=0x1f
 # CONSTRUCT xf200001f/mask=xff80001f MATCHED 2 DOCUMENTED OPCODES
 # AUNIT --inst xf200001f/mask=xff80001f --status pass --comment "flags"
 
-:tst Rn_GPR64, DecodeWMask64
-is sf=1 & opc=3 & b_2428=0x12 & b_2323=0 & DecodeWMask64 & Rn_GPR64 & Rd=0x1f
+:tst Rn_GPR64, LogicalWMask64
+is sf=1 & opc=3 & b_2428=0x12 & b_2323=0 & LogicalWMask64 & Rn_GPR64 & Rd=0x1f
 {
-	tmp_2:8 = DecodeWMask64;
+	tmp_2:8 = LogicalWMask64;
 	tmp_1:8 = Rn_GPR64 & tmp_2;
 	resultflags(tmp_1);
 	affectLflags();
