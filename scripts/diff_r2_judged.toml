@@ -2472,3 +2472,12 @@ verdict = "deliberate"
 r2_line = "libr/bin/format/elf/elf.c:4266-4270"
 reason = "elf_stripped's section table (e_shoff 0x7cc, 27 entries of 40 bytes) runs past its 1,996 bytes, so r2s reads segments and the dynamic table alone and states no section (D577); radare2 makes .rel.dyn, .rela.plt and .got.plt from DT_REL, DT_JMPREL and DT_PLTGOT (get_sections_from_dt, elf.c:4266-4270), sections no header states"
 
+
+# round 17 stubs-frame-pads
+[[judged]]
+command = "afv"
+binaries = "*"
+lacking = "r2"
+r2s = '^var uint8_t frame\[\d+\] @ entry\.sp-0x[0-9a-f]+$'
+verdict = "deliberate"
+reason = "D633: afv lists the one byte array `pdd` declares the frame's members in (r2ssa FrameLayout; branchy_gcc_x64_O0 main `var uint8_t frame[568] @ entry.sp-0x238`, each member row stating `; in frame at +N`); radare2 has no frame-array variable, only the slots, which r2s lists on their own rows"

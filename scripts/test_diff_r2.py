@@ -521,6 +521,9 @@ class Analysis(unittest.TestCase):
                                   "var uint64_t stack_m8 @ entry.sp-0x8"])
         self.assertEqual(set(rows), {diff_r2.frame_key("entry.sp-0xc"), diff_r2.frame_key("entry.sp-0x8")})
         self.assertEqual(rows[diff_r2.frame_key("entry.sp-0xc")], "var uint32_t stack_m12 @ entry.sp-0xc")
+        # The frame array is keyed apart, so it never takes a radare2 var's place.
+        array = diff_r2.our_frame(["var uint8_t frame[568] @ entry.sp-0x238"])
+        self.assertEqual(list(array), [("array", -0x238)])
 
     def test_frame_and_reference_rows_are_read_as_the_shared_definition(self):
         # Sleigh's low lane of xmm0 is xmm0; a demangled caller's name holds spaces.
