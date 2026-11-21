@@ -501,18 +501,25 @@ fn solve_counted(
             };
             (ranges, meter)
         }
-        // A solve that broke its bound states nothing: every value is unknown.
-        Err(_) => {
-            let top =
-                (graph.values.iter()).map(|value| StridedInterval::top(width_of(value.var.size)));
-            let ranges = ValueRanges {
-                by_value: top.collect(),
-                class,
-                env_of: Vec::new(),
-                envs: Vec::new(),
-            };
-            (ranges, crate::fixpoint::Meter::default())
+        Err(_) => (unsolved(graph, class), crate::fixpoint::Meter::default()),
+    }
+}
+
+/// What a solve that broke its bound states: a literal is its bits, every other value is unknown
+/// (D650). `O(values)`.
+fn unsolved(graph: &SsaGraph, class: Vec<ValueId>) -> ValueRanges {
+    let known = (graph.values.iter()).map(|value| {
+        let width = width_of(value.var.size);
+        match value.var.constant_bits() {
+            Some(bits) => StridedInterval::constant(width, bits),
+            None => StridedInterval::top(width),
         }
+    });
+    ValueRanges {
+        by_value: known.collect(),
+        class,
+        env_of: Vec::new(),
+        envs: Vec::new(),
     }
 }
 
@@ -1265,6 +1272,28 @@ mod tests {
         }
         cfg.rebuild_edges();
         cfg
+    }
+
+    /// A solve that broke its bound still states each literal's bits, which need no solve (D650).
+    #[test]
+    fn an_unsolved_function_still_states_its_literals() {
+        let mut block = SSABlock::new(0x1000, 4);
+        block.push(crate::op::SSAOp::IntAdd {
+            dst: var("sum", 1, 4),
+            a: var("eax", 0, 4),
+            b: constant(69, 4),
+        });
+        let function = SSAFunction::from_exact_test_blocks(&[block.clone()], straight_line(block));
+        let graph = SsaGraph::from_function(&function);
+        let class = (graph.values.iter()).map(|value| value.id).collect();
+        let ranges = unsolved(&graph, class);
+        let literal = graph.value_id_for_var(&constant(69, 4)).expect("69");
+        let sum = graph.value_id_for_var(&var("sum", 1, 4)).expect("sum");
+        assert_eq!(
+            (ranges.lower_bound(literal), ranges.upper_bound(literal)),
+            (Some(69), Some(69))
+        );
+        assert_eq!(ranges.upper_bound(sum), None);
     }
 
     fn straight_line(block: SSABlock) -> CFG {
