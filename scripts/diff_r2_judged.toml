@@ -1081,15 +1081,6 @@ reason = "a conditional LDMIA SP! is POP<c>; the listing's ARM aliasing (r2sleig
 command = "aoj"
 binaries = "*"
 fields = ["decode"]
-r2s = '^orr x\d+, xzr, '
-r2 = '^mov x\d+, '
-verdict = "r2-right"
-reason = "ORR Xd, XZR, #imm is MOV (bitmask immediate), its preferred disassembly where MOVZ/MOVN cannot encode the value (Arm ARM C6.2); Sleigh spells the ORR; owner the Sleigh spelling (ROADMAP P11)"
-
-[[judged]]
-command = "aoj"
-binaries = "*"
-fields = ["decode"]
 r2s = '^udf '
 r2 = '^invalid$'
 verdict = "r2s-right"
@@ -1536,7 +1527,7 @@ command = "aoj"
 binaries = "*"
 fields = ["decode"]
 r2s = '^orr [wx]\d+, [wx]zr, 0x[0-9a-f]+$'
-r2 = '^mov [wx]\d+, \d+$'
+r2 = '^mov [wx]\d+, (0x[0-9a-f]+|\d+)$'
 verdict = "r2s-right"
 reason = "ORR with the zero register is MOV only where no single MOVZ or MOVN writes the value (Arm ARM MoveWidePreferred; llvm-mc: orr w0, wzr, #0x1); radare2 writes mov for every such ORR"
 
@@ -1547,7 +1538,8 @@ corpus = "elf"
 r2 = '^static true$'
 r2s = '^static false$'
 verdict = "r2s-right"
-reason = "radare2 prints static when the image needs no library (an empty DT_NEEDED); a shared object or a memory image that holds a PT_DYNAMIC is relocated by another image's loader, so it is not statically linked. r2s says static for an image with neither PT_INTERP nor PT_DYNAMIC, the one nothing else relocates (the permanence rule reads it)"
+reason = "radare2 prints static when the image needs no library (libr/core/cbin.c:1048 at 6.2.4: `r_list_empty (obj->libs)`); r2s says false where the container states another image's loader builds it: PT_INTERP, DT_NEEDED or DT_SONAME (ld-2.27.so, ld-2.31.so, ld-2.32.so state DT_SONAME). `static` is read only by `i`; no permanence rule reads it (D663)"
+
 
 # ── D570: landing pads radare2 does not walk (radare2 6.2.4 libr/core/canal.c:684) ──
 
@@ -1814,6 +1806,7 @@ corpus = "elf"
 function = 'entry\.(init|fini)1'
 verdict = "r2s-right"
 upstream = "ie lists no init or fini entry of a static binary: .init_array and .fini_array are read only through DT_INIT_ARRAY"
+note = "stale once the radare2 pin passes 3dd89422 (radare2#27538), which lists these entries; kept at the 6.2.4 pin"
 reason = "class A: static-glibc-2.27 .init_array (0x6b6140) holds 0x400b20 and 0x4005a0, .fini_array (0x6b6150) 0x400ae0 and 0x400570; r2s lists entry.init1 and entry.fini1, radare2's ie prints only the program entry"
 
 [[judged]]
@@ -2481,3 +2474,20 @@ lacking = "r2"
 r2s = '^var uint8_t frame\[\d+\] @ entry\.sp-0x[0-9a-f]+$'
 verdict = "deliberate"
 reason = "D633: afv lists the one byte array `pdd` declares the frame's members in (r2ssa FrameLayout; branchy_gcc_x64_O0 main `var uint8_t frame[568] @ entry.sp-0x238`, each member row stating `; in frame at +N`); radare2 has no frame-array variable, only the slots, which r2s lists on their own rows"
+
+# round 18 surface-pads
+[[missed]]
+command = "i"
+binaries = ["aarch64-relative-linkbase.so", "aarch64-relr-linkbase.so", "arm-plt-lld-be8.so", "arm-relative-linkbase.so", "i386-aps2-rel.so", "i386-base10000-rel.so", "i386-base10000-rela.so", "libflutterapp.so", "x86_64-abs-sym-noshdr.so", "x86_64-abs-sym.so", "x86_64-relative-linkbase.so"]
+values = ["static"]
+verdict = "deliberate"
+r2_line = "libr/core/cbin.c:1048"
+reason = "each holds PT_DYNAMIC with no PT_INTERP, DT_NEEDED, DT_SONAME or DF_1_PIE, so the container states nothing about whether only its own start-up builds it and r2s prints no `static` row (D663); radare2 6.2.4 prints true from no DT_NEEDED alone (cbin.c:1048, `r_list_empty (obj->libs)`)"
+
+[[missed]]
+command = "i"
+binaries = ["x86-64-ovl-ptload.so"]
+values = ["static"]
+verdict = "unfilled"
+row = "D663"
+reason = "one of the 4 exportless images (with arm64-relative-plt.elf, phdr-hash-nchain-unmapped.so, x86_64-x32-relative.so, which the pinned testbins do not hold): PT_DYNAMIC, no PT_INTERP, DT_NEEDED, DT_SONAME or DF_1_PIE, and no export; r2s states nothing, radare2 infers static true from no DT_NEEDED (cbin.c:1048 at 6.2.4) and, after radare2#27530, from no export"
