@@ -161,7 +161,48 @@ Open.
 
 ## As built: places and records (D641 to D645, D649, D652)
 
-Open.
+### D641 step 0 (record half): counted from engine facts
+
+A local probe (never committed) printed per function, from r2ssa's address facts and certificates at 5f39d32a6, over DecBench's 2,621 functions. Certified accesses equal the structured accesses one to one, and each instruction's ordinals run from 0 without a gap, so a position column is exact.
+
+RAM accesses (84,079) by the address fact that states them and by index terms:
+
+| Address fact | 0 terms | 1 term | 2 or more |
+|---|---|---|---|
+| parameter expression | 18,130 | 1,577 | 227 |
+| pointee expression | 2,271 | 1,177 | 120 |
+| frame expression | 35,561 | 384 | 1 |
+| none | 24,631 | | |
+
+These are engine accesses; a promoted slot's access prints no site, so they do not add to the `pdd` site counts.
+
+The loaded pointer class (11,041 parsed sites). An access is based on a loaded pointer where its address, through copies and constant adds, roots at a load:
+
+| Where the pointer was loaded from | Accesses | Join |
+|---|---|---|
+| a parameter or pointee field at a constant offset (pointee expression) | 2,161 | keyed by field |
+| an address with no expression, itself a load root | 4,920 | keyed by field, one level per load |
+| a frame slot | 276 + 16 | a reaching store through `MemoryVersion` |
+| a global | 164 | none this round |
+| an indexed parameter or pointee address | 25 | `Element` (D649) |
+| no load root (a merge of two pointers, or an index) | 1,391 with a pointee expression, 19,246 without | none |
+
+D644's pin: at most 7,081 accesses join by field, 292 more only through a proven reaching store.
+
+Readers of `PointeeObjectKey` equality as must alias (invariant 10):
+
+1. `build_memory_ssa` (`semantic/objects.rs`): accesses of one pointee object at one offset are one location. Refused as a proof of same content: a pointer loaded before a write that re-points its field and dereferenced after a second load of the same field shares the key, and no version tells them apart (`p1 = a->f; f(); p2 = a->f; p2->x = v; y = p1->x` reads `v`'s version).
+2. `same_content_reads` (`function/mod.rs`): two reads of one object, offset and width under the same versions hold one content. Over pointee objects, 60 DecBench pairs read through one pointer load (proven: one pointer) and 37 through two loads of one path (unproven, case 1). Refusing the 37 can change liveness and so the output; it is recorded here, and D642 keeps the builder's map.
+3. `collect_memory_round_trips` (`semantic/private_objects.rs`): keyed by the address value, not the key, so proven by value identity. Its "no other write" check reads writes of the same object only; a call between the read and the write is not one. Recorded as a found fact for its owner, not built here.
+4. `backward_slice` (`slice.rs`): a diagnostic; it prints the versions and decides nothing.
+
+`ObjectId` is minted dense from 0 per function: 2,621 of 2,621 functions, 31,782 objects.
+
+Parameter view: in 177 parameters the places alone (every access whose parameter expression names the slot) lay out another structure than `ParameterFields`' def-use reach (54 with other fields, 93 where the reach refused `NotAffine`, 24 the reach never saw, 6 the other way). D642 keeps the reach so its output is byte identical; D643 drops it.
+
+### D642: `MemoryPlaces`
+
+r2ssa `memory_places.rs`: one `AccessPlace` per structured access in `memory_accesses` order, base `Parameter`, `Loaded`, `Frame`, `Global` or `None`, place `Field`, `Element` (one positive stride with the access inside one stride) or `Unplaced` (`NotAffine`, `IndexPastStride`, `Unmodelled`, `NoBase`). `StructuredDataflowFacts::position` is the first position per instruction plus the ordinal, `O(1)`. A loaded root is a dense column over values filled once; a value on a cycle has none. `ObjectModel::objects` is a dense `ObjectTable`; `parameter_objects` and `pointee_objects` left the model (builder only); `global_objects` stays, a lookup by address. Other maps keyed by `ObjectId` or `StructuredAccessId` stay with LX. DecBench records 0 of 2,621 moved.
 
 ## As built: frame objects (D654, D655)
 
