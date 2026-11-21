@@ -1,0 +1,33 @@
+{
+ "0x1000": {
+  "code": "#include <stdint.h>\n\ntypedef uint64_t r2sleigh_result_u64;\n\ntypedef uint64_t r2sleigh_word_u64;\n\nstatic inline uint64_t r2sleigh_load_u64(const void *at)\n{\n    uint64_t value;\n    __builtin_memcpy(&value, at, sizeof value);\n    return value;\n}\n\nr2sleigh_result_u64 fcn_1000(r2sleigh_word_u64 arg0)\n{\n    extern char stderr[];\n\n    uint64_t rax_1;\n    uint64_t rcx_1;\n\n    /* r2dec proof: no individual construct is marked; 9 source obligations: 8 rendered, 0 refused, 1 residual; 4 statements rendered */\n    {\n        rax_1 = r2sleigh_load_u64((void*)(uint64_t)((uint64_t)arg0 + (uint64_t)8U));\n        rcx_1 = r2sleigh_load_u64((void*)(uint64_t)((uint64_t)rax_1 + (uint64_t)16U));\n        rax_1 = r2sleigh_load_u64((void*)&stderr);\n        return rax_1 + rcx_1 + r2sleigh_residual_u64(1);\n    }\n}",
+  "name": "fcn_1000",
+  "residuals": [
+   {
+    "cause": "unproven-return",
+    "id": 1
+   }
+  ],
+  "signature": "r2sleigh_result_u64 fcn_1000(r2sleigh_word_u64 arg0)",
+  "variables": [
+   {
+    "kind": "param",
+    "location": "arg:0",
+    "name": "arg0",
+    "type": "r2sleigh_word_u64"
+   },
+   {
+    "kind": "local",
+    "location": "carrier",
+    "name": "rax_1",
+    "type": "uint64_t"
+   },
+   {
+    "kind": "local",
+    "location": "carrier",
+    "name": "rcx_1",
+    "type": "uint64_t"
+   }
+  ]
+ }
+}
