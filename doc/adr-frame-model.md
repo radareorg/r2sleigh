@@ -326,10 +326,12 @@ promotion pass's refusal, the origin of each derived point that reaches a sink o
 the reason each kept place stays in memory. Class A (frame sites, `classify.py` on the base dump) is
 9,437 sites in 577 functions.
 
-**One join.** 120 listed functions refuse the whole frame on at least one promotion pass, 4,693 class A
-sites: 100 on every pass (4,171 sites) and 20 on some (522). The trace holds 120 more entries that no
-list names: callees built while a listed caller renders. That split is the disagreement measured at
-eb327af9a: 102 counted listed functions, 217 counted every entry. The gate counts listed functions.
+**One join.** 120 listed functions refuse the whole frame on at least one promotion pass; 102 of them
+have class A sites, 4,693 in all (95 refuse on every pass, 7 on some). The trace
+holds 120 more entries that no list names: callees built while a listed caller renders. The traces
+taken at eb327af9a (`designs/memtypes/prom`) give the same sets, 120 listed, 102 with sites, 120
+unlisted. So 102 is the listed functions with a frame site, and the gate counts those; 217 is
+reproduced by no join of these traces.
 
 **Origins.** No refusal comes from an access whose address has no points. One function refuses as
 `whole`, where a float operation consumes a frame address with one known point. 119 refuse on a
@@ -349,9 +351,16 @@ way, as D654 states; the walk is otherwise unchanged. Refused passes fall from 5
 promote more places, each a register save between -40 and -8 that `pdd` already elides. The DecBench
 dump is byte-identical, 2,621 of 2,621: loads and stores move 0. An escape reaches every place up to
 the next save on either side, and at -O2 every save sits above every local, so a derived address
-reaches every local. Under the switch the formerly refused functions keep their places as mixed widths
-(4,425 accesses), rewritten and reached (4,319) and reached (2,402). D654 is not built; the binding
-fact is D674's.
+reaches every local. Under the switch the 4,693 sites of the formerly refused functions stay in memory as:
+reached by an escape 3,122 (1,460 of them also rewritten), accessed at two widths 789, an opaque
+access 749, the one `whole` function 31, a save 2. D654 is not built. The largest class is the reach,
+D674's.
+
+On AArch64, switch-hello-world `_vfprintf_r` 0x16e9c (D637) refuses the whole frame on four derived
+points (-896, -872, -640, -624). Under the switch its whole-frame refusal lifts and 13 places promote,
+all saves; `[sp, 0x90]` (entry -1136) stays in memory because it is accessed at two widths (the
+64-bit table address and 13 32-bit `str w25`), so the table read stays unresolved and its 198 loads
+and stores do not move.
 
 **Kept places.** Each class A site, by the reason its place stays in memory on the rendered pass
 (`kept` in `walk.rs`; a site through a merged local is resolved through its one definition):
