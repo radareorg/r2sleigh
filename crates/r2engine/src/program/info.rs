@@ -35,6 +35,9 @@ pub struct FunctionInfo {
     pub returns: Option<Fact<Option<CTypeLike>>>,
     /// Where the result is unproven: the convention's carrier and why (doc/adr-scratch-result.md).
     pub unproven: Option<UnprovenResult>,
+    /// What a proven result's closed decision takes for granted (`result_premises`, D592); empty
+    /// where it rests on nothing or is unproven (D566).
+    pub result_premises: Vec<r2source::Premise>,
     /// Why control never comes back from it, and what that takes for granted: a proof, or a bound
     /// such as a walk that reached no return (D380). `None` where nothing says it never does.
     pub noreturn: Option<r2source::Never>,
@@ -139,6 +142,12 @@ impl FunctionInfo {
                         _ => None,
                     },
                 }),
+            result_premises: match sealed.return_type() {
+                Some(fact) if !fact.is_unproven() => {
+                    (artifact.function().result_premises().iter().copied()).collect()
+                }
+                _ => Vec::new(),
+            },
             locals: locals(artifact, sealed, &entities),
             noreturn,
             refused: None,
@@ -206,6 +215,7 @@ impl FunctionInfo {
             locals: Vec::new(),
             returns: None,
             unproven: None,
+            result_premises: Vec::new(),
             noreturn,
             refused: Some(refusal),
         }

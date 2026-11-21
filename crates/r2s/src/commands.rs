@@ -31,11 +31,22 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
         None => dispatch(session, &statement.command),
     };
     session.grepped = false;
-    let output = output?;
+    let output = output.map_err(|error| cut_seek(statement, error))?;
     Ok(match grep {
         Some(grep) => grep.apply(&output)?,
         None => output,
     })
+}
+
+/// A seek the line cut at an operator that then named nothing: the call line reads it whole.
+fn cut_seek(statement: &Statement, error: String) -> String {
+    match &statement.command {
+        Command::Plain { verb, .. } if verb == "s" && statement.cut => format!(
+            "{error}; the line cut the name at `;`, `~` or `@`: {}",
+            crate::line::CALL_FORM
+        ),
+        _ => error,
+    }
 }
 
 /// `@`: run a command somewhere else and leave the cursor where it was.
@@ -167,6 +178,20 @@ pub(crate) const VERBS: &[Verb] = &[
         Some(seek)
     ),
     verb!(
+        ["s-"],
+        Count,
+        Public,
+        "undo a seek, or seek n bytes backward",
+        Some(|session, argument| stepped(session, argument, false))
+    ),
+    verb!(
+        ["s+"],
+        Count,
+        Public,
+        "redo a seek, or seek n bytes forward",
+        Some(|session, argument| stepped(session, argument, true))
+    ),
+    verb!(
         ["e"],
         Key,
         Public,
@@ -179,6 +204,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Public,
         "what the binary is",
         Some(|session, _| info(session))
+    ),
+    verb!(
+        ["ij"],
+        None,
+        Public,
+        "what the binary is, as JSON",
+        Some(|session, _| info_json(session))
     ),
     verb!(
         ["il"],
@@ -228,6 +260,13 @@ pub(crate) const VERBS: &[Verb] = &[
         Public,
         "strings in data sections",
         Some(|session, _| strings(session).map(|table| table.spelled()))
+    ),
+    verb!(
+        ["izj"],
+        None,
+        Public,
+        "strings in data sections, as JSON",
+        Some(|session, _| strings_json(session))
     ),
     verb!(
         ["izz"],
@@ -297,7 +336,14 @@ pub(crate) const VERBS: &[Verb] = &[
         None,
         Public,
         "survey the program once: later answers are faster, never different",
-        Some(|session, _| session.program.analyse_program().map(|()| String::new()))
+        Some(analyse)
+    ),
+    verb!(
+        ["aaa"],
+        None,
+        Public,
+        "as aa: r2s's aa already states everything it can",
+        Some(analyse)
     ),
     verb!(
         ["afl"],
@@ -477,13 +523,67 @@ fn plain(session: &mut Session, verb: &str, argument: &str) -> Result<String, St
     if verb == "?" {
         return Ok(help());
     }
-    if let Some(named) = verb.strip_suffix('?').and_then(find) {
-        return Ok(usage(named, session.paints()));
+    if let Some(prefix) = verb.strip_suffix('?') {
+        // A letter more than one verb starts with is its group's help, as radare2's `a?` and `s?` are.
+        if prefix.len() == 1
+            && let Some(group) = group_help(prefix)
+        {
+            return Ok(group);
+        }
+        if let Some(named) = find(prefix) {
+            return Ok(usage(named, session.paints()));
+        }
     }
     match find(verb).and_then(|verb| verb.run) {
         Some(run) => run(session, argument),
-        None => Err(format!("unknown command '{verb}'")),
+        None => Err(unknown(verb)),
     }
+}
+
+/// `x?`: every verb whose name starts with `prefix`, in table order; none for fewer than two.
+fn group_help(prefix: &str) -> Option<String> {
+    let group = (VERBS.iter())
+        .filter(|verb| verb.name().starts_with(prefix))
+        .collect::<Vec<_>>();
+    if group.len() < 2 {
+        return None;
+    }
+    let width = group.iter().map(|verb| verb.usage().len()).max()?;
+    let mut out = format!("Usage: {prefix}[...]  the {prefix} commands");
+    for verb in group {
+        out.push_str(&format!("\n| {:width$}  {}", verb.usage(), verb.summary));
+    }
+    Some(out)
+}
+
+/// An unknown verb's error, naming the nearest verb at most two edits away that keeps one of its
+/// characters; a tie goes to the table's order.
+fn unknown(verb: &str) -> String {
+    let nearest = (VERBS.iter().filter(|known| known.run.is_some()))
+        .flat_map(|known| known.names.iter())
+        .map(|name| (edits(verb, name), *name))
+        .filter(|(distance, _)| *distance <= 2 && *distance < verb.chars().count())
+        .min_by_key(|(distance, _)| *distance);
+    match nearest {
+        Some((_, name)) => format!("unknown command '{verb}'; did you mean {name}"),
+        None => format!("unknown command '{verb}'"),
+    }
+}
+
+/// Levenshtein distance over characters, one row at a time: `O(|a| x |b|)`.
+fn edits(a: &str, b: &str) -> usize {
+    let b = b.chars().collect::<Vec<_>>();
+    let mut row = (0..=b.len()).collect::<Vec<_>>();
+    for (i, x) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let replaced = diagonal + usize::from(x != *y);
+            diagonal = row[j + 1];
+            row[j + 1] = replaced.min(row[j] + 1).min(row[j + 1] + 1);
+        }
+    }
+    row[b.len()]
 }
 
 /// `/as`: every instruction that enters the kernel, and the call it makes,
@@ -538,8 +638,32 @@ fn seek(session: &mut Session, argument: &str) -> Result<String, String> {
     if argument.is_empty() {
         return Ok(format!("{:#x}", session.addr));
     }
-    session.addr = parse_number(session, argument)?;
+    let to = parse_number(session, argument)?;
+    session.seek(to);
     Ok(String::new())
+}
+
+/// `s-` and `s+`: undo or redo a seek; with `n`, seek `n` bytes back or forward, which radare2
+/// pushes on its history (cmd_seek.inc.c:878-941).
+fn stepped(session: &mut Session, argument: &str, forward: bool) -> Result<String, String> {
+    if argument.is_empty() {
+        if let Some(to) = session.seeks.step(session.addr, forward) {
+            session.addr = to;
+        }
+        return Ok(String::new());
+    }
+    let delta = parse_number(session, argument)?;
+    let to = match forward {
+        true => session.addr.wrapping_add(delta),
+        false => session.addr.wrapping_sub(delta),
+    };
+    session.seek(to);
+    Ok(String::new())
+}
+
+/// `aa` and `aaa`: one survey of the program.
+fn analyse(session: &mut Session, _: &str) -> Result<String, String> {
+    session.program.analyse_program().map(|()| String::new())
 }
 
 /// A container format as radare2's `i` spells it: `elf64`, `mach064`, `pe`.
@@ -556,66 +680,81 @@ pub(crate) fn format_name(format: r2image::Format, bits: u32) -> String {
     (if bits == 64 { wide } else { name }).to_owned()
 }
 
-fn info(session: &Session) -> Result<String, String> {
+/// What `i` and `ij` say the binary is: one reading of the container. A posture key the
+/// format does not state is `None`, and neither verb prints it.
+fn stated_info(session: &Session) -> r2engine::InfoJson {
     let image = session.image();
     let arch = image.arch();
+    let container = image.container();
+    let posture = &container.posture;
+    let elf = container.format == r2image::Format::Elf;
+    r2engine::InfoJson {
+        core: r2engine::InfoCoreJson {
+            file: session.path.clone(),
+            format: format_name(image.format(), arch.bits),
+        },
+        bin: r2engine::InfoBinJson {
+            arch: arch.name.clone(),
+            baddr: image.base_address(),
+            bits: arch.bits,
+            endian: match arch.endian {
+                r2image::Endian::Little => "little",
+                r2image::Endian::Big => "big",
+            },
+            intrp: posture.interpreter.clone().filter(|path| !path.is_empty()),
+            lang: container.languages.program.spelled().to_owned(),
+            nx: posture.nx,
+            pic: elf.then_some(posture.load == r2image::LoadBase::Slid),
+            relro: posture.relro.map(|relro| relro.spelled()),
+            statically_linked: elf.then_some(posture.statically_linked),
+        },
+    }
+}
+
+fn info(session: &Session) -> Result<String, String> {
+    let r2engine::InfoJson { core, bin } = stated_info(session);
     let mut out = String::new();
-    out.push_str(&format!("file     {}\n", session.path));
-    out.push_str(&format!(
-        "format   {}\n",
-        format_name(image.format(), arch.bits)
-    ));
-    out.push_str(&format!("arch     {}\n", arch.name));
-    out.push_str(&format!("bits     {}\n", arch.bits));
-    out.push_str(&format!(
-        "endian   {}\n",
-        match arch.endian {
-            r2image::Endian::Little => "little",
-            r2image::Endian::Big => "big",
+    let mut row = |key: &str, value: String| out.push_str(&format!("{key:<9}{value}\n"));
+    row("file", core.file);
+    row("format", core.format);
+    row("arch", bin.arch);
+    row("bits", bin.bits.to_string());
+    row("endian", bin.endian.to_owned());
+    row("baddr", format!("{:#010x}", bin.baddr));
+    row("lang", bin.lang);
+    let posture = [
+        ("intrp", bin.intrp),
+        ("nx", bin.nx.map(|nx| nx.to_string())),
+        ("pic", bin.pic.map(|pic| pic.to_string())),
+        ("relro", bin.relro.map(str::to_owned)),
+        ("static", bin.statically_linked.map(|stat| stat.to_string())),
+    ];
+    for (key, value) in posture {
+        if let Some(value) = value {
+            row(key, value);
         }
-    ));
-    out.push_str(&format!("baddr    {:#010x}\n", image.base_address()));
-    out.push_str(&format!(
-        "lang     {}\n",
-        image.container().languages.program.spelled()
-    ));
-    posture(&mut out, image.container());
+    }
+    let image = session.image();
     // A `.gnu_debugdata` section refused whole: no symbol of it is listed (D572).
     if let Some(refused) = image.minidebug_refusal() {
         out.push_str(&format!("minidebug refused: {refused}\n"));
     }
-    if let Some(entry) = image
-        .entry_points()
-        .iter()
-        .find(|entry| entry.kind == r2image::EntryKind::Main)
-    {
-        out.push_str(&format!("entry    {:#010x}", entry.vaddr));
-    } else {
-        out.push_str("entry    none");
+    // A section table refused whole: the image states segments and the dynamic table (D577).
+    if let Some(refused) = image.sections_refused() {
+        out.push_str(&format!("sections refused: {refused}\n"));
+    }
+    let main = (image.entry_points().iter()).find(|entry| entry.kind == r2image::EntryKind::Main);
+    match (main, image.unbacked_entry()) {
+        (Some(entry), _) => out.push_str(&format!("entry    {:#010x}", entry.vaddr)),
+        (None, Some(entry)) => out.push_str(&format!("entry    {:#010x} (no code)", entry.vaddr)),
+        (None, None) => out.push_str("entry    none"),
     }
     Ok(out)
 }
 
-/// The container's posture under radare2's keys; a field the format does not state is not printed.
-fn posture(out: &mut String, container: &r2image::Container) {
-    let posture = &container.posture;
-    let stated = container.format == r2image::Format::Elf;
-    let mut row = |key: &str, value: String| out.push_str(&format!("{key:<9}{value}\n"));
-    if let Some(path) = posture.interpreter.as_ref().filter(|path| !path.is_empty()) {
-        row("intrp", path.clone());
-    }
-    if let Some(nx) = posture.nx {
-        row("nx", nx.to_string());
-    }
-    if stated {
-        row("pic", (posture.load == r2image::LoadBase::Slid).to_string());
-    }
-    if let Some(relro) = posture.relro {
-        row("relro", relro.spelled().to_owned());
-    }
-    if stated {
-        row("static", posture.statically_linked.to_string());
-    }
+/// `ij`: `i`'s facts under radare2's keys.
+fn info_json(session: &Session) -> Result<String, String> {
+    serde_json::to_string(&stated_info(session)).map_err(|error| error.to_string())
 }
 
 /// `il`: the libraries the program needs, one per line, in the order it states them.
@@ -635,7 +774,9 @@ fn entries(session: &Session, initialisers: bool) -> Result<String, String> {
     let spelled = |value: Option<u64>| {
         value.map_or_else(|| "----------".to_owned(), |value| format!("{value:#010x}"))
     };
-    for entry in session.image().entry_points() {
+    // The header's entry is listed where no code backs it too, as the header states it (D577).
+    let image = session.image();
+    for entry in image.entry_points().iter().chain(image.unbacked_entry()) {
         let kind = match entry.kind {
             r2image::EntryKind::Main if !initialisers => "program",
             r2image::EntryKind::Init if initialisers => "init",
@@ -847,21 +988,21 @@ fn references_to(session: &mut Session, argument: &str) -> Result<String, String
 /// Every reference to `wanted`, a row per referring function, each about the
 /// address the reference is made from.
 pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Table, String> {
-    let index = session.program.references()?.value;
+    let answer = session.program.references_to(wanted)?;
     let names = session.program.names();
     let mut table = Table::default();
-    let mut count = 0usize;
-    for (fact, source) in index.to(wanted) {
-        count += 1;
-        let text = match &source.line.syntax {
-            Some(_) => crate::listing::spelled(&source.line, &names, session.demangle),
+    let count = answer.referring.len();
+    for referring in &answer.referring {
+        let fact = referring.fact;
+        let text = match &referring.line {
+            Some(line) => crate::listing::spelled(line, &names, session.demangle),
             // A word in data, which the loader fills with the address: spelled as radare2 spells a pointer-sized datum.
             None => format!("{} {wanted:#010x}", datum(session)),
         };
         // A source in no function is radare2's `(nofunc)`.
-        let owners = match source.owners.is_empty() {
+        let owners = match referring.owners.is_empty() {
             true => vec!["(nofunc)".to_owned()],
-            false => source
+            false => referring
                 .owners
                 .iter()
                 .map(|owner| names.function(*owner, session.demangle))
@@ -886,7 +1027,7 @@ pub(crate) fn references_table(session: &mut Session, wanted: u64) -> Result<Tab
             "\n; none within the functions read, which is not proof {wanted:#x} is unreferenced"
         ));
     }
-    table.foot.push_str(&coverage(&index.coverage));
+    table.foot.push_str(&coverage(&answer.index.coverage));
     Ok(table)
 }
 
@@ -937,8 +1078,9 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
     if coverage.is_closed() {
         return format!("\n; covers {read} functions, every body walked to its end");
     }
-    let indirect = coverage.indirect_count();
-    let other = coverage.unresolved_count() - indirect;
+    // An unwalked body states no count; its own clause below says it is unread.
+    let indirect = coverage.indirect_count().unwrap_or(0);
+    let other = coverage.unreadable_count();
     let gaps = [
         (
             indirect,
@@ -968,16 +1110,36 @@ fn coverage(coverage: &r2engine::query::Coverage) -> String {
 /// container states hold the program's data, and only where the loader
 /// leaves the bytes alone. Spelled with escapes, one per line.
 pub(crate) fn strings(session: &Session) -> Result<Table, String> {
+    Ok(string_table(&stated_strings(session)?))
+}
+
+/// `izj`: `iz`'s strings under radare2's keys.
+fn strings_json(session: &Session) -> Result<String, String> {
+    serde_json::to_string(&stated_strings(session)?).map_err(|error| error.to_string())
+}
+
+/// The strings `iz` and `izj` list, in address order, each with where it sits.
+fn stated_strings(session: &Session) -> Result<Vec<r2engine::StringJson>, String> {
     // The strings are read out of the image, so a patched image has other ones.
     session.program.loaded()?;
-    let found: Vec<(u64, String)> = session
-        .program
-        .names()
-        .iter()
+    let names = session.program.names();
+    let found = (names.iter())
         .filter(|(_, name)| name.namespace == r2engine::names::Namespace::String)
-        .map(|(vaddr, name)| (vaddr, name.text.to_string()))
-        .collect();
-    Ok(string_table(session, &found))
+        .enumerate()
+        .map(|(ordinal, (vaddr, name))| {
+            let text = name.text.to_string();
+            r2engine::StringJson {
+                vaddr,
+                paddr: file_offset_of(session, vaddr),
+                ordinal,
+                size: text.len() + 1,
+                length: text.chars().count(),
+                section: section_of(session, vaddr, false),
+                kind: text_type(&text),
+                string: text,
+            }
+        });
+    Ok(found.collect())
 }
 
 /// `izz`: every run of text in every section's bytes, whatever the section holds.
@@ -1029,25 +1191,27 @@ fn every_string(session: &Session) -> Result<String, String> {
 }
 
 /// The rows of a string listing, as radare2's `iz` lays them out.
-fn string_table(session: &Session, found: &[(u64, String)]) -> Table {
+fn string_table(found: &[r2engine::StringJson]) -> Table {
     let mut table = Table::headed([
         "nth paddr      vaddr      len size section type  string".to_owned(),
         "-".repeat(55),
     ]);
-    for (nth, (vaddr, text)) in found.iter().enumerate() {
-        let paddr = file_offset_of(session, *vaddr).map_or_else(
+    for one in found {
+        let paddr = one.paddr.map_or_else(
             || "----------".to_owned(),
             |offset| format!("{offset:#010x}"),
         );
         table.row(
-            Some(*vaddr),
+            Some(one.vaddr),
             format!(
-                "{nth:<3} {paddr} {vaddr:#010x} {:<3} {:<4} {} {:<5} {}",
-                text.chars().count(),
-                text.len() + 1,
-                section_of(session, *vaddr, false),
-                text_type(text),
-                r2engine::names::escaped(text)
+                "{:<3} {paddr} {:#010x} {:<3} {:<4} {} {:<5} {}",
+                one.ordinal,
+                one.vaddr,
+                one.length,
+                one.size,
+                one.section,
+                one.kind,
+                r2engine::names::escaped(&one.string)
             ),
         );
     }
@@ -1612,6 +1776,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
     let laid = match &rendering.response.output {
         r2engine::EngineRendering::Function(rendered) if session.railed() || session.pdd_addr => {
             let emission = rendered.emission();
+            let breaks = rendered.break_points();
             let residuals = emission.residuals().len();
             let notes = crate::rails::notes(session, addr, &rendering.response, residuals);
             let stated = crate::rails::Stated {
@@ -1621,6 +1786,7 @@ fn decompile(session: &mut Session, argument: &str) -> Result<String, String> {
                 depths: emission.depths(),
                 proof: emission.proof_line(),
                 lowest: emission.lowest_addresses(),
+                breaks: &breaks,
             };
             Some(crate::rails::laid(session, &stated, &notes))
         }

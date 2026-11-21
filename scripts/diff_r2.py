@@ -84,8 +84,8 @@ import time
 import tomllib
 
 VERDICTS = ("r2s-right", "r2-right", "unfilled", "deliberate")
-# A judged radare2-only value names radare2's line (6.2.4) when radare2 is wrong, an open row otherwise.
-MISSED_WITNESS = {"r2s-right": "r2_line", "r2-right": "row", "unfilled": "row"}
+# A judged radare2-only value names radare2's line (6.2.4) when radare2 is wrong or spells it on purpose, an open row otherwise.
+MISSED_WITNESS = {"r2s-right": "r2_line", "deliberate": "r2_line", "r2-right": "row", "unfilled": "row"}
 R2_LINE = re.compile(r"[\w./-]+\.\w+:\d+(-\d+)?")
 ROW = re.compile(r"[A-Z]+\d+(\.\d+)*[a-z]?")
 VALUE = re.compile(r"0x[0-9a-f]+|[a-z]+")

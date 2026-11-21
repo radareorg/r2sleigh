@@ -77,8 +77,8 @@ MUTANTS = [
     # D218: a printf call's own format states its vector reads.
     ("a-format-states-nothing", [(FATES, "if let Some(effect) = self.by_site.get(&(block, op)) {",
                                   "if let Some(effect) = None::<&CallEffect> {")], [BOUNDARY]),
-    ("a-float-conversion-reads-no-vector", [(FATES, "(!consumed.any_floating).then_some(format.unfloated)",
-                                             "Some(format.unfloated)")], [BOUNDARY]),
+    ("a-float-conversion-reads-no-vector", [(FATES, "(!consumed.any_floating).then_some(address)",
+                                             "Some(address)")], [BOUNDARY]),
     ("a-writable-format-is-trusted", [(FATES, "crate::native::immutable_text_at(self.view, address)?",
                                        "crate::native::text_at(self.view, address)?")], [BOUNDARY]),
     ("a-call-keeps-every-register", [(FATES, "origins.step_under(operation, Some(&self.call));",
@@ -88,10 +88,10 @@ MUTANTS = [
     ("call-takes-ignored", [(LIVENESS, "merge(&mut live.open, call.takes.0);", "let _ = call.takes.0;")], [SITES, BOUNDARY]),
     ("return-hands-nothing-back", [(LIVENESS, "merge(&mut live.returned, self.lanes.every());",
                                     "let _ = self.lanes.every();")], [SITES, READS]),
-    ("unstated-reads-leave-the-lanes-closed", [(LIVENESS, "if operation.reads_unstated() {\n            merge(&mut live.open, self.lanes.every());\n        }", "")],
+    ("unstated-reads-leave-the-lanes-closed", [(LIVENESS, "if step.unstated {\n            merge(&mut live.open, self.lanes.every());\n        }", "")],
      [SITES]),
     # The register effect's `kept` (S31b, D319): each deny and the transfer that reads it.
-    ("kept-past-an-open-block", [(LIVENESS, "if self.open[at] || self.leaves[at] || self.irregular[at] {",
+    ("kept-past-an-open-block", [(LIVENESS, "if self.graph.open[at] || self.graph.leaves[at] || self.graph.irregular[at] {",
                                   "if false {")], [SITES]),
     ("kept-past-a-derived-never", [(LIVENESS, "Some(op) if op.is_call() && never(at, block.ops.len() - 1) => {}",
                                     "Some(op) if op.is_call() => {}")], [SITES]),

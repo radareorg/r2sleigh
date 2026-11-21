@@ -63,11 +63,11 @@
 0pack pdd @ 0x0058e3d0 | sealed.reused | 0
 0pack pdd @ 0x0058e3d0 | site_fates_in_direct_sites | 0
 0pack pdd @ 0x0058e3d0 | site_fates_never_joined | 0
-0pack pdd @ 0x0058e3d0 | site_fates_relifted | 1
+0pack pdd @ 0x0058e3d0 | site_fates_relifted | 0
 0pack pdd @ 0x0058e3d0 | table_seals | 547
 0pack pdd @ 0x0058e3d0 | walked.computed | 48
 0pack pdd @ 0x0058e3d0 | walked.recomputed | 0
-0pack pdd @ 0x0058e3d0 | walked.reused | 4
+0pack pdd @ 0x0058e3d0 | walked.reused | 3
 0pack pdd @ 0x0062ecf0 | analysed.computed | 1
 0pack pdd @ 0x0062ecf0 | analysed.recomputed | 0
 0pack pdd @ 0x0062ecf0 | analysed.reused | 1
@@ -97,11 +97,11 @@
 0pack pdd @ 0x0062ecf0 | sealed.reused | 0
 0pack pdd @ 0x0062ecf0 | site_fates_in_direct_sites | 0
 0pack pdd @ 0x0062ecf0 | site_fates_never_joined | 0
-0pack pdd @ 0x0062ecf0 | site_fates_relifted | 495
+0pack pdd @ 0x0062ecf0 | site_fates_relifted | 0
 0pack pdd @ 0x0062ecf0 | table_seals | 547
-0pack pdd @ 0x0062ecf0 | walked.computed | 3890
+0pack pdd @ 0x0062ecf0 | walked.computed | 3393
 0pack pdd @ 0x0062ecf0 | walked.recomputed | 0
-0pack pdd @ 0x0062ecf0 | walked.reused | 4
+0pack pdd @ 0x0062ecf0 | walked.reused | 6
 bash aa; pdd @ 0x2e630 | analysed.computed | 1
 bash aa; pdd @ 0x2e630 | analysed.recomputed | 0
 bash aa; pdd @ 0x2e630 | analysed.reused | 1
@@ -131,9 +131,9 @@ bash aa; pdd @ 0x2e630 | sealed.recomputed | 0
 bash aa; pdd @ 0x2e630 | sealed.reused | 0
 bash aa; pdd @ 0x2e630 | site_fates_in_direct_sites | 0
 bash aa; pdd @ 0x2e630 | site_fates_never_joined | 0
-bash aa; pdd @ 0x2e630 | site_fates_relifted | 108
+bash aa; pdd @ 0x2e630 | site_fates_relifted | 0
 bash aa; pdd @ 0x2e630 | table_seals | 183
-bash aa; pdd @ 0x2e630 | walked.computed | 1189
+bash aa; pdd @ 0x2e630 | walked.computed | 1081
 bash aa; pdd @ 0x2e630 | walked.recomputed | 0
 bash aa; pdd @ 0x2e630 | walked.reused | 0
 pumasim aa; pdd @ 0x3b6b20 | analysed.computed | 1
@@ -165,9 +165,9 @@ pumasim aa; pdd @ 0x3b6b20 | sealed.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | sealed.reused | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_in_direct_sites | 0
 pumasim aa; pdd @ 0x3b6b20 | site_fates_never_joined | 0
-pumasim aa; pdd @ 0x3b6b20 | site_fates_relifted | 55
+pumasim aa; pdd @ 0x3b6b20 | site_fates_relifted | 0
 pumasim aa; pdd @ 0x3b6b20 | table_seals | 1384
-pumasim aa; pdd @ 0x3b6b20 | walked.computed | 375
+pumasim aa; pdd @ 0x3b6b20 | walked.computed | 320
 pumasim aa; pdd @ 0x3b6b20 | walked.recomputed | 0
 pumasim aa; pdd @ 0x3b6b20 | walked.reused | 0
 pumasim afl | analysed.computed | 0
@@ -233,11 +233,11 @@ pumasim pdd @ 0x0023fdf0 | sealed.recomputed | 0
 pumasim pdd @ 0x0023fdf0 | sealed.reused | 0
 pumasim pdd @ 0x0023fdf0 | site_fates_in_direct_sites | 0
 pumasim pdd @ 0x0023fdf0 | site_fates_never_joined | 0
-pumasim pdd @ 0x0023fdf0 | site_fates_relifted | 1792
+pumasim pdd @ 0x0023fdf0 | site_fates_relifted | 0
 pumasim pdd @ 0x0023fdf0 | table_seals | 1384
-pumasim pdd @ 0x0023fdf0 | walked.computed | 9986
+pumasim pdd @ 0x0023fdf0 | walked.computed | 8192
 pumasim pdd @ 0x0023fdf0 | walked.recomputed | 0
-pumasim pdd @ 0x0023fdf0 | walked.reused | 16
+pumasim pdd @ 0x0023fdf0 | walked.reused | 18
 pumasim pdd @ 0x004baf30 | analysed.computed | 1
 pumasim pdd @ 0x004baf30 | analysed.recomputed | 0
 pumasim pdd @ 0x004baf30 | analysed.reused | 1
@@ -267,9 +267,9 @@ pumasim pdd @ 0x004baf30 | sealed.recomputed | 0
 pumasim pdd @ 0x004baf30 | sealed.reused | 0
 pumasim pdd @ 0x004baf30 | site_fates_in_direct_sites | 0
 pumasim pdd @ 0x004baf30 | site_fates_never_joined | 0
-pumasim pdd @ 0x004baf30 | site_fates_relifted | 1800
+pumasim pdd @ 0x004baf30 | site_fates_relifted | 0
 pumasim pdd @ 0x004baf30 | table_seals | 1384
-pumasim pdd @ 0x004baf30 | walked.computed | 10239
+pumasim pdd @ 0x004baf30 | walked.computed | 8439
 pumasim pdd @ 0x004baf30 | walked.recomputed | 0
 pumasim pdd @ 0x004baf30 | walked.reused | 29
 pumasim session: pdd of 50 functions | analysed.computed | 50
@@ -301,8 +301,8 @@ pumasim session: pdd of 50 functions | sealed.recomputed | 0
 pumasim session: pdd of 50 functions | sealed.reused | 0
 pumasim session: pdd of 50 functions | site_fates_in_direct_sites | 0
 pumasim session: pdd of 50 functions | site_fates_never_joined | 0
-pumasim session: pdd of 50 functions | site_fates_relifted | 2333
+pumasim session: pdd of 50 functions | site_fates_relifted | 0
 pumasim session: pdd of 50 functions | table_seals | 1384
-pumasim session: pdd of 50 functions | walked.computed | 13257
+pumasim session: pdd of 50 functions | walked.computed | 10919
 pumasim session: pdd of 50 functions | walked.recomputed | 0
-pumasim session: pdd of 50 functions | walked.reused | 160
+pumasim session: pdd of 50 functions | walked.reused | 165

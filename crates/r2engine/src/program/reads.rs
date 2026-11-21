@@ -196,7 +196,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         for (fact, claimant) in index.claimed() {
             // An address a body's instruction forms is a take, which S30 follows (`DeclaredSlot`).
             if fact.role == Role::Value && !claimant.owners.is_empty() {
-                let end = claimant.line.address + claimant.line.bytes.len() as u64;
+                let end = claimant.address + u64::from(claimant.length);
                 let take = |owner: &u64| Take {
                     target: fact.to,
                     from: fact.from,

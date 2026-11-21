@@ -447,3 +447,156 @@ Open, with the fact that stopped each:
   index is paid on every graph build; the walks it replaces visit 51 to 1,829
   blocks a command. The graph build moved 1.70% to 1.76% of samples; the rest
   is unattributed. The patch is kept outside the tree; no cache was added.
+
+## D470 local classes: step 0 (round 16, design and proof)
+
+**Invariant I.** For every class `C`, member `m`, and point `q` where the rendered C reads `C`'s
+local `L` to mean `m`, the last assignment to `L` executed on every path to `q` is `m`'s.
+
+**Classes (r2ssa, `local_classes.rs`, built in the collection while `ValueLiveness` lives).**
+Candidates are phi webs: a bound phi's output with each operand that is a bound instruction
+output of the same canonical location and the same value type. Formals, constants, unbound
+values and memory are never members. Two webs join only where no member of one interferes with
+a member of the other (`interfering_lanes == 0`), checked by the linear class test of Boissinot,
+Darte, Rastello, de Dinechin and Guillon (CGO 2009): the two member lists merged in dominator
+preorder, each value checked against its nearest dominating member only. A value with no proof
+is its own class. Storage: `class: Vec<u32>` by `ValueId`, members per class in preorder,
+`O(V α(V) + Σ segments)`. Per class, `joins` is the iterated dominance frontier of its member
+definition blocks (Cytron et al., TOPLAS 1991; Sreedhar and Gao, POPL 1995).
+
+**`current_at(C, block, ordinal) -> Option<ValueId>`.** The nearest element dominating
+`(block, ordinal)` among `C`'s member definitions and `C`'s joins: a member where that element
+is its definition or a join holding one of `C`'s own phis; `None` where it is a join with no phi
+of `C`, or nothing dominates. `O(log |C|)` by binary search in the preorder list.
+
+**Every site that assigns `L` in the rendered C.**
+
+1. A bound member's statement `L = e;`, printed at the member's SSA position: a block's
+   statements are spelled in instruction order.
+2. An edge copy into a phi `p` of `C` on `u -> v`, printed in the arm of `u`'s branch after its
+   test, or after `u`'s statements on a single edge. The structurer moves a back edge's copies
+   before a `do`/`while` tail test (fnv1a32's `rdi_1 = rdi_2;` before `while (...)`), see
+   **Tests** below. It is dropped exactly when its operand `o` is a bound member of `C` and
+   `current_at(C, u, end) == o`: `L` already holds `p`'s value on that edge. Otherwise it is
+   kept and assigns `L` (an unbound operand, whose expression has no assignment of its own, or
+   one outside `C`).
+3. A parallel copy whose writes clobber its reads goes through `next_carrier` temporaries: each
+   kept copy's operand is read before any write to `L`. With classes, a clobber is a write to
+   `L` and a read of any member of `C` in the same parallel copy, compared by class, not by id.
+4. The `input == output` edge assigns nothing; `L` holds `p` already (case 2's rule with `o = p`).
+5. An arm no path reads (`arm_read` false) assigns nothing; `p` is read on no path from it, so
+   no read reaches `q` through that edge.
+6. A formal's entry value is the parameter's own symbol; formals are never members, so no
+   class local is assigned at entry.
+
+**Lemma (reaching assignment).** Where `current_at(C, b, k) = Some(m)`, on every path to
+`(b, k)` the last assignment to `L` is `m`'s. Every assignment to `L` is at a member definition
+(site 1) or on an edge into a block of `C`'s phis (sites 2 to 5), and every such block is in
+`joins`. The nearest dominating element `x` of definitions and joins is the last of them on
+every path to `(b, k)` (Cytron's renaming argument: an element nearer on some path would lie in
+the dominance frontier closure, hence be an element dominating `(b, k)` nearer than `x`). If
+`x` is `m`'s definition, the statement assigned `m`. If `x` is a join holding `p` of `C`, every
+edge into it assigned `p`'s operand (kept copy) or held it (dropped copy, by induction in
+dominator order on `current_at(C, u, end)`), or is an arm no path reads (site 5). Members do not
+interfere, so no other member's definition lies between `x` and `(b, k)` on a path where `m` is
+read. A join without a phi of `C` gives `None`: the value depends on the path.
+
+**Reads and the reading point.** A read of member `m` prints `L` only where
+`current_at(C, b, k) == Some(m)` at its reading point; otherwise it is not a variable and the
+reader is bound (below). The reading point is where the text stands, not the SSA use:
+- a statement's operands, forwarded subexpressions included, read at the statement's
+  instruction `r`: `(block of r, ordinal of r)`. `Values.reading` holds the block today; it
+  gains the ordinal of the statement being spelled, set where the attempt starts;
+- an edge copy's operand reads at `(u, end)`;
+- a test or selector reads at `(u, end)`, and is admitted only where no edge out of `u` keeps a
+  copy into `C` (**Tests**).
+
+A forwarded value `v` (unbound, its expression printed at its reader) whose expression reads a
+member that `current_at` refuses at the reader is bound on the next attempt: it then prints at
+its own SSA position, where its operands are current. This covers a read forwarded past a
+redefinition, which SSA interference does not see.
+
+**Tests.** A tail test the structurer prints after `u`'s back edge copies reads `L` after a kept
+copy assigned `p`. The rule above refuses such a read where `u` keeps a copy into `C`; the
+test's value is then bound, printed before the copies at its SSA position. A dropped copy
+assigns nothing, so it does not block the test.
+
+**Termination.** The spelling loop (`spell_function`) adds one instruction to the bound set per
+refused read, and the set only grows: at most `|instructions|` more attempts, each `O(text)`.
+
+**What r2dec owns.** It declares one symbol per class with bound members, named by the location
+with a numeric suffix where two classes share it, ordered by smallest member id; it reads
+`class` and `current_at`. It decides no interference and no class.
+
+**Expected cost.** One pass over phi edges and one dominance frontier per class in the
+collection; `current_at` `O(log |C|)` per read. Cause line: "D470: local classes, one pass over
+phi edges and one dominance frontier per class".
+
+### D470 step 0, review round 1 and the amended rules
+
+Two reviews (the advisor, and an independent headless reviewer reading the code) found two
+counterexamples to the section above. Witnesses and the rule that answers each:
+
+1. **A copy moved off its edge.** The latch hoist (`r2dec/src/structure/latch.rs:139-146`,
+   `:200`) prints a back edge's copies before the `do-while` tail test, so they also run on the
+   exit path. Shape (independent review): outer header `r = phi(a, p)`, inner header
+   `p = phi(r, x)`, latch `use(p); x = p + 1; if (t) -> inner else -> outer`; `C = {p, r}`, the
+   copy `p := x` kept, `r := p` dropped. Text `do { use(L); Lx = L + 1; L = Lx; } while (t);`
+   runs `L = Lx` on the exit, and the next `use(L)` reads 6 where `p = r = 5`. The hoist is
+   allowed today only where no printed read of a copied symbol lies outside the loop; a dropped
+   copy prints no read. **Rule:** a dropped copy stays in the tree as a statement that prints
+   nothing and reads `L` on its edge, so the hoist's existing count (by symbol, and "the test
+   reads none of what is written") sees it and refuses. A copy is then always on its edge.
+2. **A refused read with nothing to bind.** `interfering_lanes` is 0 for `same_content` pairs and
+   for two values of one location live at once with disjoint demanded bytes, so a member's
+   statement can overwrite `L` while an earlier member is still read at its SSA use; `current_at`
+   refuses, the reader is already bound, and the retry adds nothing (advisor: `m1`, `m2` of one
+   content, `store(m1)` after `m2`; the bound "one instruction per refused read" fails).
+   **Rule:** r2ssa joins two webs only where no member of one has a live range overlapping a
+   member of the other, with no `same_content` or lane exemption (`ValueLiveness::segments`
+   overlap, the strict test), and checks at build that each member is current at each of its
+   SSA uses and phi-edge uses. Then at every SSA reading point `current_at` returns the member
+   read, and a refusal arises only where r2dec prints an unbound value's expression after its
+   SSA position. The retry binds the innermost forwarded value holding the refused read, which
+   prints it at its SSA position: the bound set grows by one per attempt, at most
+   `|instructions|` attempts.
+
+Gaps the reviews named, each answered:
+- Classes range over all values with one location and type; "bound" is r2dec's and grows per
+  attempt. An unbound member's definition stays an element of `current_at`, so a read after it
+  of an earlier member refuses (conservative); its edge copy is kept (site 2), so `L` holds the
+  phi on that edge.
+- Each phi and operand pair is a join attempt from singletons, under rule 2; a web with an
+  interfering operand leaves that operand out (lost copy and swap stay two classes).
+- `current_at(C, b, k)` counts elements strictly before ordinal `k`: a statement's own output is
+  not current at its operands (`rdi_2 = rdi_1 + 1` reads `rdi_1`).
+- A gapped copy assigns nothing and keeps its merge owed, so every read of that phi stays
+  residual; any other member read past the join refuses, as the join is the nearer element.
+- Reading points apply to the leaves of the rewritten term (`term_reads`), not the SSA inputs.
+- Two phis of one class at one join cannot both be members: they are live at once at the join
+  entry, which rule 2's strict test refuses.
+- `tails.rs` and `guard.rs` statement motion: the same rule as the latch, a dropped copy is a
+  read of `L` where it stands; any pass that moves a statement past it sees the read.
+- A dropped copy still pays `owed` and accounts its phi in the ledger, so the proof line's
+  counts do not move.
+
+### D470 step 0, review round 2: open on a counterexample
+
+The independent reviewer read the amended rules against the code: both round 1 witnesses are
+answered, and one new counterexample stands, so no r2dec edit lands (round 16).
+
+- **A dropped copy whose operand is a gapped merge.** `B0 -> B1 | B2`; `B1: a = e1 -> J`;
+  `B2 -> J` with an operand r2dec cannot spell; `J: p = phi(a, g) -> K`; `B3: b = e2 -> K`;
+  `K: q = phi(p, b); use(q)`. `C = {a, p, b, q}` passes the strict test. `B2`'s copy is a gap
+  that assigns nothing; `J -> K` drops its copy (`current_at(C, J, end) == p`), so on
+  `B0, B2, J, K` `use(L)` reads a stale value where today `read_name` prints a `NeverAssigned`
+  residual (`values.rs:1303-1321`). Candidate answer: drop a copy only where `operand_alone(o)`
+  spells the plain variable (owed 0, definition in scope); otherwise keep it with its residual.
+- Gaps to answer with it: the silent statement's form (`CStmt::Empty` is discarded by
+  `rotate::live` and `flatten`, and `latch::reads_of` counts only `CExpr::Var`; it must be
+  counted by `Scan::read` and transparent to the arm shape tests `copies_of`, `is_break`,
+  `is_empty`); reading points that are not SSA inputs (switch selectors, call-boundary
+  arguments, return values, canonical term leaves) need the build check or a reaching-definition
+  proof; the Tests rule's premise that a terminator never reads a bound member directly (shape:
+  `movsxd rax, [tbl+rax*4]; jmp rax`); an unbound phi member's role in the Lemma; the closure of
+  `arm_read` under dropped copies, asserted at class build.

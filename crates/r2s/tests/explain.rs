@@ -93,3 +93,88 @@ fn every_pdfj_note_is_the_pdf_note_with_its_standing_as_fields() {
         .filter(|(mark, _)| mark == "!");
     assert_eq!(refused.count(), 2, "{notes:?}");
 }
+
+/// gcc -O2 hashes, unstripped: its functions' calls carry argument and `noreturn` notes.
+fn hashes() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned/hashes_gcc_x64_O2")
+}
+
+/// The shell's stdout for `script` over hashes.
+fn hashes_piped(script: &str) -> String {
+    let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
+        .args(["-q", "-c", script])
+        .arg(hashes())
+        .output()
+        .expect("the shell runs");
+    assert!(done.status.success(), "{script}: {done:?}");
+    String::from_utf8(done.stdout).expect("the answer is text")
+}
+
+/// The notes of the listing row at `address`, as `(mark cell, text)`.
+fn row_notes(listing: &str, address: u64) -> Vec<(String, String)> {
+    let spelled = format!("{address:#010x}");
+    let row = (listing.lines())
+        .find(|line| line.trim_start().starts_with(&spelled))
+        .unwrap_or_else(|| panic!("no row at {spelled} in {listing}"));
+    (row.split(" ; ").skip(1))
+        .map(|note| (note[..1].to_owned(), note[2..].to_owned()))
+        .collect()
+}
+
+/// A note's mark cell and text; an unknown states no basis, as a refusal does not.
+fn cell_and_text(note: &Value) -> (String, String) {
+    let mark = note["mark"].as_str().expect("a mark").to_owned();
+    assert!(
+        note["premises"].is_array() && note["kind"].is_string(),
+        "{note}"
+    );
+    (mark, note["text"].as_str().expect("a text").to_owned())
+}
+
+#[test]
+fn every_aoj_note_is_the_note_pd_prints_on_its_line() {
+    let entry = 0x0040_1050_u64;
+    let json: Value =
+        serde_json::from_str(&hashes_piped(&format!("pdfj @ {entry:#x}"))).expect("pdfj");
+    let addresses = (json["lines"].as_array().expect("lines").iter())
+        .map(|line| line["addr"].as_u64().expect("an address"))
+        .collect::<Vec<_>>();
+    assert!(addresses.len() > 8, "{json}");
+    // One instruction at a time: `aoj 1` against `pd 1` at each address.
+    let script = (addresses.iter())
+        .map(|at| format!("pd 1 @ {at:#x}; aoj 1 @ {at:#x}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let out = hashes_piped(&script);
+    let mut blocks = out
+        .split_inclusive('\n')
+        .fold(vec![String::new()], |mut blocks, line| {
+            blocks.last_mut().expect("a block").push_str(line);
+            if line.starts_with('[') {
+                blocks.push(String::new());
+            }
+            blocks
+        });
+    blocks.pop();
+    assert_eq!(blocks.len(), addresses.len());
+    let mut noted = 0;
+    for (at, block) in addresses.iter().zip(&blocks) {
+        let (listing, aoj) = block.trim_end().rsplit_once('\n').expect("pd then aoj");
+        let aoj: Value = serde_json::from_str(aoj).expect("aoj is JSON");
+        let notes = aoj[0]["notes"].as_array().expect("aoj carries notes");
+        let notes = notes.iter().map(cell_and_text).collect::<Vec<_>>();
+        noted += notes.len();
+        assert_eq!(notes, row_notes(listing, *at), "{at:#x}");
+    }
+    assert!(noted > 0, "no note in {entry:#x}");
+    // A run: each line's notes as `pd n` prints them, its next call in the run included.
+    let listing = hashes_piped(&format!("pd 40 @ {entry:#x}"));
+    let run: Value =
+        serde_json::from_str(&hashes_piped(&format!("aoj 40 @ {entry:#x}"))).expect("aoj");
+    for one in run.as_array().expect("rows") {
+        let at = one["addr"].as_u64().expect("an address");
+        let notes = one["notes"].as_array().expect("aoj carries notes");
+        let notes = notes.iter().map(cell_and_text).collect::<Vec<_>>();
+        assert_eq!(notes, row_notes(&listing, at), "{at:#x} in a run");
+    }
+}

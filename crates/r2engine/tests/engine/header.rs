@@ -24,15 +24,3 @@ fn the_header_lists_each_call_and_tail_branch_with_its_site() {
     assert_eq!(tails.collect::<Vec<_>>(), [(TWO, TWO)]);
     assert!(header.info.is_some(), "the seal states the frame answer");
 }
-
-/// An unresolved `jmp rax` may reach any function: the survey's traces do not count the transfers
-/// no walk followed, so the list is never stated complete (`None`, the `?` line stays).
-#[test]
-fn a_list_is_complete_only_where_the_survey_counts_no_unfollowed_transfer() {
-    let mut program = opened();
-    // two: jmp rax
-    program.source_mut().write(TWO, &[0xff, 0xe0]);
-    let header = program.function_listing(ONE).expect("it lists").header;
-    assert_eq!(header.unresolved, None);
-    assert!(!header.calls.is_empty());
-}

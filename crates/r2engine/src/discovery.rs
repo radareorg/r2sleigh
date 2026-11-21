@@ -214,6 +214,13 @@ impl Holders {
         (self.pieces.iter()).map(|(start, (end, entries))| (*start..*end, entries.as_slice()))
     }
 
+    /// Whether some body holds any byte of `range`: the last piece starting before its end is
+    /// the only one to read, `O(log S)`.
+    pub fn holds_any(&self, range: std::ops::Range<u64>) -> bool {
+        let last = self.pieces.range(..range.end).next_back();
+        last.is_some_and(|(_, (end, _))| *end > range.start)
+    }
+
     /// The entries whose bodies hold this address, in address order.
     pub fn at(&self, address: u64) -> &[u64] {
         self.pieces

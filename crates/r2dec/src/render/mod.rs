@@ -119,15 +119,40 @@ pub fn render(
     crate::ast::respell_nonconforming_main(&mut c, input.function().entry);
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
-    // The proof line every rendering opens with: what became of each obligation the source owes.
+    let clauses = proof::ProofClauses::of(&c, unassigned.as_deref().unwrap_or_default());
+    open_proof_line(&mut c, input, &ledger, &clauses, &tags);
+    let mut ready = ready_with_carriers(c, &tags);
+    // Each marker names the instruction its statement was written for, so each line names its own.
+    ready.seal_observation_markers(
+        &mut crate::codegen::ObservationSealAuthority::staged(),
+        crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
+    );
+    let emission = CodeGenerator::new(CodeGenConfig::default())
+        .emit(&ready, input.ptr_bits())
+        .with_clauses(clauses);
+    Ok(Rendered {
+        function: crate::codegen::RenderedFunction::new(emission, ready.into_function()),
+        ledger,
+        stopped,
+    })
+}
+
+/// The proof line every rendering opens with: what became of each obligation the source owes.
+fn open_proof_line(
+    c: &mut CFunction,
+    input: &RenderInput<'_>,
+    ledger: &ObligationLedger,
+    clauses: &proof::ProofClauses,
+    tags: &tags::Tags,
+) {
     proof::note_unproven_constructs(
-        &mut c,
-        Some(&ledger),
+        c,
+        Some(ledger),
         0,
         input.declared_call_prototypes(),
         0,
         (
-            unassigned.as_deref().unwrap_or_default(),
+            clauses,
             (
                 (input.open_second_result(), input.integer_lane_unread_only()),
                 &input.body_disputed_lanes(),
@@ -142,18 +167,6 @@ pub fn render(
         input.arity_floor(),
         input.artifact().landing_pads(),
     );
-    let mut ready = ready_with_carriers(c, &tags);
-    // Each marker names the instruction its statement was written for, so each line names its own.
-    ready.seal_observation_markers(
-        &mut crate::codegen::ObservationSealAuthority::staged(),
-        crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
-    );
-    let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
-    Ok(Rendered {
-        function: crate::codegen::RenderedFunction::new(emission, ready.into_function()),
-        ledger,
-        stopped,
-    })
 }
 
 /// D2 over every placed block. A late edge's copy is promised to render; when one gaps, spell again with

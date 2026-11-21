@@ -78,7 +78,7 @@ fn proof_columns(
 /// The clauses the proof line adds: unassigned reads, the result's open lane and disputes, the
 /// structures laid out, and the tags stated as two kinds.
 type Clauses<'a> = (
-    &'a [UnassignedRead],
+    &'a ProofClauses,
     ((bool, bool), &'a [Disputed]),
     usize,
     &'a [String],
@@ -115,7 +115,7 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting, parameters): Clauses<'_>,
+    (clauses, ((open_second_result, integer_lane), disputed), laid_out, conflicting, parameters): Clauses<'_>,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
     landing_pads: u32,
@@ -149,7 +149,7 @@ pub(crate) fn note_unproven_constructs(
         }
         _ => detail,
     };
-    note_unassigned_reads(&mut detail, unassigned);
+    note_unassigned_reads(&mut detail, clauses);
     let source_typed_objects =
         func.extern_objects
             .iter()
@@ -159,11 +159,7 @@ pub(crate) fn note_unproven_constructs(
                 })
             })
             .count();
-    let refused_object_types = func
-        .extern_objects
-        .iter()
-        .filter(|object| object.type_fact.is_none() && object.type_refusal.is_some())
-        .count();
+    let refused_object_types = clauses.refused_object_types.len();
     if source_typed_objects > 0 {
         let noun = if source_typed_objects == 1 {
             "data object type"
@@ -364,7 +360,7 @@ fn floor_cause(cause: &r2source::SourceFloorCause) -> String {
 
 /// Why a read the rendering spells as a residual has no value C can name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum UnassignedCause {
+pub enum UnassignedCause {
     /// Held from entry, in storage no convention argument slot delivers.
     Held,
     /// Delivered in an argument slot no recovered parameter admits.
@@ -379,7 +375,33 @@ pub(crate) enum UnassignedCause {
     NotDominated,
 }
 
-impl UnassignedCause {}
+impl UnassignedCause {
+    /// The cause's stable name in a typed response.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::UnadmittedArgument => "unadmitted-argument",
+            Self::VariadicTail => "variadic-tail",
+            Self::Unassigned => "never-assigned",
+            Self::NotDominated => "not-dominated",
+        }
+    }
+
+    /// The proof line's words for `count` reads of this cause.
+    pub const fn spelled(self, count: usize) -> &'static str {
+        let one = count == 1;
+        match self {
+            Self::Held => "held from entry",
+            Self::UnadmittedArgument if one => "argument slot read with no parameter",
+            Self::UnadmittedArgument => "argument slots read with no parameter",
+            Self::VariadicTail if one => "variadic tail register",
+            Self::VariadicTail => "variadic tail registers",
+            Self::Unassigned => "never assigned",
+            Self::NotDominated if one => "assigned on only some paths to its read",
+            Self::NotDominated => "assigned on only some paths to their reads",
+        }
+    }
+}
 
 /// One object whose every read is now a residual, and why.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -390,49 +412,57 @@ pub(crate) struct UnassignedRead {
 
 /// Name the objects whose reads became residuals, by why each had no value.
 ///
-/// A count cannot say which reads it excuses, so each is named. An argument
-/// slot no parameter admits is named apart: the signature says the function
-/// was not given that value, so reading it is a gap in the interface, not a
-/// value held from entry.
-fn note_unassigned_reads(detail: &mut String, unassigned: &[UnassignedRead]) {
-    for (cause, one, many) in [
-        (UnassignedCause::Held, "held from entry", "held from entry"),
-        (
-            UnassignedCause::UnadmittedArgument,
-            "argument slot read with no parameter",
-            "argument slots read with no parameter",
-        ),
-        (
-            UnassignedCause::VariadicTail,
-            "variadic tail register",
-            "variadic tail registers",
-        ),
-        (
-            UnassignedCause::Unassigned,
-            "never assigned",
-            "never assigned",
-        ),
-        (
-            UnassignedCause::NotDominated,
-            "assigned on only some paths to its read",
-            "assigned on only some paths to their reads",
-        ),
-    ] {
-        let names = unassigned
-            .iter()
-            .filter(|read| read.cause == cause)
-            .map(|read| read.name.as_str())
-            .collect::<Vec<_>>();
-        if names.is_empty() {
-            continue;
-        }
-        let noun = if names.len() == 1 { one } else { many };
+/// A count cannot say which reads it excuses, so each is named.
+fn note_unassigned_reads(detail: &mut String, clauses: &ProofClauses) {
+    for (cause, names) in &clauses.unassigned {
         let _ = write!(
             detail,
-            "; {} {noun}, read as residuals ({})",
+            "; {} {}, read as residuals ({})",
             names.len(),
+            cause.spelled(names.len()),
             names.join(", ")
         );
+    }
+}
+
+/// The proof line's typed clauses, which its text is spelled from and a typed response
+/// carries (D621): each refused data object type and each unassigned cause, by name. `O(clauses)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProofClauses {
+    refused_object_types: Vec<String>,
+    unassigned: Vec<(UnassignedCause, Vec<String>)>,
+}
+
+impl ProofClauses {
+    /// The clauses of `func`, whose data objects are declared, with the reads left unassigned.
+    pub(crate) fn of(func: &CFunction, unassigned: &[UnassignedRead]) -> Self {
+        let refused_object_types = (func.extern_objects.iter())
+            .filter(|object| object.type_fact.is_none() && object.type_refusal.is_some())
+            .map(|object| object.name.clone())
+            .collect();
+        let mut by_cause: Vec<(UnassignedCause, Vec<String>)> = Vec::new();
+        let mut reads = unassigned.to_vec();
+        reads.sort();
+        for read in reads {
+            match by_cause.last_mut() {
+                Some((cause, names)) if *cause == read.cause => names.push(read.name),
+                _ => by_cause.push((read.cause, vec![read.name])),
+            }
+        }
+        Self {
+            refused_object_types,
+            unassigned: by_cause,
+        }
+    }
+
+    /// The data objects whose type was refused, by name, in declaration order.
+    pub fn refused_object_types(&self) -> &[String] {
+        &self.refused_object_types
+    }
+
+    /// Each cause a read was left unassigned for, with the names read, in cause order.
+    pub fn unassigned(&self) -> &[(UnassignedCause, Vec<String>)] {
+        &self.unassigned
     }
 }
 

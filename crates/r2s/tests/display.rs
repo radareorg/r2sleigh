@@ -231,3 +231,49 @@ fn every_header_xref_is_a_row_of_axt() {
     }
     assert!(listed > 0, "hashes' main calls each hash");
 }
+
+/// The header's count of unfollowed transfers is `axt`'s, both the survey's (D619).
+#[test]
+fn the_header_counts_the_unfollowed_transfers_axt_counts() {
+    let number = |text: &str, after: &str, before: &str| {
+        let line = text.lines().find(|line| line.contains(before))?;
+        let words = line.split(before).next()?.rsplit(after).next()?;
+        words.trim().parse::<usize>().ok()
+    };
+    for (entry, listing, _, references) in views() {
+        let header = number(
+            &listing,
+            "xrefs may be short: ",
+            " indirect transfers unresolved",
+        );
+        let axt = number(&references, "; ", " unresolved indirect transfer").or_else(|| {
+            references
+                .contains("every body walked to its end")
+                .then_some(0)
+        });
+        assert_eq!(
+            header.unwrap_or(0),
+            axt.expect(&entry),
+            "{entry}: {listing}\n{references}"
+        );
+        assert!(
+            !listing.contains("indirect transfers unread"),
+            "{entry}: every body is walked"
+        );
+    }
+}
+
+/// A proven result resting on a premise is one `*` line in the header and `afi`'s `result:` row,
+/// in the same words (D566).
+#[test]
+fn the_header_states_the_premise_afi_states_of_a_proven_result() {
+    for (entry, listing, info, _) in views() {
+        let row = (info.lines())
+            .find_map(|line| line.strip_prefix("result: proven ; * "))
+            .map(str::to_owned);
+        let header = (listing.lines())
+            .find_map(|line| line.strip_prefix("│ ; * result "))
+            .map(str::to_owned);
+        assert_eq!(row, header, "{entry}: {info}\n{listing}");
+    }
+}

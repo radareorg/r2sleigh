@@ -595,6 +595,12 @@ class Missed(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.table(MISSED.replace('"0x45c60c"', '"0x45c6*"'))
 
+    def test_a_deliberate_radare2_only_value_names_radare2s_line(self):
+        deliberate = MISSED.replace('"r2s-right"', '"deliberate"')
+        self.assertEqual(len(self.table(deliberate)), 1)
+        with self.assertRaises(ValueError):
+            self.table(deliberate.replace('r2_line = "libr/core/canal.c:552-554"\n', 'row = "D506"\n'))
+
     def test_a_listed_value_the_run_did_not_report_fails(self):
         table = self.table()
         tally = self.graded(table, session(afl=afl((0x45C5D0, "sym.runtime.duffzero"))))["afl"]

@@ -11,7 +11,9 @@ use crate::session::Session;
 
 /// `afi`: what the function is.
 pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
+    // An address inside a function describes that function, as radare2's `afi @` does (D576).
     let entry = parse_number(session, argument)?;
+    let entry = session.program.function_at(entry)?;
     let info = session.program.function_info(entry)?;
     let names = session.program.names();
     let named = names.of(entry);
@@ -41,6 +43,7 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
     out.extend(
         result(session, &info).map(|said| row(session, "result: unproven", Mark::Refused, &said)),
     );
+    out.extend(premised(&info).map(|said| row(session, "result: proven", Mark::Premise, &said)));
     out.extend([
         format!("minaddr: {:#010x}", info.min_addr()),
         format!("maxaddr: {:#010x}", info.max_addr()),
@@ -82,6 +85,13 @@ fn result(session: &Session, info: &FunctionInfo) -> Option<String> {
     Some(format!("{carrier}, {}", unproven.cause_name()))
 }
 
+/// What a proven result rests on, where its closed decision takes a premise (D566, D592).
+fn premised(info: &FunctionInfo) -> Option<String> {
+    let premises = info.result_premises.iter().map(|premise| premise.spelled());
+    let premises = premises.collect::<Vec<_>>();
+    (!premises.is_empty()).then(|| format!("rests on {}", premises.join(", ")))
+}
+
 /// The arity floor's words, where the interface states only a floor (D37).
 fn floor(info: &FunctionInfo) -> Option<String> {
     info.floor.as_ref()?;
@@ -95,6 +105,13 @@ pub(crate) fn notes(session: &Session, info: &FunctionInfo) -> Vec<(Mark, String
     let result =
         result(session, info).map(|said| (Mark::Refused, format!("result unproven: {said}")));
     floor.into_iter().chain(result).collect()
+}
+
+/// The header's notes: [`notes`], then a proven result's premise as `afi`'s `result:` row says it
+/// (D566); `pdd`'s proof line states the premises itself, so it reads [`notes`] alone.
+pub(crate) fn header_notes(session: &Session, info: &FunctionInfo) -> Vec<(Mark, String)> {
+    let premised = premised(info).map(|said| (Mark::Premise, format!("result {said}")));
+    notes(session, info).into_iter().chain(premised).collect()
 }
 
 /// The header's argument list: the proven parameters by name, then `?` where the engine states a

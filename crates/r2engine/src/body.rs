@@ -363,6 +363,8 @@ pub struct Decoded {
 /// The pads' bytes a survey's trace holds once their walk is dropped: joined ranges, blocks, bytes.
 #[derive(Debug, Clone)]
 struct PadExtent {
+    /// The pads' own indirect transfers no walk followed (D619).
+    unresolved: usize,
     spans: Vec<std::ops::Range<u64>>,
     blocks: usize,
     bytes: u64,
@@ -681,6 +683,7 @@ impl Trace {
         let own = |at: &&u64| !normal.contains_key(*at);
         let instructions = (pads.decoded.iter()).filter(|(at, _)| own(at));
         self.0.pad_extent = Some(Box::new(PadExtent {
+            unresolved: pads.unresolved_transfers(|at| !normal.contains_key(&at)),
             spans: joined(instructions.clone().map(|(at, size)| (*at, *size))),
             blocks: (pads.leaders.iter())
                 .filter(|leader| pads.decoded.contains_key(leader))
@@ -777,6 +780,13 @@ impl Trace {
     /// Whether a call of the body, or of its pads, unwinds to a landing pad (D570).
     pub fn unwinds(&self) -> bool {
         !self.0.unwinds.is_empty() || self.0.pad_extent.is_some()
+    }
+
+    /// How many indirect transfers the walk and its pads went past or stopped at without knowing
+    /// where they go: opaque calls, and dispatches no table round resolved (D619). `O(stops)`.
+    pub fn unresolved_transfers(&self) -> usize {
+        let pads = (self.0.pad_extent.as_ref()).map_or(0, |pads| pads.unresolved);
+        self.0.unresolved_transfers(|_| true) + pads
     }
 
     /// Whether the walk decoded an instruction that begins at `address`. `O(log n)`.
@@ -919,6 +929,8 @@ struct Walk {
     /// Whether each address the lift states context for decodes in another context than this walk's.
     target_contexts: BTreeMap<u64, bool>,
     unresolved: Vec<Unresolved>,
+    /// Each indirect call no fold names, by instruction (D619).
+    opaque_calls: Vec<u64>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
     /// Each closed transfer, by instruction: what says it never comes back, and whose "never" it is.
@@ -981,6 +993,7 @@ impl Walk {
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
+            opaque_calls: Vec::new(),
             gated: BTreeMap::new(),
             nevers: BTreeMap::new(),
             supervisor: BTreeSet::new(),
@@ -1100,6 +1113,7 @@ impl Walk {
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
+            opaque_calls: Vec::new(),
             gated: BTreeMap::new(),
             nevers: BTreeMap::new(),
             supervisor: BTreeSet::new(),
@@ -1539,6 +1553,8 @@ impl Walk {
                 {
                     self.slot_calls.insert(addr, slot);
                 }
+                // No fold named the target: counted unresolved, a sealed slot's too (D619).
+                self.opaque_calls.push(addr);
                 let halts = self.halts_through(&instruction, &handles_before, program);
                 let exit = through.and_then(|slot| program.exit_through(slot));
                 if let Some((from, never)) = halts {
@@ -1657,6 +1673,7 @@ impl Walk {
     fn dispatch(&mut self, addr: u64, next: u64, successors: &mut Vec<u64>, program: &dyn Program) {
         // A machine with no indirect call instruction leaves the return address in the link register and branches: an opaque call.
         if self.returns_after(addr, next) {
+            self.opaque_calls.push(addr);
             return self.continues(Some(next), successors, program);
         }
         // No arm is no resolution: a dispatch read as going nowhere would be a
@@ -1674,6 +1691,17 @@ impl Walk {
             self.arms.insert(target);
             self.transfer(addr, target, successors, program);
         }
+    }
+
+    /// Opaque calls and unresolved dispatch stops at the instructions `own` keeps: `O(stops)`.
+    fn unresolved_transfers(&self, own: impl Fn(u64) -> bool) -> usize {
+        let stops = (self.unresolved.iter())
+            .filter(|stop| stop.reason == UnresolvedReason::IndirectBranch)
+            .map(|stop| stop.addr);
+        stops
+            .chain(self.opaque_calls.iter().copied())
+            .filter(|at| own(*at))
+            .count()
     }
 
     /// Hold the fallthrough of a call to `callee` closed until the callee is known to return.

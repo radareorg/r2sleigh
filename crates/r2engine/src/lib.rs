@@ -38,8 +38,9 @@ mod json;
 mod library;
 use json::*;
 pub use json::{
-    NoteJson, NoteRefusalJson, RenderProofJson, RenderRefusalJson, RenderedFunctionJson,
-    RenderedLineJson, RenderedLinkJson, RenderedResidualJson, RenderedVariableJson,
+    InfoBinJson, InfoCoreJson, InfoJson, NoteJson, NoteRefusalJson, RenderProofJson,
+    RenderRefusalJson, RenderedFunctionJson, RenderedLineJson, RenderedLinkJson,
+    RenderedResidualJson, RenderedVariableJson, StringJson,
 };
 /// The allocation counters the shell's counting allocator feeds and its report reads.
 pub use r2il::allocation;
@@ -50,7 +51,7 @@ pub use r2sleigh_lift::{NumberSpan, Syntax};
 mod route;
 mod stub;
 
-pub use r2dec::{CRole, EffectObligationAudit, EffectObligationDisposition};
+pub use r2dec::{BreakPoint, CRole, EffectObligationAudit, EffectObligationDisposition};
 use route::decompile_route_decision;
 pub use route::{
     EngineDiagnostics, EnginePlan, EngineRequestKind, EngineRequestPlan, EngineRouteDecision,
@@ -1321,6 +1322,14 @@ impl EngineRendering {
         match self {
             Self::Function(rendered) => rendered.into_text(),
             Self::Listing(text) => text,
+        }
+    }
+
+    /// The proof line's typed clauses, where the C tier wrote one (D621).
+    pub fn proof_clauses(&self) -> Option<&r2dec::ProofClauses> {
+        match self {
+            Self::Function(rendered) => Some(rendered.emission().proof_clauses()),
+            Self::Listing(_) => None,
         }
     }
 

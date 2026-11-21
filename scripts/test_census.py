@@ -407,6 +407,24 @@ class TimedCases(unittest.TestCase):
                 census.time_cases(args)
 
 
+class SessionHeld(unittest.TestCase):
+    """D588: a session's peak RSS stays within 1.3x one cold request's, both of the head's build."""
+
+    session, cold, _ = census.SESSION_HELD
+
+    def test_the_d573_session_fails(self) -> None:
+        over = census.session_held({self.session: 3897, self.cold: 422})
+        self.assertIsNotNone(over)
+        self.assertIn("9.23x", over)
+
+    def test_a_session_within_the_bound_passes(self) -> None:
+        self.assertIsNone(census.session_held({self.session: 548, self.cold: 422}))
+
+    def test_both_cases_are_timed(self) -> None:
+        labels = {f"{name} {label[0] if label else command}" for name, command, *label in census.TIMED}
+        self.assertLessEqual({self.session, self.cold}, labels)
+
+
 class StatsRatchet(unittest.TestCase):
     """D403: the engine's work counts are held exactly, a rise and a fall alike."""
 
