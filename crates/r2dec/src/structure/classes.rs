@@ -65,44 +65,7 @@ pub(crate) fn rename(
         *renamed.kept.entry(Kept::Unmodelled).or_default() += members.len();
         return renamed;
     };
-    let live = graph.live_out();
-    let mut group = vec![NONE; members.len()];
-    let mut leaders = Vec::<u32>::new();
-    for (index, member) in members.iter().enumerate() {
-        let index = index as u32;
-        // A member the text never spells has nothing to rename.
-        if !graph.occurs[index as usize] {
-            renamed.members -= 1;
-            continue;
-        }
-        let kept = match (graph.refused[index as usize], live.at_entry[index as usize]) {
-            (true, _) => Some(Kept::Occurrence),
-            (false, true) => Some(Kept::LiveAtEntry),
-            _ => None,
-        };
-        if let Some(kept) = kept {
-            *renamed.kept.entry(kept).or_default() += 1;
-            continue;
-        }
-        let open = (leaders.last().copied())
-            .filter(|leader| members[*leader as usize].class == member.class);
-        let Some(leader) = open else {
-            group[index as usize] = index;
-            leaders.push(index);
-            continue;
-        };
-        let kept = match same_type(members[leader as usize].symbol, member.symbol) {
-            false => Some(Kept::Type),
-            true => (!graph.joins(&live, &group, leader, index)).then_some(Kept::Interferes),
-        };
-        match kept {
-            Some(kept) => *renamed.kept.entry(kept).or_default() += 1,
-            None => {
-                group[index as usize] = leader;
-                renamed.joined += 1;
-            }
-        }
-    }
+    let group = groups(&graph, members, same_type, &mut renamed);
     if renamed.joined == 0 {
         return renamed;
     }
@@ -146,6 +109,93 @@ pub(crate) fn rename(
     delete_self_copies(body, &spelled, &mut renamed.deleted);
     renamed.deleted.sort();
     renamed
+}
+
+/// Per-candidate stamps of the backward liveness walk: a node is entered once per candidate.
+struct Spread {
+    live_in: Vec<u32>,
+    out: Vec<u32>,
+    pending: Vec<u32>,
+}
+
+impl Spread {
+    /// Enters each node that reads candidate `k`.
+    fn seed(&mut self, k: u32, reads: &[u32]) {
+        for node in reads {
+            if std::mem::replace(&mut self.live_in[*node as usize], k) != k {
+                self.pending.push(*node);
+            }
+        }
+    }
+
+    /// Drains `pending` backward for candidate `k`, stopping at `k`'s writes.
+    fn back(&mut self, k: u32, preds: &[Vec<u32>], def: &[u32], live: &mut Live) {
+        while let Some(node) = self.pending.pop() {
+            for pred in &preds[node as usize] {
+                self.enter(*pred as usize, k, def, live);
+            }
+        }
+    }
+
+    /// `k` is live out of `pred`; it is live into `pred` too unless `pred` writes `k`.
+    fn enter(&mut self, pred: usize, k: u32, def: &[u32], live: &mut Live) {
+        if std::mem::replace(&mut self.out[pred], k) == k {
+            return;
+        }
+        live.out[pred].push(k);
+        live.after[k as usize].push(pred as u32);
+        if def[pred] != k && std::mem::replace(&mut self.live_in[pred], k) != k {
+            self.pending.push(pred as u32);
+        }
+    }
+}
+
+/// Each candidate's group leader, or `NONE` where it kept its symbol (the cause counted).
+fn groups(
+    graph: &Graph,
+    members: &[Member],
+    same_type: &dyn Fn(SymbolId, SymbolId) -> bool,
+    renamed: &mut Renamed,
+) -> Vec<u32> {
+    let live = graph.live_out();
+    let mut group = vec![NONE; members.len()];
+    let mut leaders = Vec::<u32>::new();
+    for (index, member) in members.iter().enumerate() {
+        let index = index as u32;
+        // A member the text never spells has nothing to rename.
+        if !graph.occurs[index as usize] {
+            renamed.members -= 1;
+            continue;
+        }
+        let kept = match (graph.refused[index as usize], live.at_entry[index as usize]) {
+            (true, _) => Some(Kept::Occurrence),
+            (false, true) => Some(Kept::LiveAtEntry),
+            _ => None,
+        };
+        if let Some(kept) = kept {
+            *renamed.kept.entry(kept).or_default() += 1;
+            continue;
+        }
+        let open = (leaders.last().copied())
+            .filter(|leader| members[*leader as usize].class == member.class);
+        let Some(leader) = open else {
+            group[index as usize] = index;
+            leaders.push(index);
+            continue;
+        };
+        let kept = match same_type(members[leader as usize].symbol, member.symbol) {
+            false => Some(Kept::Type),
+            true => (!graph.joins(&live, &group, leader, index)).then_some(Kept::Interferes),
+        };
+        match kept {
+            Some(kept) => *renamed.kept.entry(kept).or_default() += 1,
+            None => {
+                group[index as usize] = leader;
+                renamed.joined += 1;
+            }
+        }
+    }
+    group
 }
 
 /// Each `L = L;` of a group's symbol becomes an empty statement under the markers it carried.
@@ -293,30 +343,16 @@ impl Graph {
             after: vec![Vec::new(); self.writes.len()],
             at_entry: vec![false; self.writes.len()],
         };
-        let (mut live_in, mut out) = (vec![NONE; nodes], vec![NONE; nodes]);
-        let mut pending = Vec::new();
+        let mut spread = Spread {
+            live_in: vec![NONE; nodes],
+            out: vec![NONE; nodes],
+            pending: Vec::new(),
+        };
         for (k, reads) in readers.iter().enumerate() {
             let k = k as u32;
-            for node in reads {
-                if std::mem::replace(&mut live_in[*node as usize], k) != k {
-                    pending.push(*node);
-                }
-            }
-            while let Some(node) = pending.pop() {
-                for pred in &preds[node as usize] {
-                    if std::mem::replace(&mut out[*pred as usize], k) == k {
-                        continue;
-                    }
-                    live.out[*pred as usize].push(k);
-                    live.after[k as usize].push(*pred);
-                    if self.def[*pred as usize] != k
-                        && std::mem::replace(&mut live_in[*pred as usize], k) != k
-                    {
-                        pending.push(*pred);
-                    }
-                }
-            }
-            live.at_entry[k as usize] = live_in[0] == k;
+            spread.seed(k, reads);
+            spread.back(k, &preds, &self.def, &mut live);
+            live.at_entry[k as usize] = spread.live_in[0] == k;
         }
         live
     }
@@ -337,6 +373,14 @@ impl Graph {
 }
 
 impl Reader<'_> {
+    /// The candidate a plain copy `x = y;` reads, where its right side is one.
+    fn copied(&self, right: &CExpr) -> Option<u32> {
+        match right {
+            CExpr::Var(y) => self.slot_of(*y),
+            _ => None,
+        }
+    }
+
     fn slot_of(&self, symbol: SymbolId) -> Option<u32> {
         (self.slot.get(symbol.index()).copied()).filter(|slot| *slot != NONE)
     }
@@ -411,9 +455,7 @@ impl Reader<'_> {
                 if let Some(x) = self.slot_of(*x) {
                     self.graph.occurs[x as usize] = true;
                     def = x;
-                    if let CExpr::Var(y) = right.as_ref() {
-                        exact = self.slot_of(*y).map(|y| (x, y));
-                    }
+                    exact = self.copied(right).map(|y| (x, y));
                 }
             }
             _ => self.scan(expr, false, &mut reads),
@@ -494,6 +536,16 @@ impl Reader<'_> {
                 }
                 ends
             }
+            CStmt::While { .. } | CStmt::DoWhile { .. } | CStmt::For { .. } => {
+                self.walk_loop(stmt, open)
+            }
+            CStmt::Switch { .. } => self.walk_switch(stmt, open),
+        }
+    }
+
+    /// A `while`, `do` or `for` entered from `open`; the nodes control leaves it from.
+    fn walk_loop(&mut self, stmt: &CStmt, open: Vec<u32>) -> Vec<u32> {
+        match stmt {
             CStmt::While { cond, body } => {
                 let reads = self.reads(&[cond]);
                 let test = self.node(open, reads);
@@ -533,37 +585,44 @@ impl Reader<'_> {
                     None => breaks,
                 }
             }
-            CStmt::Switch {
-                expr,
-                cases,
-                default,
-            } => {
-                let mut exprs = vec![expr];
-                exprs.extend(cases.iter().map(|case| &case.value));
-                exprs.extend(cases.iter().filter_map(|case| case.test.as_ref()));
-                let reads = self.reads(&exprs);
-                let select = self.node(open, reads);
-                self.frames.push(Frame {
-                    breaks: Vec::new(),
-                    next: None,
-                });
-                let mut falls = Vec::new();
-                for case in cases {
-                    falls = self.walk_seq(&case.body, [vec![select], falls].concat());
-                }
-                let mut ends = match default {
-                    Some(arm) => self.walk_seq(arm, [vec![select], falls].concat()),
-                    None => [vec![select], falls].concat(),
-                };
-                ends.extend(
-                    self.frames
-                        .pop()
-                        .map(|frame| frame.breaks)
-                        .unwrap_or_default(),
-                );
-                ends
-            }
+            _ => unreachable!("`walk` passes only a loop"),
         }
+    }
+
+    /// A `switch` entered from `open`: each case falls into the next; breaks leave it.
+    fn walk_switch(&mut self, stmt: &CStmt, open: Vec<u32>) -> Vec<u32> {
+        let CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } = stmt
+        else {
+            unreachable!("`walk` passes only a switch")
+        };
+        let mut exprs = vec![expr];
+        exprs.extend(cases.iter().map(|case| &case.value));
+        exprs.extend(cases.iter().filter_map(|case| case.test.as_ref()));
+        let reads = self.reads(&exprs);
+        let select = self.node(open, reads);
+        self.frames.push(Frame {
+            breaks: Vec::new(),
+            next: None,
+        });
+        let mut falls = Vec::new();
+        for case in cases {
+            falls = self.walk_seq(&case.body, [vec![select], falls].concat());
+        }
+        let mut ends = match default {
+            Some(arm) => self.walk_seq(arm, [vec![select], falls].concat()),
+            None => [vec![select], falls].concat(),
+        };
+        ends.extend(
+            self.frames
+                .pop()
+                .map(|frame| frame.breaks)
+                .unwrap_or_default(),
+        );
+        ends
     }
 
     /// A loop body entered from `open` whose `continue` goes to `next`: its ends and its breaks.

@@ -105,13 +105,13 @@ pub fn render(
     let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
     let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
     let role = |stmt: &CStmt| statement_role(stmt, &evidence, &selections);
+    let certified = certifier(input, &labels, &role);
     let mut body = classes(
         input,
         (&c, values.as_ref()),
         body,
         &mut occurrences,
-        &labels,
-        &role,
+        &certified,
     );
     certify_control(input, &body, &occurrences, &labels, &role)?;
     crate::structure::condition::respell_negations(&mut body);
@@ -261,17 +261,8 @@ fn structured(
     marks: &mut Occurrences,
 ) -> CStmt {
     let unselected = std::collections::BTreeSet::new();
-    let certified = |stmt: &CStmt, marks: &Occurrences| {
-        let role = |stmt: &CStmt| statement_role(stmt, evidence, &unselected);
-        let certificate = control_certificate(input, stmt, marks, labels, &role);
-        match certificate.ok() {
-            true => Ok(()),
-            false => Err(format!(
-                "{certificate} {:?}",
-                certificate.violations.first()
-            )),
-        }
-    };
+    let role = |stmt: &CStmt| statement_role(stmt, evidence, &unselected);
+    let certified = certifier(input, labels, &role);
     let chains = |body: &mut CStmt, marks: &mut Occurrences| {
         crate::structure::condition::collapse(body, marks).collapsed != 0
     };
@@ -364,6 +355,24 @@ fn certify_control(
 /// The control certificate over a candidate body and its markers: `Err` names the first violation.
 type Certified<'a> = dyn Fn(&CStmt, &Occurrences) -> Result<(), String> + 'a;
 
+/// The control certificate as a stage reads it: `Ok` where it holds, else its first violation.
+fn certifier<'a, 'b: 'a>(
+    input: &'a RenderInput<'b>,
+    labels: &'a BTreeMap<u64, String>,
+    role: &'a dyn Fn(&CStmt) -> StatementRole,
+) -> impl Fn(&CStmt, &Occurrences) -> Result<(), String> + 'a {
+    move |stmt, marks| {
+        let certificate = control_certificate(input, stmt, marks, labels, role);
+        match certificate.ok() {
+            true => Ok(()),
+            false => Err(format!(
+                "{certificate} {:?}",
+                certificate.violations.first()
+            )),
+        }
+    }
+}
+
 /// Run one structure stage on `body`; its result stands only if the certificate still holds.
 /// `apply` says whether it changed anything, and an unchanged body is not certified again.
 fn stage(
@@ -417,8 +426,7 @@ fn classes(
     (c, values): (&CFunction, Option<&values::Values<'_>>),
     body: CStmt,
     marks: &mut Occurrences,
-    labels: &BTreeMap<u64, String>,
-    role: &dyn Fn(&CStmt) -> StatementRole,
+    certified: &Certified<'_>,
 ) -> CStmt {
     let Some(values) = values else {
         return body;
@@ -427,20 +435,10 @@ fn classes(
     if members.is_empty() {
         return body;
     }
-    let certified = |stmt: &CStmt, marks: &Occurrences| {
-        let certificate = control_certificate(input, stmt, marks, labels, role);
-        match certificate.ok() {
-            true => Ok(()),
-            false => Err(format!(
-                "{certificate} {:?}",
-                certificate.violations.first()
-            )),
-        }
-    };
     let symbols = c.symbols.borrow();
     let same_type = |a, b| symbols.ty(a) == symbols.ty(b);
     let mut deleted = Vec::new();
-    let body = stage("local classes", body, marks, &certified, |body, _| {
+    let body = stage("local classes", body, marks, certified, |body, _| {
         let renamed = crate::structure::classes::rename(body, &members, symbols.len(), &same_type);
         r2il::refusal_evidence!(
             "local-classes",
@@ -460,7 +458,7 @@ fn classes(
     if deleted.is_empty() {
         return body;
     }
-    stage("loop rotation", body, marks, &certified, |body, marks| {
+    stage("loop rotation", body, marks, certified, |body, marks| {
         crate::structure::classes::rotate_emptied(body, &deleted, marks) != 0
     })
 }

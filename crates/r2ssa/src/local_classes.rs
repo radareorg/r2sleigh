@@ -16,8 +16,11 @@ impl LocalClasses {
     /// finds plus the segment sweeps of `ComponentLiveness`, small absorbed into large.
     pub(crate) fn compute(graph: &SsaGraph, liveness: &ValueLiveness) -> Self {
         let count = graph.values.len();
-        let mut parent = (0..count as u32).collect::<Vec<_>>();
-        let mut live = vec![None::<ComponentLiveness>; count];
+        let mut union = Union {
+            parent: (0..count as u32).collect(),
+            live: vec![None; count],
+            liveness,
+        };
         for inst in &graph.insts {
             let (InstPayload::Phi { .. }, Some(output)) = (&inst.payload, inst.output) else {
                 continue;
@@ -28,39 +31,20 @@ impl LocalClasses {
             let storage = graph
                 .value(output)
                 .and_then(|value| value.canonical_storage);
-            for operand in graph.inputs(inst.id) {
+            let joinable = graph.inputs(inst.id).iter().filter(|operand| {
                 let same = graph
-                    .value(*operand)
+                    .value(**operand)
                     .and_then(|value| value.canonical_storage);
-                if same != storage || !member(graph, *operand) {
-                    continue;
-                }
-                let (a, b) = (find(&mut parent, output.0), find(&mut parent, operand.0));
-                if a == b {
-                    continue;
-                }
-                let held = |live: &mut Vec<Option<ComponentLiveness>>, root: u32| {
-                    live[root as usize]
-                        .take()
-                        .unwrap_or_else(|| ComponentLiveness::of(liveness, ValueId(root)))
-                };
-                let (mut left, right) = (held(&mut live, a), held(&mut live, b));
-                if left.interferes(&right, liveness) {
-                    (live[a as usize], live[b as usize]) = (Some(left), Some(right));
-                    continue;
-                }
-                let (root, child) = match left.members() >= right.members() {
-                    true => (a, b),
-                    false => (b, a),
-                };
-                parent[child as usize] = root;
-                left.absorb(right);
-                live[root as usize] = Some(left);
+                same == storage && member(graph, **operand)
+            });
+            for operand in joinable {
+                union.join(output, *operand);
             }
         }
         // Each class named by its smallest member, so union order never reaches the fact.
+        let parent = &mut union.parent;
         let roots = (0..count as u32)
-            .map(|value| find(&mut parent, value))
+            .map(|value| find(parent, value))
             .collect::<Vec<_>>();
         let mut smallest = vec![u32::MAX; count];
         for (value, root) in roots.iter().enumerate() {
@@ -73,6 +57,41 @@ impl LocalClasses {
     /// The class `value` belongs to, named by its smallest member; itself where none was joined.
     pub fn class_of(&self, value: ValueId) -> ValueId {
         ValueId(self.class.get(value.0 as usize).copied().unwrap_or(value.0))
+    }
+}
+
+/// The union-find over values and each root's component liveness, held while classes join.
+struct Union<'a> {
+    parent: Vec<u32>,
+    live: Vec<Option<ComponentLiveness>>,
+    liveness: &'a ValueLiveness,
+}
+
+impl Union<'_> {
+    /// Joins the classes of `a` and `b` unless their live ranges interfere; small into large.
+    fn join(&mut self, a: ValueId, b: ValueId) {
+        let (a, b) = (find(&mut self.parent, a.0), find(&mut self.parent, b.0));
+        if a == b {
+            return;
+        }
+        let (mut left, right) = (self.held(a), self.held(b));
+        if left.interferes(&right, self.liveness) {
+            (self.live[a as usize], self.live[b as usize]) = (Some(left), Some(right));
+            return;
+        }
+        let (root, child) = match left.members() >= right.members() {
+            true => (a, b),
+            false => (b, a),
+        };
+        self.parent[child as usize] = root;
+        left.absorb(right);
+        self.live[root as usize] = Some(left);
+    }
+
+    fn held(&mut self, root: u32) -> ComponentLiveness {
+        self.live[root as usize]
+            .take()
+            .unwrap_or_else(|| ComponentLiveness::of(self.liveness, ValueId(root)))
     }
 }
 
