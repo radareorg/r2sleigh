@@ -522,3 +522,20 @@ tests whether a setter's call is the next call line.
   `r2dec gap` comment (a comment holds no break point). bash `main`: 91 to 48, 43 gap comments
   and 4 cast chains at depth 18 or more, where the room is under 60 cells; one more line is
   161 cells only by the space its cut leaves.
+
+## Round 17 as built: `afv` fates (rd17-stubs-frame-pads)
+
+- D633: `afv` keeps radare2's row and states the slot's fate after ` ; `, which `diff_r2.py`
+  (`our_frame`) and the test helpers strip before comparing. The fate is painted in the comment
+  role (`\x1b[90m` at 16 colours); plain mode and a pipe stay ANSI-free. branchy_gcc_x64_O0:
+
+```
+before  var uint32_t stack_m12 @ entry.sp-0xc
+after   var uint32_t stack_m12 @ entry.sp-0xc ; promoted, pdd reads arg0
+before  var uint64_t stack_m8 @ entry.sp-0x8
+after   var uint64_t stack_m8 @ entry.sp-0x8 ; save of rbp
+before  var uint64_t stack_m552 @ entry.sp-0x228
+after   var uint8_t frame[568] @ entry.sp-0x238
+after   var uint64_t stack_m552 @ entry.sp-0x228 ; in frame at +0x10
+colour  var uint32_t stack_m12 @ entry.sp-0xc\x1b[90m ; promoted, pdd reads arg0\x1b[0m
+```

@@ -27,9 +27,8 @@ fn run(args: &[&str], name: &str, script: &str) -> (bool, String, String) {
     )
 }
 
-/// Each crackme whose section table `object` refuses opens and lists the same functions, entry0
-/// among them; `iS` lists none. The stub at 0x400578 is `__libc_start_main`'s, whose handed `main`,
-/// `__libc_csu_init` and `__libc_csu_fini` are listed (D636).
+/// Each crackme whose section table `object` refuses lists the same functions, `iS` none: entry0,
+/// `__libc_start_main`'s stub (D636), and `main` and `__libc_csu_*`, which entry0 hands it.
 #[test]
 fn a_refused_section_table_leaves_the_segments_and_the_dynamic_table() {
     let damaged = [

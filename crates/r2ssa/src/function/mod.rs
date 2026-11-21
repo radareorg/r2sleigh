@@ -1855,6 +1855,98 @@ impl SsaArtifact {
             .and_then(|index| u32::try_from(index).ok())
     }
 
+    /// Each frame object's fate (D633): a save where its round trip is certified, a parameter's home
+    /// where its role states one, else its byte in `frame`; none where none is proven. `O(slots log slots)`.
+    pub fn slot_fates(
+        &self,
+        frame: Option<&crate::FrameLayout>,
+    ) -> crate::dense::IdVec<crate::ObjectId, Option<crate::SlotFate>> {
+        let certificates = self.certificates();
+        let slots = &certificates.stack_slots;
+        let len = slots
+            .keys()
+            .next_back()
+            .map_or(0, |last| last.0 as usize + 1);
+        crate::dense::IdVec::from_fn(len, |object| {
+            slots.get(&object)?;
+            if let Some(trip) = certificates.stack_frame_round_trips.get(&object) {
+                return Some(crate::SlotFate::Save {
+                    storage: trip.storage,
+                });
+            }
+            if let Some(r2source::SourceStackSlotRole::ParameterHome {
+                parameter_index, ..
+            }) = self.stack_slot_role(object)
+            {
+                return Some(crate::SlotFate::Home {
+                    parameter: parameter_index,
+                    index: frame
+                        .and_then(|frame| frame.at(object))
+                        .map(|(index, _)| index),
+                });
+            }
+            let (index, _) = frame?.at(object)?;
+            Some(crate::SlotFate::Member { index })
+        })
+    }
+
+    /// The slots promotion took out of memory, by entry offset, less the caller's and the return
+    /// address's save, each with its fate (D633). `O(values)`.
+    pub fn promoted_slots(&self) -> Vec<crate::PromotedSlot> {
+        let graph = self.graph();
+        let mut returns_to = crate::dense::IdSet::new(graph.values.len());
+        for boundary in self.facts().boundaries.returns.values() {
+            if let Some(address) = &boundary.return_address {
+                returns_to.insert(address.value);
+            }
+        }
+        // Per offset: its width, and the one value its versions copy (`None` once two differ or a
+        // version is a merge or no copy).
+        let mut held: BTreeMap<i64, (u32, Option<ValueId>)> = BTreeMap::new();
+        for value in &graph.values {
+            let Some(storage) = value.canonical_storage else {
+                continue;
+            };
+            let Some(offset) = crate::promoted_slot_offset(&storage) else {
+                continue;
+            };
+            let source = match graph.def_inst(value.id).and_then(|def| graph.inst(def)) {
+                Some(crate::GraphInst {
+                    payload: crate::InstPayload::Op(SSAOp::Copy { src, .. }),
+                    ..
+                }) => Some(*src),
+                _ => None,
+            };
+            if source.is_some_and(|src| returns_to.contains(src))
+                || self.caller_frame_offset(offset)
+            {
+                continue;
+            }
+            let entry = held.entry(offset).or_insert((storage.size, source));
+            entry.0 = entry.0.max(storage.size);
+            if entry.1 != source {
+                entry.1 = None;
+            }
+        }
+        let (effect, stack_pointer) = (
+            self.machine_context().calls(),
+            self.machine_context().stack_pointer_carrier(),
+        );
+        held.into_iter()
+            .map(|(offset, (size, holds))| {
+                let saved = holds
+                    .and_then(|value| crate::saved_register::entry_lane(graph, value, size))
+                    .map(|lane| lane.lane)
+                    .filter(|lane| crate::saved_register::preserved(effect, stack_pointer, *lane));
+                let fate = match saved {
+                    Some(storage) => crate::SlotFate::Save { storage },
+                    None => crate::SlotFate::Promoted { holds },
+                };
+                crate::PromotedSlot { offset, size, fate }
+            })
+            .collect()
+    }
+
     /// What a frame slot is: the role its declaration states, or a parameter home the frame proves.
     pub fn stack_slot_role(
         &self,

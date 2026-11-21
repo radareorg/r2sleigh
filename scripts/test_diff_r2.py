@@ -515,6 +515,13 @@ class Analysis(unittest.TestCase):
             diff_r2.answers = real
         self.assertEqual((tally["witnessed"]["afv"]["unjudged"], tally["bare"]["afv"]["unjudged"]), (0, 1))
 
+    def test_an_afv_row_is_read_before_the_fate_r2s_states(self):
+        # D633: ` ; <fate>` follows radare2's line; the row is keyed by its offset alone.
+        rows = diff_r2.our_frame(["var uint32_t stack_m12 @ entry.sp-0xc ; promoted, pdd reads arg0",
+                                  "var uint64_t stack_m8 @ entry.sp-0x8"])
+        self.assertEqual(set(rows), {diff_r2.frame_key("entry.sp-0xc"), diff_r2.frame_key("entry.sp-0x8")})
+        self.assertEqual(rows[diff_r2.frame_key("entry.sp-0xc")], "var uint32_t stack_m12 @ entry.sp-0xc")
+
     def test_frame_and_reference_rows_are_read_as_the_shared_definition(self):
         # Sleigh's low lane of xmm0 is xmm0; a demangled caller's name holds spaces.
         self.assertEqual(diff_r2.frame_key("xmm0_qa"), ("register", "xmm0"))

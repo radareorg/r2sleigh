@@ -920,6 +920,8 @@ def our_frame(lines):
     """r2s's `afv`: each fact to its row; a refusal is one fact of its own."""
     found = {}
     for line in lines:
+        # radare2's line is the part before the fate r2s states after ` ; ` (D633).
+        line = line.split(" ; ", 1)[0]
         words = line.split()
         if line.startswith("refused:"):
             found[("refused", " ".join(words))] = " ".join(words)

@@ -307,9 +307,8 @@ fn rel(end: u64, to: u64) -> [u8; 4] {
     (to.wrapping_sub(end) as u32).to_le_bytes()
 }
 
-/// x86-64 linkage code no section header states, its lazy words at each stub's own `pushq`: PLT0 at
-/// 0x1000 through GOT[2], stubs at 0x1010, 0x1020, 0x1030, `caller: mov edi, 1; jmp 0x1010` at 0x1040,
-/// GOT at 0x1050.
+/// x86-64 linkage no section states, lazy words at each stub's `pushq`: PLT0 0x1000, stubs 0x1010 to
+/// 0x1030, `caller: mov edi, 1; jmp 0x1010` at 0x1040, GOT 0x1050.
 fn x86_lazy_plt() -> &'static [u8] {
     let (got, mut code) = (BASE + 0x50, vec![0xcc_u8; 0x80]);
     code[0..2].copy_from_slice(&[0xff, 0x35]); // push [GOT+8]

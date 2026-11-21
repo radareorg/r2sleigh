@@ -728,10 +728,8 @@ impl<S: Source> Fetch<'_, S> {
     }
 }
 
-/// The start of the one instruction that ends at `word` and jumps through `slot`, aligned to `align`.
-///
-/// Unbound, `slot` holds `word`, the "address of the following pushq" (x86-64 psABI 1.0, 5.2,
-/// "Procedure Linkage Table"; D636). Two starts prove nothing. `O(DECODE_WINDOW)`, Sleigh's bound.
+/// The one aligned instruction ending at `word` that jumps through `slot`: unbound, `slot` holds the
+/// "address of the following pushq" (x86-64 psABI 1.0, 5.2, PLT; D636). `O(DECODE_WINDOW)` decodes.
 fn stub_ending_at<S: Source>(
     fetch: &Fetch<'_, S>,
     slot: u64,
@@ -751,9 +749,8 @@ fn stub_ending_at<S: Source>(
     found.next().is_none().then_some(start)
 }
 
-/// Each slot's own stub as a cell, from its jump through the run at its word, which leaves for the
-/// resolver every such run shares; that resolver leaves through a reserved word (PLT0).
-/// `O(slots * STUB_INSTRUCTIONS)` decodes.
+/// Each slot's stub as a cell from its jump through the run at its word to the one resolver every
+/// run shares, which leaves through a reserved word (PLT0). `O(slots * STUB_INSTRUCTIONS)` decodes.
 fn own_stubs<S: Source>(
     fetch: &Fetch<'_, S>,
     lazy: &BTreeMap<u64, u64>,
