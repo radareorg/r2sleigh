@@ -706,7 +706,7 @@ fn stated_info(session: &Session) -> r2engine::InfoJson {
             nx: posture.nx,
             pic: elf.then_some(posture.load == r2image::LoadBase::Slid),
             relro: posture.relro.map(|relro| relro.spelled()),
-            statically_linked: elf.then_some(posture.statically_linked),
+            statically_linked: posture.statically_linked,
         },
     }
 }

@@ -16,10 +16,7 @@ pub(crate) fn read(file: &object::File<'_>) -> Posture {
 
 fn of<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, R>) -> Posture {
     let (endian, data) = (file.endian(), file.data());
-    let mut posture = Posture {
-        statically_linked: true,
-        ..Posture::default()
-    };
+    let mut posture = Posture::default();
     let (mut relro, mut dynamic, mut stated_dynamic) = (false, None, false);
     for header in file.elf_program_headers() {
         match header.p_type(endian) {
@@ -28,13 +25,11 @@ fn of<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, 
             }
             elf::PT_GNU_RELRO => relro = true,
             elf::PT_INTERP if posture.interpreter.is_none() => {
-                posture.statically_linked = false;
                 let path = header.interpreter(endian, data).ok().flatten();
                 let path = path.map(<[u8]>::to_vec).unwrap_or_default();
                 posture.interpreter = Some(String::from_utf8_lossy(&path).into_owned());
             }
             elf::PT_DYNAMIC => {
-                posture.statically_linked = false;
                 stated_dynamic = true;
                 if dynamic.is_none() {
                     dynamic = header.dynamic(endian, data).ok().flatten();
@@ -61,6 +56,11 @@ fn of<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, 
             elf::DT_FLAGS => elf::DynamicFlags(value(entry)).contains(elf::DF_TEXTREL),
             _ => false,
         });
+    posture.statically_linked = linked_alone(
+        posture.interpreter.is_some(),
+        stated_dynamic.then(|| dynamic.is_some()),
+        entries().map(|entry| (entry.tag(endian), value(entry))),
+    );
     posture.load = match file.elf_header().e_type(endian) {
         elf::ET_EXEC if !text_relocated => LoadBase::Linked,
         elf::ET_DYN => LoadBase::Slid,
@@ -72,4 +72,28 @@ fn of<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, 
         (true, true) => Relro::Full,
     });
     posture
+}
+
+/// Whether only the image's own start-up builds it. No interpreter means none does (gABI "Program
+/// Interpreter"); `DF_1_PIE` without `DT_NEEDED` is a static PIE (binutils `elf/common.h`).
+/// `dynamic` is `None` with no `PT_DYNAMIC`, `Some(false)` where its table is unreadable.
+fn linked_alone(
+    interpreter: bool,
+    dynamic: Option<bool>,
+    mut entries: impl Iterator<Item = (elf::DynamicTag, u64)>,
+) -> Option<bool> {
+    let (mut needs, mut pie) = (false, false);
+    for (tag, value) in entries.by_ref() {
+        match tag {
+            elf::DT_NEEDED | elf::DT_SONAME => needs = true,
+            elf::DT_FLAGS_1 => pie |= elf::DynamicFlags1(value).contains(elf::DF_1_PIE),
+            _ => {}
+        }
+    }
+    match dynamic {
+        _ if interpreter || needs => Some(false),
+        None => Some(true),
+        Some(true) if pie => Some(true),
+        _ => None,
+    }
 }

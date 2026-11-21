@@ -1113,6 +1113,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
 }
 
 /// An ELF image the static linker finished: linked, with no `PT_DYNAMIC` for a loader to bind it.
+/// Not posture's `static`, which also holds for a static PIE.
 pub(crate) fn is_static_image(file: &object::File<'_>) -> bool {
     fn none<'data, E: FileHeader, R: object::ReadRef<'data>>(file: &ElfFile<'data, E, R>) -> bool {
         let endian = file.endian();

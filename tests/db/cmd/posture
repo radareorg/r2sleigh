@@ -26,7 +26,7 @@ static   true
 EOF
 RUN
 
-# A shared object has a dynamic section and no interpreter.
+# A shared object has a dynamic section and no interpreter; with no DT_NEEDED, DT_SONAME or DF_1_PIE it states no static answer.
 NAME=shared object
 FILE=tests/fixtures/arm_plt_lld_be8.so
 CMDS=i~^intrp; i~^nx; i~^pic; i~^relro; i~^static; il
@@ -34,7 +34,6 @@ EXPECT=<<EOF
 nx       true
 pic      true
 relro    partial
-static   false
 EOF
 RUN
 
