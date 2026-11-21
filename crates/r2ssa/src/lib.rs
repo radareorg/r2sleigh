@@ -51,6 +51,7 @@ pub(crate) mod integrity;
 pub mod interproc;
 pub mod lanes;
 pub mod liveness;
+pub mod local_classes;
 pub mod member_call;
 pub use member_call::{MemberCall, MemberCallRefusal, MemberCalls};
 pub(crate) mod liveout;

@@ -150,3 +150,19 @@ fn an_address_no_instruction_can_run_at_is_refused_rather_than_rendered_as_a_fun
     let c = c_of(&mut program, BASE);
     assert!(c.contains(" f("), "{c}");
 }
+
+#[test]
+fn a_pointer_stepped_in_a_loop_is_one_carrier_its_update_writes() {
+    // l: add al, [rdi]; add rdi, 1; cmp rsi, rdi; jne l; ret
+    let mut program = opened();
+    let code = [
+        0x02, 0x07, 0x48, 0x83, 0xc7, 0x01, 0x48, 0x39, 0xfe, 0x75, 0xf5, 0xc3,
+    ];
+    program.source_mut().write(TWO, &code);
+    let c = c_of(&mut program, TWO);
+    assert!(!c.contains("rdi_2"), "{c}");
+    assert!(
+        c.contains("rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);"),
+        "{c}"
+    );
+}

@@ -1501,6 +1501,12 @@ impl<'a> Values<'a> {
         }
     }
 
+    /// Each value with the symbol that names it, by value (D470's renaming reads it).
+    pub(super) fn named(&self) -> impl Iterator<Item = (ValueId, SymbolId)> + '_ {
+        (self.names.iter().enumerate())
+            .filter_map(|(value, name)| Some((ValueId(value as u32), name.as_ref()?.0)))
+    }
+
     /// The values read as residuals for want of a value, each once, by cause and name.
     pub(super) fn unassigned(&self) -> Vec<super::proof::UnassignedRead> {
         let mut reads = self.unassigned.borrow().clone();

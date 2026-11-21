@@ -58,19 +58,17 @@ EXPECT=<<EOF
 r2sleigh_result_u64 _init(void)
 {
     uint64_t rax_1;
-    uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x404fe0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
-            rax_3 = rax_1;
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
-            rax_3 = r2sleigh_residual_u64(3);
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            rax_1 = r2sleigh_residual_u64(3);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         }
     }
 }
@@ -373,12 +371,11 @@ r2sleigh_result_u64 vfold(uint32_t arg0, ...)
     uint32_t tmp_4014b0_8_1;
     uint64_t tmp_4014c1_8_1;
     uint64_t rax_13;
-    uint64_t rax_14;
     uint64_t tmp_4014d3_0_1;
     uint32_t tmp_4014e0_8_1;
     _Alignas(16) uint8_t frame[248];
 
-    /* r2dec proof: 15 constructs are marked below; 122 source obligations: 62 rendered, 40 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 17 residual; 44 statements rendered; 8 held from entry, read as residuals (XMM0_0, XMM1_0, XMM2_0, XMM3_0, XMM4_0, XMM5_0, XMM6_0, XMM7_0); 6 variadic tail registers, read as residuals (R8_0, R9_0, RAX_0, RCX_0, RDX_0, RSI_0); a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
+    /* r2dec proof: 15 constructs are marked below; 122 source obligations: 62 rendered, 40 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 17 residual; 43 statements rendered; 8 held from entry, read as residuals (XMM0_0, XMM1_0, XMM2_0, XMM3_0, XMM4_0, XMM5_0, XMM6_0, XMM7_0); 6 variadic tail registers, read as residuals (R8_0, R9_0, RAX_0, RCX_0, RDX_0, RSI_0); a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 12U), (uint32_t)arg0);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 64U) + (uint64_t)8U), (uint64_t)r2sleigh_residual_u64(1));
@@ -414,16 +411,15 @@ r2sleigh_result_u64 vfold(uint32_t arg0, ...)
                         tmp_4014c1_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
                         rax_13 = tmp_4014c1_8_1;
                         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)rax_13 + (uint64_t)8U));
-                        rax_14 = rax_13;
                     } else {
                         tmp_40149e_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 48U));
                         tmp_4014a5_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 32U));
                         tmp_4014b0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 32U));
                         r2sleigh_store_u32((void*)(uint64_t)(frame + 32U), (uint32_t)((uint32_t)tmp_4014b0_8_1 + (uint32_t)8U));
-                        rax_14 = (uint64_t)((uint64_t)(uint32_t)tmp_4014a5_8_1 + (uint64_t)tmp_40149e_8_1);
+                        rax_13 = (uint64_t)((uint64_t)(uint32_t)tmp_4014a5_8_1 + (uint64_t)tmp_40149e_8_1);
                     }
                     {
-                        tmp_4014d3_0_1 = r2sleigh_load_u64((void*)rax_14);
+                        tmp_4014d3_0_1 = r2sleigh_load_u64((void*)rax_13);
                         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)((uint64_t)tmp_4014d3_0_1 + (uint64_t)rcx_2));
                         tmp_4014e0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 20U));
                         r2sleigh_store_u32((void*)(uint64_t)(frame + 20U), (uint32_t)((uint32_t)tmp_4014e0_8_1 + (uint32_t)1U));
@@ -952,17 +948,15 @@ r2sleigh_result_u64 shape_mutual_even(r2sleigh_word_u64 arg0, r2sleigh_word_u64 
     r2sleigh_result_u64 shape_mutual_odd(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_9;
-    uint64_t rax_10;
 
-    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 2 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg0 != (uint64_t)0U)) {
             rax_9 = shape_mutual_odd((uint64_t)((uint64_t)arg0 - (uint64_t)1U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)arg1 * (uint64_t)32U) + (uint64_t)arg0) - (uint64_t)arg1));
-            rax_10 = rax_9;
-            return r2sleigh_carrier_u64((uint64_t)rax_10);
+            return r2sleigh_carrier_u64((uint64_t)rax_9);
         } else {
-            rax_10 = (uint64_t)((uint64_t)arg1 ^ (uint64_t)0xa5a5a5a5U);
-            return r2sleigh_carrier_u64((uint64_t)rax_10);
+            rax_9 = (uint64_t)((uint64_t)arg1 ^ (uint64_t)0xa5a5a5a5U);
+            return r2sleigh_carrier_u64((uint64_t)rax_9);
         }
     }
 }
@@ -981,17 +975,15 @@ r2sleigh_result_u64 shape_mutual_odd(r2sleigh_word_u64 arg0, r2sleigh_word_u64 a
     r2sleigh_result_u64 shape_mutual_even(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_9;
-    uint64_t rax_10;
 
-    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 2 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg0 != (uint64_t)0U)) {
             rax_9 = shape_mutual_even((uint64_t)((uint64_t)arg0 - (uint64_t)1U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)arg1 * (uint64_t)16U) + (uint64_t)arg1) + (uint64_t)((uint64_t)arg0 * (uint64_t)4U)));
-            rax_10 = rax_9;
-            return r2sleigh_carrier_u64((uint64_t)rax_10);
+            return r2sleigh_carrier_u64((uint64_t)rax_9);
         } else {
-            rax_10 = (uint64_t)((uint64_t)arg1 ^ (uint64_t)0x5a5a5a5aU);
-            return r2sleigh_carrier_u64((uint64_t)rax_10);
+            rax_9 = (uint64_t)((uint64_t)arg1 ^ (uint64_t)0x5a5a5a5aU);
+            return r2sleigh_carrier_u64((uint64_t)rax_9);
         }
     }
 }
