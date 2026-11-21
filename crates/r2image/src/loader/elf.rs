@@ -351,6 +351,32 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             .unwrap_or_default()
     }
 
+    /// The arrays the dynamic table names, placed in the file through the `PT_LOAD` that holds each.
+    fn arrays(&self) -> Vec<DynamicArray> {
+        let file_size = self.file.data().len().unwrap_or(0);
+        let pairs = [
+            (
+                elf::DT_PREINIT_ARRAY,
+                elf::DT_PREINIT_ARRAYSZ,
+                EntryKind::Preinit,
+            ),
+            (elf::DT_INIT_ARRAY, elf::DT_INIT_ARRAYSZ, EntryKind::Init),
+            (elf::DT_FINI_ARRAY, elf::DT_FINI_ARRAYSZ, EntryKind::Fini),
+        ];
+        let stated = pairs.into_iter().filter_map(|(place, size, kind)| {
+            let (vaddr, size) = (self.tag(place)?, self.tag(size)?);
+            vaddr.checked_add(size)?;
+            let offset = self.offset_of(vaddr, size)?;
+            (offset.checked_add(size)? <= file_size).then_some(DynamicArray {
+                kind,
+                vaddr,
+                offset,
+                size,
+            })
+        });
+        stated.collect()
+    }
+
     /// The tables the dynamic table names, as the loader reads them: through the program headers, whatever sections remain.
     fn tabled(&self) -> Vec<View> {
         let plt_rela = self.tag(elf::DT_PLTREL) == u64::try_from(elf::DT_RELA.0).ok();
@@ -1101,7 +1127,24 @@ pub(crate) fn is_static_image(file: &object::File<'_>) -> bool {
     }
 }
 
-/// The dynamic table's entries, read through `PT_DYNAMIC` to the terminating one.
+/// One initialiser or terminator array the dynamic table states: its kind, place, file offset and size.
+pub(crate) struct DynamicArray {
+    pub kind: EntryKind,
+    pub vaddr: u64,
+    pub offset: u64,
+    pub size: u64,
+}
+
+/// `DT_INIT_ARRAY`, `DT_FINI_ARRAY` and `DT_PREINIT_ARRAY`, each with its size tag, read through
+/// `PT_DYNAMIC` as the loader reads them (gABI "Dynamic Section"); a tag without its size states nothing.
+pub(crate) fn dynamic_arrays(file: &object::File<'_>) -> Vec<DynamicArray> {
+    match file {
+        object::File::Elf32(file) => Elf::of(file, 4).arrays(),
+        object::File::Elf64(file) => Elf::of(file, 8).arrays(),
+        _ => Vec::new(),
+    }
+}
+
 /// The functions the dynamic table names for the loader to call itself, `DT_INIT` and `DT_FINI`,
 /// each with where the table states it: its entry's value field.
 pub(crate) fn hooks(file: &object::File<'_>) -> Vec<(EntryKind, u64, StatedAt)> {
@@ -1143,6 +1186,7 @@ fn hooks_of<'data, E: FileHeader, R: object::ReadRef<'data>>(
     named.collect()
 }
 
+/// The dynamic table's entries, read through `PT_DYNAMIC` to the terminating one.
 fn dynamic_entries<'data, E: FileHeader, R: object::ReadRef<'data>>(
     file: &ElfFile<'data, E, R>,
 ) -> Option<&'data [E::Dyn]> {

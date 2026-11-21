@@ -11,8 +11,8 @@ mod macho;
 pub(crate) mod minidebug;
 
 pub(crate) use elf::{
-    DynamicSymbol, binding, common, hooks, is_static_image, machine, unsectioned_dynamic_symbols,
-    without_section_table,
+    DynamicArray, DynamicSymbol, binding, common, dynamic_arrays, hooks, is_static_image, machine,
+    unsectioned_dynamic_symbols, without_section_table,
 };
 
 /// What the loader applies to one image.
