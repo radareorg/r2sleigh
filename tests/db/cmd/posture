@@ -68,11 +68,19 @@ sections refused: Invalid ELF section header offset/size/alignment
 nth paddr        size vaddr       vsize perm flags type        name
 -------------------------------------------------------------------
 0x00400530    1     24 fcn.00400530
-0x00400578    1      6 fcn.00400578
-0x004005c0    2     42 entry0
+0x00400558    1      6 sym.imp.printf
+0x00400568    1      6 sym.imp.puts
+0x00400578    1      6 sym.imp.__libc_start_main
+0x00400588    1      6 sym.imp.fgets
+0x00400598    1      6 sym.imp.strcmp
+0x004005a8    1      6 sym.imp.fflush
+0x004005c0    1     41 entry0
 0x004005ec    3     23 fcn.004005ec
 0x00400610    6    100 fcn.00400610
 0x00400680    4     34 fcn.00400680
+0x004006a4    4    127 fcn.004006a4
+0x00400730    1      2 fcn.00400730
+0x00400740    4    137 fcn.00400740
 0x004007d0    4     54 fcn.004007d0
 0x00400808    1     14 fcn.00400808
 EOF
@@ -150,7 +158,6 @@ RUN
 NAME=a refused section table still reaches main through __libc_start_main
 FILE=tests/fixtures/crackme_shoff_past_end
 CMDS=afl~0x004006a4
-BROKEN=1
 EXPECT=<<EOF
 0x004006a4    4    127 fcn.004006a4
 EOF
