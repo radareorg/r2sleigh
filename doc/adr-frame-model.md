@@ -327,11 +327,12 @@ the reason each kept place stays in memory. Class A (frame sites, `classify.py` 
 9,437 sites in 577 functions.
 
 **One join.** 120 listed functions refuse the whole frame on at least one promotion pass; 102 of them
-have class A sites, 4,693 in all (95 refuse on every pass, 7 on some). The trace
-holds 120 more entries that no list names: callees built while a listed caller renders. The traces
-taken at eb327af9a (`designs/memtypes/prom`) give the same sets, 120 listed, 102 with sites, 120
-unlisted. So 102 is the listed functions with a frame site, and the gate counts those; 217 is
-reproduced by no join of these traces.
+have class A sites, 4,693 in all. 87 refuse on every pass (4,171 sites) and 15 on some (522). The
+trace holds 120 more refusing entries that no list names: callees built while a listed caller renders.
+The traces taken at eb327af9a (`designs/memtypes/prom`) give the same 120, 102 and 120. The two counts
+measured there are two joins: 102 is the listed functions with a frame site; 217 (`frameb.py`) is every
+traced entry, listed or a callee, that refuses and never promotes a slot (113 of them listed), and its
+3,519 sites are the `frame + K` sites alone. The gate counts the 102.
 
 **Origins.** No refusal comes from an access whose address has no points. One function refuses as
 `whole`, where a float operation consumes a frame address with one known point. 119 refuse on a
@@ -358,8 +359,8 @@ D674's.
 
 On AArch64, switch-hello-world `_vfprintf_r` 0x16e9c (D637) refuses the whole frame on four derived
 points (-896, -872, -640, -624). Under the switch its whole-frame refusal lifts and 13 places promote,
-all saves; `[sp, 0x90]` (entry -1136) stays in memory because it is accessed at two widths (the
-64-bit table address and 13 32-bit `str w25`), so the table read stays unresolved and its 198 loads
+all saves; `[sp, 0x90]` (entry -1136) stays in memory because it is accessed at two widths (7 accesses
+in the walk: the 64-bit table address and 32-bit `str w25`), so the table read stays unresolved and its 198 loads
 and stores do not move.
 
 **Kept places.** Each class A site, by the reason its place stays in memory on the rendered pass
