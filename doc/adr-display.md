@@ -522,3 +522,19 @@ tests whether a setter's call is the next call line.
   `r2dec gap` comment (a comment holds no break point). bash `main`: 91 to 48, 43 gap comments
   and 4 cast chains at depth 18 or more, where the room is under 60 cells; one more line is
   161 cells only by the space its cut leaves.
+
+## Round 17: rails, comments (rd17-render-rest)
+
+- D620's remainder: a comment is one token to C's lexer and a line break inside it is white space
+  (C17 6.4.9), so every space of a statement comment's text and of an `r2dec gap` comment is a
+  break point, written after the space at the statement's depth. A cast's closing parenthesis is a
+  break point too, its `BreakPoint::cast` its place in a run of casts. `rails::wrapped` ranks a
+  point by (after a cast, depth plus that place): any operator or space fits before any cast, so a
+  cast cut appears only where no other point fits, and no line that wrapped at an operator moves.
+- The 4 cast chains of bash `main` (0x1e6f2, 0x1e7cf, 0x1e7dc, 0x1ea28), read by hand: 7, 7, 10
+  and 7 casts; no adjacent pair folds under C17 6.3.1.3 (each is a sign-extending widening, a
+  narrowing then a widening, or an integer to pointer conversion). The casts to the operand's own
+  type (3, 3, 1, 3; C17 6.3p2) shorten only 0x1e7cf's run under the room, so the wrap is the fix.
+- Laid lines over 160 cells: hashes 2 to 0, branchy 2 to 0, shapes 3 to 0, bash `main` 48 to 0.
+  Plain `pdd` bytes unchanged; break points stay computed on demand; the laid text strips back to
+  the plain bytes on the three pinned fixtures and bash `main`.
