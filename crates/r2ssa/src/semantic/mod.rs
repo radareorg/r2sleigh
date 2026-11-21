@@ -94,6 +94,8 @@ pub struct PreparedFunctionFacts {
     /// The bytes of each value the function's meaning reads; `None` where an exit hands registers
     /// to code outside the graph.
     pub demanded: Option<crate::demand::DemandedBytes>,
+    /// Which values are one location's successive contents (D470): r2dec's renaming reads it.
+    pub classes: crate::local_classes::LocalClasses,
     pub obligations: SemanticObligationInventory,
     pub assumptions: AssumptionSet,
     pub applied_assumption_bindings: Vec<PreparedAssumptionBinding>,
@@ -376,6 +378,11 @@ impl PreparedFunctionFacts {
             (&ignored_reads, demanded),
         );
         let storage_spans = StorageSpans::compute(graph, &live_values);
+        // Interface recovery renders nothing, so its collection states no classes.
+        let classes = match certified {
+            Certified::Whole => crate::local_classes::LocalClasses::compute(graph, &live_values),
+            Certified::ReturnControls => crate::local_classes::LocalClasses::default(),
+        };
         let demanded = live_values.into_bytes();
         phase!("liveness", 0);
         let (loops, inductions) = collect_structured_loop_facts(
@@ -498,6 +505,7 @@ impl PreparedFunctionFacts {
             private_stack_objects,
             certificates,
             demanded,
+            classes,
             obligations,
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
