@@ -3809,6 +3809,8 @@ pub(crate) struct CalleeStatement {
     pub(crate) carriers: Option<r2source::SourceResultCarriers>,
     /// What a call reads where the arity is exact and fixed: its parameters' locations (D283).
     pub(crate) reads: Option<Vec<crate::SourceParameterLocation>>,
+    /// Each formal's home at the call, holes included, in parameter order (psABI 3.2.3, D546).
+    pub(crate) homes: Option<Box<[crate::SourceParameterLocation]>>,
 }
 
 impl CalleeStatement {
@@ -3842,6 +3844,9 @@ impl CalleeStatement {
                         && interface.unbounded_reads().is_none())
                     .then(|| crate::call_reads::CallReads::callee_locations(interface))
                     .flatten(),
+                    homes: (interface.parameters().iter())
+                        .map(|parameter| interface.at_call_site(parameter.location()))
+                        .collect(),
                     arity,
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
