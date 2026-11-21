@@ -104,9 +104,8 @@ fn a_table_indexed_by_a_remainder_is_one_array_of_its_proven_length() {
     }
 }
 
-/// `afv` states each slot's fate after radare2's line (D633): `gate_one`'s spill of `edi` is
-/// promoted and `pdd` reads `arg0`; `__do_global_dtors_aux`'s `push rbp` is the save of `rbp`;
-/// `main`'s slots lie in the `frame` array `pdd` declares, which `afv` lists by its byte 0.
+/// `afv` states each slot's fate after radare2's line (D633): a promoted spill, a save of `rbp`,
+/// and `main`'s slots in the `frame` array `pdd` declares, listed by its byte 0.
 #[test]
 fn afv_states_each_slot_s_fate_in_the_one_frame_model() {
     let fixture = "branchy_gcc_x64_O0";

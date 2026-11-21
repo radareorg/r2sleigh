@@ -1322,9 +1322,8 @@ mod dispatch_table {
         let frame = frame.collect::<Vec<_>>().join("\n");
         assert_eq!(
             frame,
-            // The loaded table leaves q0 written on the path that skips the loop, so the body does
-            // not say whether x0 or v0 is the result, and no operation states the arguments' sign.
-            // Each slot's fate follows radare2's line (D633); the table lies in `frame`.
+            // q0 is written on the path that skips the loop, so x0 or v0 is the result unproven;
+            // each slot's fate follows radare2's line (D633).
             "arg r2sleigh_word_u64 arg0 @ x0\n\
              arg r2sleigh_word_u64 arg1 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c ; promoted\n\
