@@ -676,6 +676,22 @@ recorded, not cut. Against 4c6d6e775 (contabo `instructions:u`, median of 3): co
 passes 3,786 tests (8 ignored); equivalence holds 828 records on both arches; D490 0 unjudged; certification invents 0 (127 calls graded on
 contabo, 109 on CI); void_soundness renders 0 of 1,858 read results void; `census.py time` and `stats` pass; the history gate moves 0 of 9; the refuter replays 11, 0 refuted. Source-gold stays red on D610's `combined` parameter 0.
 
+Round 16's exit, on rebuild-design-16 from master 768391be5 (four chains merged in the ruling's order: cost-index, flow,
+surface-sweep, render): D612 keeps the reference index as columns, so the 50-function pumasim session peaks at 460 MB where it
+peaked at 708 MB (Mac), 1.19 times one cold request, and D588's gate (549 MB) is met; D589 lifts each body once
+(`site_fates_relifted` 0 on every row); D598 states the pad entry state (parts 1 and 2); D619, D622 and D566 state unresolved
+transfers, unheld gaps and the `*` result line; D621 and D620 type the proof clauses and wrap on a terminal; D582, D575, D624,
+D577 and D576 part 3 close the sweep's verbs; 22 judged entries are deliberate. The exit paid 9 structure rises at their owners
+and fixed one Codex finding: a deposited row that moves now moves its owner's answer (`query/db.rs`). Against 768391be5
+(contabo `instructions:u`, median of 3): cold pumasim `pdd @ 0x23fdf0` 128.00 to 121.78 G (-4.87%), cold 0pack `pdd @ 0x62ecf0`
+77.29 to 75.25 G (-2.64%), bash `aa; pdd @ 0x2e630` -1.99%, pumasim `aa; pdd @ 0x3b6b20` -0.53%, bash cold `pdf @ 0x1e1d0` -2.36%
+(16 lines move: D619's count, D622's gaps); peak RSS +5, +11 and +4 MiB on the three cold rows (flow's `LaneFlows` rows and the
+closed world D598 decides on unwinding images); each cold answer equals its `aa;` twin. DecBench on 2,621 functions: 0 moved.
+104 of 105 goldens without `aa` equal their `aa;` answers (the other is D636's BROKEN golden). The suite passes 3,843 tests
+(10 ignored); equivalence holds 828 records on both arches; D490 0 unjudged; certification invents 0 (127 calls on contabo,
+109 on CI); void_soundness renders 0 of 1,858 read results void; history gate 0 of 9 moved; scan growth 1.998 to 2.003
+(`rmw_round_trips` Ir 2.373 held in `OPEN`, D457); the refuter replays 11, 0 refuted; `frame_agree.py` 0 of 582 (D633 next).
+
 ### Next rounds, from the rulings
 
 1. D211 to its gate of at most 5. After round 9, 19 functions stay; D372's stated half is the next owner.
