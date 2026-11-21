@@ -17,7 +17,8 @@ offsets. Each offset either side names is classified:
 
 `afv` states each slot's fate after ` ; ` (D633): a promoted slot or a save
 agrees where the rendering declares nothing; a member of `frame` agrees where
-the rendering declares the array `afv` lists. `--bound` fails the run when a
+the rendering declares the array `afv` lists; `pdd reads <name>` must name a
+parameter of the rendering (`reads`). `--bound` fails the run when a
 disagreement count exceeds the measured one, or the parsed `afv` rows fall.
 
 P4 exits when every offset agrees.
@@ -65,6 +66,8 @@ def pdd_locals(text):
     if not isinstance(rendering, dict) or rendering.get("refused"):
         return None
     variables = rendering.get("variables") or []
+    # The parameters a promoted slot's `pdd reads <name>` must name.
+    found["params"] = {variable["name"] for variable in variables if variable.get("kind") == "param"}
     for variable in variables:
         location = variable.get("location", "")
         if variable.get("kind") == "local" and location.startswith("stack:"):
@@ -80,6 +83,16 @@ def stands_alone(fate, frame):
 def classify(afv, pdd):
     kinds = collections.Counter()
     details = []
+    params = pdd.pop("params", set())
+    # `promoted, pdd reads <name>` agrees only where the rendering has a parameter of that name.
+    for offset, rows in afv.items():
+        for name, ty, fate in rows:
+            if fate.startswith("promoted, pdd reads "):
+                read = fate[len("promoted, pdd reads "):]
+                kinds["reads-named"] += 1
+                if read not in params:
+                    kinds["reads"] += 1
+                    details.append((offset, "reads", [(name, ty, fate)], sorted(params)))
     # The array is compared as one row of its own, where its byte 0 may share a member's offset.
     arrays = [(o, "frame", ty) for o, rows in afv.items() for name, ty, _ in rows if name == "frame"]
     declared = [(o, name, ty) for o, rows in pdd.items() for name, ty in rows if name == "frame"]
@@ -155,11 +168,14 @@ def main():
             totals.update(kinds)
             lines.extend(f"{binary.name} {address} {off if off == 'frame' else hex(off)} {kind}"
                          f" afv={a} pdd={p}" for off, kind, a, p in details)
+    named, unread = totals.pop("reads-named", 0), totals.pop("reads", 0)
     offsets = sum(totals.values())
     print(f"frame agreement: {totals['agree']} of {offsets} offsets agree; {unrendered} functions refused;"
           f" {rows} afv rows parsed")
     for kind in ("name", "type", "afv-only", "pdd-only", "afv-twice", "pdd-twice"):
         print(f"  {kind:10} {totals[kind]}")
+    print(f"  reads      {unread} of {named} `pdd reads` names no parameter of the rendering")
+    totals["reads"] = unread
     if args.details:
         args.details.write_text("\n".join(lines) + "\n")
     failed = []

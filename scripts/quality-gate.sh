@@ -256,7 +256,7 @@ phase "Frame agreement"
 run cargo build -p r2s --features sleigh
 run python3 scripts/frame_agree.py --committed --r2s "${CARGO_TARGET_DIR:-target}/debug/r2s" \
     --bound afv-only=0 --bound pdd-only=3 --bound name=0 --bound type=0 \
-    --bound afv-twice=0 --bound pdd-twice=0 --bound rows=579
+    --bound afv-twice=0 --bound pdd-twice=0 --bound reads=0 --bound rows=579
 
 phase "Equivalence gate"
 # Replaces the plugin-driven 54-cell cutover corpus, which could no longer run:

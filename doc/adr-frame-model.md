@@ -313,7 +313,10 @@ offset beside the column; this departs from the ruled "column by `ObjectId`" for
 rv_O0g 0x144c, where the only frame object is a parameter home the rendering also reads at
 narrower widths, so `pdd` names the home through `frame` while `afv` lists no member. Whether a
 rendering names an object is decided at spell time (`values.rs` declares `frame` on first use);
-stating it upstream is P4's next row. `frame_agree.py --committed` runs in
+stating it upstream is P4's next row. The 579 rows by fate: promoted 285
+(137 name the parameter `pdd` reads, each checked against the rendering's parameters, 0 wrong),
+home 115, member 108, the array 51, save 20. "Home" is a fifth fate the ruling did not list: a
+role `stack_slot_role` states, which agrees standing alone. `frame_agree.py --committed` runs in
 `scripts/quality-gate.sh` with these counts as its bounds.
 
 ## Consequences
