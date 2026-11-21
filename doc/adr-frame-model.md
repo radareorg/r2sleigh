@@ -319,6 +319,62 @@ home 115, member 108, the array 51, save 20. "Home" is a fifth fate the ruling d
 role `stack_slot_role` states, which agrees standing alone. `frame_agree.py --committed` runs in
 `scripts/quality-gate.sh` with these counts as its bounds.
 
+## D654 step 0 (round 18)
+
+Measured at 5f39d32a6 over DecBench (2,621 functions) with a probe patch that ships nothing: each
+promotion pass's refusal, the origin of each derived point that reaches a sink or an opaque access, and
+the reason each kept place stays in memory. Class A (frame sites, `classify.py` on the base dump) is
+9,437 sites in 577 functions.
+
+**One join.** 120 listed functions refuse the whole frame on at least one promotion pass, 4,693 class A
+sites: 100 on every pass (4,171 sites) and 20 on some (522). The trace holds 120 more entries that no
+list names: callees built while a listed caller renders. That split is the disagreement measured at
+eb327af9a: 102 counted listed functions, 217 counted every entry. The gate counts listed functions.
+
+**Origins.** No refusal comes from an access whose address has no points. One function refuses as
+`whole`, where a float operation consumes a frame address with one known point. 119 refuse on a
+derived point, whose offset is known. So every unplaced address has known base candidates: 120 of 120
+functions, 4,693 of 4,693 sites. By the step that derived a point (a function may have several):
+
+| Origin of the derived point | Functions | Sites |
+|---|---|---|
+| a merge of a frame address with a non-address | 115 | 4,593 |
+| a merge that moves again (the widening) | 71 | 3,661 |
+| a mask or a mix | 36 | 2,041 |
+| a place stored twice (the widening) | 12 | 1,026 |
+| subtracted from | 8 | 561 |
+
+**D654's rule moves nothing.** A probe switch makes each derived point an escape at its offset, either
+way, as D654 states; the walk is otherwise unchanged. Refused passes fall from 555 to 4, and 26 builds
+promote more places, each a register save between -40 and -8 that `pdd` already elides. The DecBench
+dump is byte-identical, 2,621 of 2,621: loads and stores move 0. An escape reaches every place up to
+the next save on either side, and at -O2 every save sits above every local, so a derived address
+reaches every local. Under the switch the formerly refused functions keep their places as mixed widths
+(4,425 accesses), rewritten and reached (4,319) and reached (2,402). D654 is not built; the binding
+fact is D674's.
+
+**Kept places.** Each class A site, by the reason its place stays in memory on the rendered pass
+(`kept` in `walk.rs`; a site through a merged local is resolved through its one definition):
+
+| Reason | Sites | Functions |
+|---|---|---|
+| the whole frame, a derived point on every pass | 4,171 | 87 |
+| a call's write area covers it before a load (`rewritten`, D369) | 1,397 | 131 |
+| rewritten, and an escape reaches it | 1,305 | 225 |
+| an escape reaches it | 1,236 | 219 |
+| accessed at two widths | 811 | 60 |
+| the whole frame on the rendered pass, another pass promoted | 325 | 5 |
+| an indexed address, an opaque access with no exact place | 57 | 14 |
+| handed to a call as a stack argument, and reached | 56 | 24 |
+| overlapped by another place (alone or with the above) | 59 | 34 |
+| a constant offset through a merged local, an opaque access | 7 | 2 |
+| a save read back | 9 | 9 |
+| the entry block runs again | 4 | 2 |
+| unexplained | 0 | 0 |
+
+Every kept place fails the lvalue licence of D655 for the reason promotion refused it: an escape run,
+a call's write area, two widths or an overlap. A place that clears all of them is promoted already.
+
 ## Consequences
 
 - Equivalence and the census change at P4.3 and P4.4, and each change is read
