@@ -126,7 +126,8 @@ pub fn render(
     crate::ast::respell_nonconforming_main(&mut c, input.function().entry);
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
-    let clauses = proof::ProofClauses::of(&c, unassigned.as_deref().unwrap_or_default());
+    let unclassed = values.as_ref().and_then(values::Values::unclassed);
+    let clauses = proof::ProofClauses::of(&c, unassigned.as_deref().unwrap_or_default(), unclassed);
     open_proof_line(&mut c, input, &ledger, &clauses, &tags);
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
@@ -214,6 +215,7 @@ fn declare(c: &mut CFunction, input: &RenderInput<'_>, values: Option<&values::V
     match values {
         Some(values) => {
             c.params = values.params();
+            c.params_known = values.unclassed().is_none();
             c.variadic = input.variadic();
             c.locals = values.locals();
             c.externs = values.externs();

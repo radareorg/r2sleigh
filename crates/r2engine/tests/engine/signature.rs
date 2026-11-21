@@ -367,3 +367,28 @@ fn a_declared_prototype_with_unnamed_parameters_keeps_its_arity() {
         assert_eq!(common::parameters(header).len(), 2, "{text}");
     }
 }
+
+/// `addsd xmm0, xmm1; ret`: `afi` states two `double` formals (psABI 3.2.3 SSE class).
+const ADDS_TWO_DOUBLES: &[u8] = &[0xf2, 0x0f, 0x58, 0xc1, 0xc3];
+
+/// The header lists the formals `afi` states, and never `(void)` beside them (C17 6.7.6.3p10).
+#[test]
+fn the_header_lists_the_formals_afi_states() {
+    let code = ADDS_TWO_DOUBLES;
+    let mut program = OpenProgram::of(Literal::of_code(code, &[("f", BASE, code.len() as u64)]));
+    let info = program.function_info(BASE).expect("it is described");
+    let rendered = (program.rendered(BASE).expect("it renders").response.output).into_text();
+    let header = rendered.lines().next().expect("a header");
+    let declared = (info.arguments.iter())
+        .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
+        .collect::<Vec<_>>();
+    assert_eq!(declared, ["double _", "double _"], "{header}");
+    let (_, parameters) = header.split_once('(').expect("a parameter list");
+    let listed = (parameters.trim_end_matches(')').split(", "))
+        .map(|parameter| {
+            let (ty, _) = parameter.rsplit_once(' ').expect("a named parameter");
+            format!("{ty} _")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed, declared, "{rendered}");
+}

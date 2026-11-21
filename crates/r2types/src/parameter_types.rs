@@ -145,6 +145,26 @@ impl SlotType {
     }
 }
 
+/// A formal at its slot's class: a float register's width-only integer is the float of its width
+/// (psABI 3.2.3 SSE class, AAPCS64 6.8.2 C.1), resting on the convention; any other stands.
+pub fn at_slot_class(
+    ty: CTypeLike,
+    confidence: r2source::confidence::Confidence,
+    class: Option<r2source::convention::SlotClass>,
+) -> (CTypeLike, r2source::confidence::Confidence) {
+    let float = matches!(class, Some(r2source::convention::SlotClass::Float));
+    match ty.unaliased() {
+        CTypeLike::Int {
+            bits: bits @ (32 | 64),
+            ..
+        } if float && !confidence.basis.states_type() => (
+            CTypeLike::Float(*bits),
+            r2source::confidence::Confidence::of(Basis::Convention),
+        ),
+        _ => (ty, confidence),
+    }
+}
+
 /// The prelude typedef an integer of no stated sign spells: `r2sleigh_word_uN` over `uintN_t`,
 /// which keeps wraparound defined and claims no C sign (D265, as D165's hole typedef).
 pub fn unstated_word(bits: u32) -> CTypeLike {

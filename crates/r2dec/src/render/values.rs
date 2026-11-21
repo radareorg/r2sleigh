@@ -64,6 +64,8 @@ pub(super) struct Values<'a> {
     frame_formals: Vec<(u32, SymbolId, MachineType, bool)>,
     symbols: Rc<RefCell<SymbolTable>>,
     params: Vec<CParam>,
+    /// The first formal whose C class is unknown: the header lists those before it, a floor.
+    unclassed: Option<u32>,
     locals: RefCell<Vec<CLocal>>,
     /// By instruction index: whether the text discharged it, which the ledger reads.
     rendered: RefCell<Vec<bool>>,
@@ -833,6 +835,7 @@ impl<'a> Values<'a> {
             frame_formals: Vec::new(),
             symbols,
             params: Vec::new(),
+            unclassed: None,
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
@@ -863,10 +866,10 @@ impl<'a> Values<'a> {
             projection,
             roots,
         };
-        let parameters = parameters(input, artifact);
-        values.own.params = parameters
-            .as_ref()
-            .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
+        let (parameters, unclassed) = parameters(input, artifact);
+        values.own.params =
+            (unclassed.is_none()).then(|| parameters.iter().map(|(_, _, class)| *class).collect());
+        values.unclassed = unclassed;
         values.declare(input, tags, parameters);
         values.prototypes = values.decide_prototypes();
         Some(values)
@@ -1059,10 +1062,10 @@ impl<'a> Values<'a> {
         &mut self,
         input: &RenderInput<'_>,
         tags: &super::tags::Tags,
-        parameters: Option<Vec<(u32, r2ssa::FormalHome, MachineType)>>,
+        parameters: Vec<(u32, r2ssa::FormalHome, MachineType)>,
     ) {
         let mut pointing = Vec::new();
-        for (index, home, ty) in parameters.into_iter().flatten() {
+        for (index, home, ty) in parameters {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
             let stated = input.declared_parameter(index as usize, ty.width_bits());
             let declared = self.parameter_type(input, tags, (index, &ty), stated.as_ref());
@@ -1220,6 +1223,11 @@ impl<'a> Values<'a> {
 
     pub(super) fn params(&self) -> Vec<CParam> {
         self.params.clone()
+    }
+
+    /// The first formal whose C class is unknown, where one is: `params` lists those before it.
+    pub(super) const fn unclassed(&self) -> Option<u32> {
+        self.unclassed
     }
 
     pub(super) fn locals(&self) -> Vec<CLocal> {
@@ -2954,43 +2962,40 @@ fn spells_an_identifier(name: &str) -> bool {
 }
 
 /// The parameters in ABI order at the class C passes them in (a declared float a float, else an
-/// integer of its width); `None` where any is unknown (doc/adr-decompiler-rewrite.md).
+/// integer of its width), up to the first whose class is unknown, which it names (C17 6.7.6.3p10).
 fn parameters(
     input: &RenderInput<'_>,
     artifact: &SsaArtifact,
-) -> Option<Vec<(u32, r2ssa::FormalHome, MachineType)>> {
-    artifact
-        .facts()
-        .boundaries
-        .parameters
-        .values()
-        .map(|parameter| {
-            let width_bits = parameter.bytes() * 8;
-            let declared = input
-                .parameter_declaration(parameter.index as usize, width_bits)
-                .map(|declared| class_of(&declared, width_bits));
-            // A register's class is the convention's; a stack slot carries any, so its declaration
-            // decides and the machine word is the class only where none is declared.
-            let register = parameter.register();
-            let class = match (declared, register) {
-                (Some(None), _) => return None,
-                (Some(Some(declared)), Some((abi_storage, _))) => agreed(
-                    Some(declared),
-                    located_class(artifact, abi_storage, width_bits),
-                )?,
-                (Some(Some(declared)), None) => declared,
-                (None, Some((abi_storage, _))) => located_class(artifact, abi_storage, width_bits)?,
-                (None, None) => {
-                    class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits)?
-                }
-            };
-            // A parameter is declared at its value's own width: a lane of it is read by name.
-            if class.width_bits() != width_bits {
-                return None;
-            }
-            Some((parameter.index, parameter.home, class))
-        })
-        .collect()
+) -> (Vec<(u32, r2ssa::FormalHome, MachineType)>, Option<u32>) {
+    let classed = |parameter: &r2ssa::SourceFormalParameterFact| {
+        let width_bits = parameter.bytes() * 8;
+        let declared = input
+            .parameter_declaration(parameter.index as usize, width_bits)
+            .map(|declared| class_of(&declared, width_bits));
+        // A register's class is the convention's; a stack slot carries any, so its declaration
+        // decides and the machine word is the class only where none is declared.
+        let register = parameter.register();
+        let class = match (declared, register) {
+            (Some(None), _) => return None,
+            (Some(Some(declared)), Some((abi_storage, _))) => agreed(
+                Some(declared),
+                located_class(artifact, abi_storage, width_bits),
+            )?,
+            (Some(Some(declared)), None) => declared,
+            (None, Some((abi_storage, _))) => located_class(artifact, abi_storage, width_bits)?,
+            (None, None) => class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits)?,
+        };
+        // A parameter is declared at its value's own width: a lane of it is read by name.
+        (class.width_bits() == width_bits).then_some((parameter.index, parameter.home, class))
+    };
+    let mut listed = Vec::new();
+    for parameter in artifact.facts().boundaries.parameters.values() {
+        match classed(parameter) {
+            Some(formal) => listed.push(formal),
+            None => return (listed, Some(parameter.index)),
+        }
+    }
+    (listed, None)
 }
 
 /// Why a live instruction's statement is a gap: the marker's kind, which says what is missing.
