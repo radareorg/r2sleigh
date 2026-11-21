@@ -1,6 +1,7 @@
 # ADR: structures laid out from a parameter's accesses
 
 Status: proposed 2026-10-14 (ROADMAP P9's first exit, T's exit).
+Extended by [memory-places](adr-memory-places.md).
 
 ## Problem
 

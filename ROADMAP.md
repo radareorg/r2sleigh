@@ -576,6 +576,42 @@ Gates, CI and build
 Order
 -----
 
+### Memory places and records ([memory-places](doc/adr-memory-places.md), round 18)
+
+Round 18 is graded on DecBench output (2,621 functions): body loads 34,819, body stores 20,361, residual sites 7,282, typed
+address sites 4,721, 0 invented C. The typed address counter grades D642 to D645, D649 and D652; loads and stores grade D653
+to D657. Each number below carries its source: traced, parsed (`pdd` text), estimate or unpinned.
+
+#### Gate and declared objects
+
+| Row | Fact or invariant | Gate | Status |
+|-----|-------------------|------|--------|
+| D640 | The memory gate counts body sites: a prelude helper definition is no site (the old counter read 39,246 loads and 23,940 stores, 8,006 of them `static inline` definitions). Counters: body loads and stores, typed address sites, byte arithmetic address sites per class, lvalue sites, named frame objects, typed pointer locals. Owner `scripts/memory_sites.py` | the script's own test on one committed `pddj` record; output moves 0 | open |
+| D653 | `stderr`, `stdout`, `stdin`, `optind` and `optarg` have r2abi data object rows with a cited header. An access of the declared width at the object is an lvalue where the container's relocation names the symbol and its size equals the declared type's. Owner r2abi rows, r2engine `declared`, r2types `ProgramDataObjectTypeFacts` | data type refusals 318 to 0 (traced); loads 973 down, stores 22 down (parsed); a negative test for an access at another width | open |
+| D656 | Step 0 only. Counted: `.bss` cells where every program wide access is a constant address of one width, no formed address at or below has unproven reach, and the container exports nothing there; the cold cost of access widths in the reference index on pumasim and 0pack. Owner r2engine | a committed table; cost within the timing gate or a named cause; output moves 0 | open |
+| D657 | An unnamed global is `g_<addr>`. It is an lvalue only where D656's predicate holds, and the proof line names `Premise::ClosedWorld`. Built only if D656's floor is above 0. Owner r2engine `GlobalObjectFacts`, r2dec spells | 6,769 sites named (parsed); loads plus stores down 0 to 5,567 (parsed ceiling); timing rows; peak RSS | open |
+| D658 | Ruling: a member of a pointer reached record is no lvalue; the byte copy stays at the typed address. Options not taken: an origin licence, GNU `packed, may_alias` declarations. Up to 38,600 sites (parsed) wait on a later ruling | typed addresses graded | ruled 2026-11-21: refuse |
+| D659 | Step 0 only. Each of the 1,390 r2dec gap residuals (`ValueNotComputed` 1,001, `EffectNotRendered` 389) is named by refusal kind and by the owner of the missing fact. Owner r2dec | a table over all 1,390 sites, 0 unclassified; output moves 0 | open |
+
+#### Places and records
+
+| Row | Fact or invariant | Gate | Status |
+|-----|-------------------|------|--------|
+| D641 | Step 0 only. Counted from engine facts over DecBench: accesses with a parameter expression, a pointee expression or neither, per class; each reader of `PointeeObjectKey` equality as must alias, proven or refused. The frame half (why each kept slot was kept, one join for the whole frame refusals) is D654's step 0. Owner r2ssa | a committed table; output moves 0 | open |
+| D642 | `MemoryPlaces`: each certified access has one base and one `Place`, or one typed refusal, dense in `memory_accesses` order. Deletes `ParameterFields`, `collect_parameter_fields`, `access_path` and the object tables the index replaces. `O(A)`. Owner r2ssa | the 4,721 typed address sites render byte identical; dense id Dylint; timing rows | open |
+| D643 | `Constraint::Field`, a refusal per span, the span rule (`Straddle` and `Interior` refuse one span, no union), `OneWidth` refused. Deletes `aggregates::layout` and `parameter_aggregates`; `certified_parameter_pointers` folds into the solve (D74). `O((V + A) α + A log A)`. Owner r2types | typed addresses up to 9,700 more of 14,186 (parsed); loads and stores 0; census; equivalence | open |
+| D644 | A loaded pointer used as a base has a record. A pointer field joins its pointee record, a scalar field joins nothing, an unproven reaching store joins nothing. A cyclic class refuses as `Recursive`. Owner r2types | typed addresses 1,730 (estimate) to 10,642 (parsed) more of 11,041, pinned by D641; typed pointer locals counter | open |
+| D645 | A cycle that a record class identity closes through a phi is a recursive record. A cycle a meet invents still refuses. Owner r2types | typed addresses up to 1,039 more (parsed); lattice proof harness | open |
+| D649 | `Constraint::Element`: one scaled term with inner offset below the stride spells `&p[i]`, `&p[i].f_K` or `&p->f_b[i]`. `IndexPastStride` refuses. Extends D360 and D362. Owner r2types, r2dec | typed addresses 1,422 to 1,549 more of 3,643 (parsed); `layouts` tests | open |
+| D652 | `dereferenced_args` states `(offset, width)` spans of the callee's own accesses. A caller declares the callee's record or spells a cast. Cold `pdd` equals `aa; pdd`. Owner r2ssa interproc, r2engine | typed addresses 0 to 1,223 more of 1,332 (unpinned); D573 golden count | open |
+
+#### Frame objects
+
+| Row | Fact or invariant | Gate | Status |
+|-----|-------------------|------|--------|
+| D654 | A frame address no offset places refuses the objects it may be based on, each out to its escape run; every other slot keeps its own fate; an address with no known base refuses the whole frame. Step 0 is D641's frame half. Owner r2ssa `frame_reach`, `slot_promotion` | 4,648 sites in 102 functions leave the whole frame refusal (traced); loads plus stores down 895 (estimate) at least; `frame_agree.py`; equivalence | open |
+| D655 | A kept frame object is declared by name, stated by r2ssa (D647). It is an lvalue when every reach is proven inside it; otherwise a byte array sized from `frame_ceilings`. Owner r2ssa, r2dec | with D654, loads plus stores down 895 to 5,317 of 9,392 (parsed ceiling, escape ignored); named frame objects counter; equivalence | open |
+
 ### The current stack
 
 | PR | Branch | Rows | State |
