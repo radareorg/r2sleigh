@@ -2491,3 +2491,10 @@ values = ["static"]
 verdict = "unfilled"
 row = "D663"
 reason = "one of the 4 exportless images (with arm64-relative-plt.elf, phdr-hash-nchain-unmapped.so, x86_64-x32-relative.so, which the pinned testbins do not hold): PT_DYNAMIC, no PT_INTERP, DT_NEEDED, DT_SONAME or DF_1_PIE, and no export; r2s states nothing, radare2 infers static true from no DT_NEEDED (cbin.c:1048 at 6.2.4) and, after radare2#27530, from no export"
+
+[[judged]]
+command = "px"
+binaries = "libshella-2.10.3.1.so"
+corpus = "elf"
+verdict = "deliberate"
+reason = "a shared object whose e_entry 0 names no entry: r2s starts at the first entry it states, DT_FINI_ARRAY's slot 0xee08 holding 0x142c (D662; its .init_array section header is zeroed by the packer, so only the dynamic table states the arrays), radare2 at 0; both `iee` list 0x142c fini, 0x19c0 and 0x21ec init"
