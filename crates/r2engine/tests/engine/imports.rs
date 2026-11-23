@@ -301,3 +301,159 @@ fn a_stub_no_section_states_is_found_from_its_lazy_slot() {
     let blocks = (info.blocks.iter()).map(|block| (block.addr, block.size));
     assert_eq!(blocks.collect::<Vec<_>>(), [(caller, 8)]);
 }
+
+/// `rel32` from the end of an instruction at `end` to `to`, little-endian.
+fn rel(end: u64, to: u64) -> [u8; 4] {
+    (to.wrapping_sub(end) as u32).to_le_bytes()
+}
+
+/// x86-64 linkage no section states, lazy words at each stub's `pushq`: PLT0 0x1000, stubs 0x1010 to
+/// 0x1030, `caller: mov edi, 1; jmp 0x1010` at 0x1040, GOT 0x1050.
+fn x86_lazy_plt() -> &'static [u8] {
+    x86_lazy_plt_after(0)
+}
+
+/// The same with `gap` bytes of ordinary code (`mov eax, 1; ret`, then `int3`) after PLT0: the
+/// stubs, `caller` and the GOT each move up by `gap`.
+fn x86_lazy_plt_after(gap: usize) -> &'static [u8] {
+    let (got, mut code) = (BASE + 0x50 + gap as u64, vec![0xcc_u8; 0x80 + gap]);
+    code[0..2].copy_from_slice(&[0xff, 0x35]); // push [GOT+8]
+    code[2..6].copy_from_slice(&rel(BASE + 6, got + 8));
+    code[6..8].copy_from_slice(&[0xff, 0x25]); // jmp [GOT+16]
+    code[8..0xc].copy_from_slice(&rel(BASE + 0xc, got + 0x10));
+    code[0xc..0x10].copy_from_slice(&[0x0f, 0x1f, 0x40, 0x00]);
+    if gap >= 6 {
+        code[0x10..0x16].copy_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]);
+    }
+    for index in 0..3_u8 {
+        let (at, slot) = (
+            0x10 + gap + 0x10 * usize::from(index),
+            got + 0x18 + 8 * u64::from(index),
+        );
+        let stub = BASE + at as u64;
+        code[at..at + 2].copy_from_slice(&[0xff, 0x25]);
+        code[at + 2..at + 6].copy_from_slice(&rel(stub + 6, slot));
+        code[at + 6..at + 11].copy_from_slice(&[0x68, index, 0, 0, 0]);
+        code[at + 11] = 0xe9;
+        code[at + 12..at + 16].copy_from_slice(&rel(stub + 16, BASE));
+        let word = (stub + 6).to_le_bytes();
+        let held = (slot - BASE) as usize;
+        code[held..held + 8].copy_from_slice(&word);
+    }
+    let caller = 0x40 + gap;
+    code[caller..caller + 5].copy_from_slice(&[0xbf, 1, 0, 0, 0]);
+    code[caller + 5] = 0xe9;
+    let end = BASE + caller as u64 + 10;
+    code[caller + 6..caller + 10].copy_from_slice(&rel(end, BASE + 0x10 + gap as u64));
+    code[0x50 + gap..0x68 + gap].fill(0);
+    Box::leak(code.into_boxed_slice())
+}
+
+/// The same linkage code built for IBT: lazy words at `.plt` entries `endbr64; push; bnd jmp PLT0`,
+/// the slots read by `.plt.sec` at 0x1030 and 0x1040; `caller` at 0x1050, GOT at 0x1060.
+fn x86_ibt_plt() -> &'static [u8] {
+    let (got, mut code) = (BASE + 0x60, vec![0xcc_u8; 0x88]);
+    code[0..2].copy_from_slice(&[0xff, 0x35]);
+    code[2..6].copy_from_slice(&rel(BASE + 6, got + 8));
+    code[6..9].copy_from_slice(&[0xf2, 0xff, 0x25]); // bnd jmp [GOT+16]
+    code[9..0xd].copy_from_slice(&rel(BASE + 0xd, got + 0x10));
+    code[0xd..0x10].copy_from_slice(&[0x0f, 0x1f, 0x00]);
+    for index in 0..2_u8 {
+        let (at, slot) = (
+            0x10 + 0x10 * usize::from(index),
+            got + 0x18 + 8 * u64::from(index),
+        );
+        let entry = BASE + at as u64;
+        code[at..at + 4].copy_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]);
+        code[at + 4..at + 9].copy_from_slice(&[0x68, index, 0, 0, 0]);
+        code[at + 9..at + 11].copy_from_slice(&[0xf2, 0xe9]); // bnd jmp PLT0
+        code[at + 11..at + 15].copy_from_slice(&rel(entry + 15, BASE));
+        code[at + 15] = 0x90;
+        let sec = at + 0x20;
+        let stub = BASE + sec as u64;
+        code[sec..sec + 4].copy_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]);
+        code[sec + 4..sec + 7].copy_from_slice(&[0xf2, 0xff, 0x25]); // bnd jmp [slot]
+        code[sec + 7..sec + 11].copy_from_slice(&rel(stub + 11, slot));
+        code[sec + 11..sec + 16].copy_from_slice(&[0x0f, 0x1f, 0x44, 0x00, 0x00]);
+        let held = (slot - BASE) as usize;
+        code[held..held + 8].copy_from_slice(&entry.to_le_bytes());
+    }
+    code[0x50..0x55].copy_from_slice(&[0xbf, 1, 0, 0, 0]);
+    code[0x55] = 0xe9;
+    code[0x56..0x5a].copy_from_slice(&rel(BASE + 0x5a, BASE + 0x30));
+    code[0x60..0x78].fill(0);
+    Box::leak(code.into_boxed_slice())
+}
+
+/// The lazy linkage `literal` declares at `got`: GOT[1] and GOT[2] reserved, then one slot per import.
+fn lazily_linked(literal: Literal, got: u64, imports: &[&str]) -> Literal {
+    let reserved = |place| r2engine::program::LoaderWrite {
+        place,
+        width: 8,
+        kind: r2engine::program::WriteKind::Reserved,
+        encoding: r2engine::program::Encoding::Word,
+    };
+    let literal = literal
+        .text_ending(BASE)
+        .loader_written(reserved(got + 8))
+        .loader_written(reserved(got + 0x10));
+    (imports.iter().enumerate()).fold(literal, |literal, (index, import)| {
+        literal.loader_written(import_write(got + 0x18 + 8 * index as u64, 8, import))
+    })
+}
+
+/// An x86-64 lazy word is the address of the `pushq` after its own stub's jump (psABI 1.0, 5.2,
+/// "Procedure Linkage Table"); the instruction ending there jumping through the slot names the stub (D636).
+#[test]
+fn an_x86_64_stub_no_section_states_is_the_jump_ending_at_its_lazy_word() {
+    let caller = BASE + 0x40;
+    let literal = Literal::of_code(x86_lazy_plt(), &[("caller", caller, 10)]);
+    let literal = lazily_linked(literal, BASE + 0x50, &["_Exit", "abort", "puts"]);
+    let mut program = OpenProgram::of(literal);
+    let held = program.imports().stubs.clone();
+    let imports = held
+        .iter()
+        .map(|(at, stub)| (*at, stub.symbol.as_str(), stub.size));
+    let expected = [
+        (BASE + 0x10, "_Exit", 0x10),
+        (BASE + 0x20, "abort", 0x10),
+        (BASE + 0x30, "puts", 0x10),
+    ];
+    assert_eq!(imports.collect::<Vec<_>>(), expected);
+    let info = program.function_info(caller).expect("it is described");
+    let blocks = (info.blocks.iter()).map(|block| (block.addr, block.size));
+    assert_eq!(blocks.collect::<Vec<_>>(), [(caller, 10)]);
+}
+
+/// Linkage code is the bytes its stubs and resolver decode as: code between PLT0 and the first stub
+/// is no linkage, so a start an unwind table states there stays a start (Codex on #422).
+#[test]
+fn code_between_the_resolver_and_its_stubs_is_no_linkage() {
+    let literal = Literal::of_code(x86_lazy_plt_after(0x10), &[("caller", BASE + 0x50, 10)]);
+    let program = OpenProgram::of(lazily_linked(
+        literal,
+        BASE + 0x60,
+        &["_Exit", "abort", "puts"],
+    ));
+    let linkage = program.imports();
+    let stubs = (linkage.stubs.keys()).copied().collect::<Vec<_>>();
+    assert_eq!(stubs, [BASE + 0x20, BASE + 0x30, BASE + 0x40]);
+    let held = |at: u64| linkage.holds(at);
+    assert!(held(BASE) && held(BASE + 0x20) && held(BASE + 0x4f));
+    assert!(
+        !held(BASE + 0x10) && !held(BASE + 0x15),
+        "{:x?}",
+        linkage.sections
+    );
+}
+
+/// Under IBT the lazy word is a `.plt` entry whose preceding instruction is padding, and no word is
+/// PLT0: neither reading proves a stub, so none is named (default-deny).
+#[test]
+fn an_ibt_layout_no_section_states_names_no_stub() {
+    let literal = Literal::of_code(x86_ibt_plt(), &[("caller", BASE + 0x50, 10)]);
+    let program = OpenProgram::of(lazily_linked(literal, BASE + 0x60, &["_Exit", "abort"]));
+    program.loaded().expect("it is current");
+    let named = program.imports().stubs.clone();
+    assert!(named.is_empty(), "{named:x?}");
+}

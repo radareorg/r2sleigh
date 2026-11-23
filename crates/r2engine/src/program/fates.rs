@@ -10,8 +10,8 @@ use r2source::{
 };
 use r2ssa::dense::{Csr, DenseId, IdMap, IdSet, Node, Reached};
 use r2ssa::site_boundary::{
-    ByteMask, CallEffect, CallEffects, CallerFlow, Counted, LANES, LaneBytes, LaneFate, LaneId,
-    Overwrites, RegisterEffect, ResultLanes, SiteBoundary, argument_registers,
+    ByteMask, CallEffect, CallEffects, CallerFlow, Counted, LANES, LaneBytes, LaneFate, LaneFlow,
+    LaneId, Overwrites, RegisterEffect, ResultLanes, SiteBoundary, argument_registers,
 };
 
 use super::analysis::Walked;
@@ -624,18 +624,13 @@ impl CallersFirst<'_> {
         })
     }
 
-    /// `body`'s site fates asked (a lift where a deep read lifted it first), then each admitted
-    /// callee whose last caller it was resolved.
+    /// `body`'s site fates asked, then each admitted callee whose last caller it was resolved.
     fn pop<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>, body: u64) {
         let Some(node) = self.ranks.node(body) else {
             return;
         };
         self.popped.insert(node);
         if let Some(Ok(thumb)) = self.survey.walked_in(body) {
-            if db.holds::<RegisterEffects>(&(body, thumb)) && !db.holds::<SiteFates>(&(body, thumb))
-            {
-                db.note_site_fates_relifted();
-            }
             let _ = db.get::<SiteFates>(&(body, thumb));
         }
         for callee in self.waiting.remove(node).unwrap_or_default() {
@@ -1465,20 +1460,34 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const NAME: &'static str = "site-fates";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: the body's own register effect, deposited, then one backward pass over the body,
-    /// `O((B + E) × lanes)` within its budget, and one held effect and `Summary` per callee.
+    /// Work: one backward pass over the body's held [`LaneFlows`] row, `O((B + E + steps) × lanes)`
+    /// within its budget, and one held effect and `Summary` per callee; with no row, its lift's.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
+        let projected = db.take::<LaneFlows>(&(caller, thumb)).ok().flatten();
+        if let Some(Some(projected)) = projected.as_deref() {
+            let fated = read_reading(db, (caller, thumb), Depth::Deep, |deep| {
+                let effects = deep.effects_projected(&projected.0);
+                projected.0.fates(deep.lanes, &effects)
+            });
+            if let Some(Some(calls)) = fated {
+                return Some(calls);
+            }
+        }
         read_body(db, (caller, thumb), |read| {
             // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
             let held = db.held::<RegisterEffects>(&(caller, thumb));
-            if held.is_ok_and(|held| held.is_none()) {
-                let effect = read.effect(caller);
-                match db.has_read::<RegisterEffects>() {
-                    true => db.defect(format_args!(
-                        "register-effects {caller:#x} deposited after a row"
-                    )),
-                    false => db.deposit::<RegisterEffects>([((caller, thumb), effect)]),
+            match held {
+                Ok(Some(_)) => db.note_site_fates_relifted(),
+                Ok(None) => {
+                    let (effect, _) = read.effect(caller);
+                    match db.has_read::<RegisterEffects>() {
+                        true => db.defect(format_args!(
+                            "register-effects {caller:#x} deposited after a row"
+                        )),
+                        false => db.deposit::<RegisterEffects>([((caller, thumb), effect)]),
+                    }
                 }
+                Err(_) => {}
             }
             let direct = direct_calls(read.body).collect::<Vec<_>>();
             let sites = (direct.iter())
@@ -1486,17 +1495,90 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
                 .collect::<Vec<_>>();
             let deep = &read.deep;
             let fates = (read.flow).site_fates(deep.lanes, &deep.effects(read.body), &sites);
-            let mut calls = (direct.iter().zip(fates))
-                .map(|(call, boundary)| AfterCall {
-                    callee: call.callee,
-                    instruction: call.instruction,
-                    boundary,
-                })
-                .collect::<Vec<_>>();
-            calls.sort_by_key(|call| (call.callee, call.instruction));
-            calls.dedup_by_key(|call| (call.callee, call.instruction));
-            calls.into()
+            after_calls(&direct, fates)
         })
+    }
+}
+
+/// Each direct call with its boundary, by callee and instruction, one per pair.
+fn after_calls(direct: &[DirectCall], fates: Vec<SiteBoundary>) -> Arc<[AfterCall]> {
+    let mut calls = (direct.iter().zip(fates))
+        .map(|(call, boundary)| AfterCall {
+            callee: call.callee,
+            instruction: call.instruction,
+            boundary,
+        })
+        .collect::<Vec<_>>();
+    calls.sort_by_key(|call| (call.callee, call.instruction));
+    calls.dedup_by_key(|call| (call.callee, call.instruction));
+    calls.into()
+}
+
+/// A body's lane flow, projected from the lift that gave its register effect, with what its calls'
+/// effects read of the lift (D589): `SiteFates` takes it and lifts the body no second time.
+pub(super) struct Projected {
+    flow: LaneFlow,
+    /// Each call with the callee the walk states, by block and operation, ascending.
+    callees: Box<[((usize, usize), u64)]>,
+    /// Each call to a printf-format import whose format folded to a float-free literal, and its address.
+    formats: Box<[((usize, usize), u64)]>,
+    direct: Box<[DirectCall]>,
+}
+
+impl Projected {
+    /// The site fates over the projection, where the deep effects name the projection's lanes and
+    /// count registers; none otherwise, and the body lifts again.
+    fn fates(&self, lanes: ResultLanes, effects: &Effects) -> Option<Arc<[AfterCall]>> {
+        if lanes != self.flow.lanes() {
+            return None;
+        }
+        let named = |&((block, op), _): &((usize, usize), u64)| {
+            let counted = effects
+                .at(block, op)
+                .counted
+                .map(|counted| counted.register);
+            counted == self.flow.count_register(block, op)
+        };
+        if !self.callees.iter().all(named) {
+            return None;
+        }
+        let sites = (self.direct.iter())
+            .map(|call| (call.block, call.op))
+            .collect::<Vec<_>>();
+        Some(after_calls(
+            &self.direct,
+            self.flow.site_fates(effects, &sites),
+        ))
+    }
+}
+
+/// A projection, compared by identity as a walk is.
+#[derive(Clone)]
+pub(super) struct Projection(pub(super) Arc<Projected>);
+
+impl PartialEq for Projection {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The lane flow of a body whose register effect was lifted for a deep read, until its own
+/// `SiteFates` takes it (`Retention::Consumed`, D589).
+pub(super) struct LaneFlows;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for LaneFlows {
+    type Key = (u64, bool);
+    type Value = Option<Projection>;
+    const NAME: &'static str = "lane-flows";
+    const RETENTION: Retention = Retention::Consumed;
+
+    /// Work: one lift and one projection, `O(ops)`; `RegisterEffects` deposits the row instead.
+    fn compute(db: &Db<ProgramInputs<S>>, &key: &(u64, bool)) -> Self::Value {
+        read_body(db, key, |read| {
+            let (_, effects) = read.effect(key.0);
+            read.projection(&effects)
+        })
+        .flatten()
     }
 }
 
@@ -1510,10 +1592,22 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     const NAME: &'static str = "register-effects";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the body and one scan of the blocks a return is reached from;
-    /// `SiteFates` deposits the row of each body it walks, so only a body it did not walk is lifted here.
+    /// Work: one backward pass and one scan of the blocks reaching a return, for a body `SiteFates`
+    /// did not walk; its `LaneFlows` row is deposited for its own `SiteFates`, `O(ops)`.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
-        read_body(db, (entry, thumb), |read| read.effect(entry)).flatten()
+        read_body(db, (entry, thumb), |read| {
+            let (effect, effects) = read.effect(entry);
+            if !db.holds::<SiteFates>(&(entry, thumb)) {
+                let key = (entry, thumb);
+                db.deposit_beside::<LaneFlows, RegisterEffects>(
+                    key,
+                    read.projection(&effects),
+                    &key,
+                );
+            }
+            effect
+        })
+        .flatten()
     }
 }
 
@@ -1656,18 +1750,9 @@ pub(super) fn read_body<S: Source + 'static, R>(
     let view = View::new(db, true);
     let walker = super::returns::Walking::new(view.clone(), true).ok()?;
     let target = &view.target_of(walker.machine(thumb)?, entry).ok()?;
-    let slots = &*target.convention;
     let walking = db.get::<Walked>(&(entry, thumb)).ok()?;
     let body = walking.0.as_ref().ok()?.body();
-    let reading = |depth| Reading {
-        db,
-        view: &view,
-        lanes: lanes_of(target, slots),
-        slots,
-        unstated: r2ssa::call_reads::CallReads::every_location(&target.call),
-        call: std::sync::Arc::clone(&target.call),
-        depth,
-    };
+    let reading = |depth| reading_of(db, &view, target, depth);
     Some(then(&BodyRead {
         walker: &walker,
         target,
@@ -1685,14 +1770,63 @@ impl<'a, S: Source + 'static> BodyRead<'a, S> {
         model.effect_refused().is_none().then_some(model)
     }
 
-    /// The body's register effect, its calls read shallowly.
-    fn effect(&self, entry: u64) -> Option<RegisterEffect> {
-        effect_on_flow(
+    /// The body's register effect, its calls read shallowly, and those calls' effects.
+    fn effect(&self, entry: u64) -> (Option<RegisterEffect>, Effects) {
+        let effects = self.shallow.effects(self.body);
+        let effect = effect_on_flow(
             &self.shallow,
+            &effects,
             self.walker,
             self.target,
-            (entry, self.body, &self.flow),
-        )
+            (entry, &self.flow),
+        );
+        (effect, effects)
+    }
+
+    /// The body's lane flow and what its calls' effects read of the lift, from the shallow
+    /// `effects`: the format each folds and the count register each names are depth's own.
+    fn projection(&self, effects: &Effects) -> Option<Projection> {
+        let counted = |block, op| (effects.at(block, op).counted).map(|counted| counted.register);
+        let flow = LaneFlow::of(&self.flow, self.shallow.lanes, counted);
+        Some(Projection(Arc::new(Projected {
+            flow,
+            callees: effects.callees.iter().map(|(at, to)| (*at, *to)).collect(),
+            formats: effects.formats.iter().map(|(at, to)| (*at, *to)).collect(),
+            direct: direct_calls(self.body).collect(),
+        })))
+    }
+}
+
+/// The deep reading of the body at `key` without its walk, handed to `then`; none where its
+/// machine or target is unknown.
+fn read_reading<S: Source + 'static, R>(
+    db: &Db<ProgramInputs<S>>,
+    (entry, thumb): (u64, bool),
+    depth: Depth,
+    then: impl FnOnce(&Reading<'_, S>) -> R,
+) -> Option<R> {
+    let view = View::new(db, true);
+    let walker = super::returns::Walking::new(view.clone(), true).ok()?;
+    let target = &view.target_of(walker.machine(thumb)?, entry).ok()?;
+    Some(then(&reading_of(db, &view, target, depth)))
+}
+
+/// The reading of a body's calls under `target` at `depth`.
+fn reading_of<'a, S: Source + 'static>(
+    db: &'a Db<ProgramInputs<S>>,
+    view: &'a View<'a, S>,
+    target: &'a NativeTarget<'a>,
+    depth: Depth,
+) -> Reading<'a, S> {
+    let slots = &*target.convention;
+    Reading {
+        db,
+        view,
+        lanes: lanes_of(target, slots),
+        slots,
+        unstated: r2ssa::call_reads::CallReads::every_location(&target.call),
+        call: std::sync::Arc::clone(&target.call),
+        depth,
     }
 }
 
@@ -1700,11 +1834,11 @@ impl<'a, S: Source + 'static> BodyRead<'a, S> {
 /// `reading`.
 fn effect_on_flow<S: Source + 'static>(
     reading: &Reading<'_, S>,
+    effects: &Effects,
     walker: &super::returns::Walking<'_, S>,
     target: &NativeTarget<'_>,
-    (entry, body, flow): (u64, &Body, &CallerFlow<'_, BodyBlock>),
+    (entry, flow): (u64, &CallerFlow<'_, BodyBlock>),
 ) -> Option<RegisterEffect> {
-    let effects = reading.effects(body);
     // Only a declared `Never` proves a call never returns here; an effect carries no premise.
     let never = |block: usize, op: usize| {
         use crate::discovery::Walker;
@@ -1734,7 +1868,7 @@ fn effect_on_flow<S: Source + 'static>(
         never: &never,
         callee: &callee,
     };
-    let effect = flow.register_effect(entry, reading.lanes, &effects, &by);
+    let effect = flow.register_effect(entry, reading.lanes, effects, &by);
     r2il::refusal_evidence!(
         "register-effect",
         "{entry:#x}: {}",
@@ -1768,6 +1902,7 @@ fn lanes_of(target: &NativeTarget<'_>, slots: &ConventionModel) -> ResultLanes {
 }
 
 /// One call the walk read, by its block and operation.
+#[derive(Clone, Copy)]
 struct DirectCall {
     block: usize,
     op: usize,
@@ -1852,25 +1987,37 @@ struct Reading<'a, S: Source + 'static> {
 impl<S: Source + 'static> Reading<'_, S> {
     /// What each call of `body` does to the result registers: by callee for the calls the walk
     /// read, and what nothing is known of for the rest.
-    fn effects<'b>(&self, body: &'b Body) -> Effects<'b> {
-        let ops = body.blocks.iter().flat_map(|block| &block.lifted.ops);
-        let direct = ops.filter_map(|operation| match operation {
-            R2ILOp::Call { target } => Some(target.offset),
-            _ => None,
-        });
-        // A call the walk folded to a target (`lea rax, f; call rax`) is a call to it.
-        let folded = (body.blocks.iter().enumerate())
-            .flat_map(|(at, block)| {
-                (block.transfers.iter())
-                    .filter(|transfer| transfer.kind == r2source::AdvisoryCallTransfer::Call)
-                    .filter(|t| !matches!(block.lifted.ops[t.op], R2ILOp::Call { .. }))
-                    .map(move |transfer| ((at, transfer.op), transfer.target))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let callees = (direct.chain(folded.values().copied())).collect::<BTreeSet<_>>();
+    fn effects(&self, body: &Body) -> Effects {
+        let mut effects = self.effects_of(callees_of(body));
+        if !effects.formatted.is_empty() {
+            effects.formats = self.formatted_sites(body, &effects);
+        }
+        effects.by_site = effects.formatted_effects();
+        effects
+    }
+
+    /// The same effects from a projection: each format it folded stands for its block's fold.
+    fn effects_projected(&self, projected: &Projected) -> Effects {
+        let mut effects = self.effects_of(projected.callees.iter().copied().collect());
+        let formatted = |site: &&((usize, usize), u64)| {
+            let callee = effects.callees.get(&site.0);
+            callee.is_some_and(|callee| effects.formatted.contains_key(callee))
+        };
+        effects.formats = projected
+            .formats
+            .iter()
+            .filter(formatted)
+            .copied()
+            .collect();
+        effects.by_site = effects.formatted_effects();
+        effects
+    }
+
+    /// The effects of the calls to `callees`, by callee, before any format is read.
+    fn effects_of(&self, callees: BTreeMap<(usize, usize), u64>) -> Effects {
         let mut by_callee = BTreeMap::new();
         let mut formatted = BTreeMap::new();
-        for callee in callees {
+        for callee in callees.values().copied().collect::<BTreeSet<_>>() {
             let (effect, format) = self.callee(callee);
             by_callee.insert(callee, effect);
             if let Some(format) = format {
@@ -1880,10 +2027,11 @@ impl<S: Source + 'static> Reading<'_, S> {
         // An indirect target may be a local function, which may read every result byte (psABI 3.2,
         // line 410; D446): at a caller and inside a row alike.
         let every = self.lanes.slots().into_iter().flatten().collect::<Vec<_>>();
-        let mut effects = Effects {
-            body,
+        Effects {
+            callees,
             by_callee,
-            folded,
+            formatted,
+            formats: BTreeMap::new(),
             by_site: BTreeMap::new(),
             indirect: CallEffect {
                 takes: LaneBytes::covered_by(self.lanes, &every),
@@ -1892,40 +2040,32 @@ impl<S: Source + 'static> Reading<'_, S> {
                 kept: LaneBytes::default(),
                 reads: LaneBytes::default(),
             },
-        };
-        if !formatted.is_empty() {
-            effects.by_site = self.formatted_sites(&effects, &formatted);
         }
-        effects
     }
 
-    /// Each call to a printf-format import whose block folds its format to a literal with no
-    /// floating conversion: it takes no tail vector register (D218). One forward pass per block.
-    fn formatted_sites(
-        &self,
-        effects: &Effects<'_>,
-        formatted: &BTreeMap<u64, Formatted>,
-    ) -> BTreeMap<(usize, usize), CallEffect> {
+    /// Each printf-format call whose format folds to a float-free literal, and its address: it takes
+    /// no tail vector register (D218). One forward pass per block.
+    fn formatted_sites(&self, body: &Body, effects: &Effects) -> BTreeMap<(usize, usize), u64> {
         let mut sites = BTreeMap::new();
         // Asked once, only where the block fold leaves a format unknown (Gb).
         let mut seal = None;
-        for (at, block) in effects.body.blocks.iter().enumerate() {
+        for (at, block) in body.blocks.iter().enumerate() {
             let mut origins = r2ssa::origin::BlockOrigins::default();
             for (op, operation) in block.lifted.ops.iter().enumerate() {
                 let format = (operation.is_call())
                     .then(|| effects.callee_at(at, op))
                     .flatten()
-                    .and_then(|callee| formatted.get(&callee));
-                let effect = format.and_then(|format| {
+                    .and_then(|callee| effects.formatted.get(&callee));
+                let address = format.and_then(|format| {
                     self.unfloated(&origins, format).or_else(|| {
-                        let seal = seal.get_or_insert_with(|| self.convention_seal(effects.body));
+                        let seal = seal.get_or_insert_with(|| self.convention_seal(body));
                         let sealed = seal.as_deref()?;
                         let instruction = block.lifted.instruction_of(op)?;
                         let address = sealed.folded_before_call(instruction, format.register)?;
-                        self.unfloated_at(address, format)
+                        self.unfloated_at(address)
                     })
                 });
-                sites.extend(effect.map(|effect| ((at, op), effect)));
+                sites.extend(address.map(|address| ((at, op), address)));
                 origins.step_under(operation, Some(&self.call));
             }
         }
@@ -1940,24 +2080,20 @@ impl<S: Source + 'static> Reading<'_, S> {
         sealing.0.as_ref().ok().cloned()
     }
 
-    /// The call's effect without its tail vector registers, where the format at `address` is a
-    /// literal the printf reader parses whole and finds no floating conversion in.
-    fn unfloated_at(&self, address: u64, format: &Formatted) -> Option<CallEffect> {
+    /// `address`, where the format there is a literal the printf reader parses whole and finds no
+    /// floating conversion in; what that reads is depth's own, so the address alone is kept.
+    fn unfloated_at(&self, address: u64) -> Option<u64> {
         let text = crate::native::immutable_text_at(self.view, address)?;
         let consumed = r2abi::format::printf_consumed_arguments(&text).ok()?;
-        (!consumed.any_floating).then_some(format.unfloated)
+        (!consumed.any_floating).then_some(address)
     }
 
-    /// The call's effect without its tail vector registers, where `origins` fold its format to a
-    /// literal the printf reader parses whole and finds no floating conversion in.
-    fn unfloated(
-        &self,
-        origins: &r2ssa::origin::BlockOrigins,
-        format: &Formatted,
-    ) -> Option<CallEffect> {
+    /// The address `origins` fold the call's format to, where it is a literal the printf reader
+    /// parses whole and finds no floating conversion in.
+    fn unfloated(&self, origins: &r2ssa::origin::BlockOrigins, format: &Formatted) -> Option<u64> {
         let register = r2il::Varnode::register(format.register.offset, format.register.size);
         let address = origins.of(&register)?.constant()?;
-        self.unfloated_at(address, format)
+        self.unfloated_at(address)
     }
 
     /// What a call to a callee nothing is known of may take: an effect's own calls set the variadic
@@ -2082,27 +2218,57 @@ struct Formatted {
 }
 
 /// What each call of one body does to the result registers.
-struct Effects<'b> {
-    body: &'b Body,
+struct Effects {
+    /// Each call with the callee the walk states: a direct call's target, or the one it folded.
+    callees: BTreeMap<(usize, usize), u64>,
     by_callee: BTreeMap<u64, CallEffect>,
-    /// The calls the walk folded to a target, by block and operation.
-    folded: BTreeMap<(usize, usize), u64>,
+    /// The printf-format imports among the callees.
+    formatted: BTreeMap<u64, Formatted>,
+    /// The calls whose format folds to a float-free literal, and its address.
+    formats: BTreeMap<(usize, usize), u64>,
     /// The calls whose own format states what they take, by block and operation.
     by_site: BTreeMap<(usize, usize), CallEffect>,
     /// A call whose callee the walk did not read: it may take every result byte and clobbers the lot.
     indirect: CallEffect,
 }
 
-impl Effects<'_> {
+impl Effects {
     fn callee_at(&self, block: usize, op: usize) -> Option<u64> {
-        match &self.body.blocks[block].lifted.ops[op] {
-            R2ILOp::Call { target } => Some(target.offset),
-            _ => self.folded.get(&(block, op)).copied(),
-        }
+        self.callees.get(&(block, op)).copied()
+    }
+
+    /// Each formatted call's effect without its tail vector registers.
+    fn formatted_effects(&self) -> BTreeMap<(usize, usize), CallEffect> {
+        let unfloated = |(site, _): (&(usize, usize), &u64)| {
+            let callee = self.callee_at(site.0, site.1)?;
+            Some((*site, self.formatted.get(&callee)?.unfloated))
+        };
+        self.formats.iter().filter_map(unfloated).collect()
     }
 }
 
-impl CallEffects for Effects<'_> {
+/// Each call of `body` with the callee the walk states: a direct call's target, or the target the
+/// walk folded it to (`lea rax, f; call rax`). `O(ops + transfers)`.
+fn callees_of(body: &Body) -> BTreeMap<(usize, usize), u64> {
+    let mut callees = BTreeMap::new();
+    for (at, block) in body.blocks.iter().enumerate() {
+        let ops = &block.lifted.ops;
+        for (op, operation) in ops.iter().enumerate() {
+            if let R2ILOp::Call { target } = operation {
+                callees.insert((at, op), target.offset);
+            }
+        }
+        let folded = (block.transfers.iter())
+            .filter(|transfer| transfer.kind == r2source::AdvisoryCallTransfer::Call)
+            .filter(|transfer| !matches!(ops[transfer.op], R2ILOp::Call { .. }));
+        for transfer in folded {
+            callees.insert((at, transfer.op), transfer.target);
+        }
+    }
+    callees
+}
+
+impl CallEffects for Effects {
     fn at(&self, block: usize, op: usize) -> CallEffect {
         if let Some(effect) = self.by_site.get(&(block, op)) {
             return *effect;

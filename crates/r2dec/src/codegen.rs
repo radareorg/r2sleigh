@@ -252,6 +252,22 @@ pub struct Emission {
     proof_line: Option<usize>,
     /// The bytes one level of indentation takes.
     indent: usize,
+    /// The proof line's typed clauses, which its text was spelled from (D621).
+    clauses: crate::render::proof::ProofClauses,
+}
+
+/// A point a definition's line may break at without changing its bytes: after a binary operator,
+/// after an argument comma, before `?` and `:`, after a comment's space, after a cast (D620).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreakPoint {
+    /// The definition's line, from 0.
+    pub line: u32,
+    /// The byte of that line the continuation starts at.
+    pub offset: u32,
+    /// The parentheses open at the point.
+    pub depth: u16,
+    /// After a cast, its place in a run of casts from 1; 0 at an operator or a space.
+    pub cast: u16,
 }
 
 impl Emission {
@@ -268,6 +284,15 @@ impl Emission {
     /// The definition's line, from 0, holding `/* r2dec proof: ... */`.
     pub const fn proof_line(&self) -> Option<usize> {
         self.proof_line
+    }
+
+    /// The proof line's typed clauses: what a typed reader counts where the text is not read.
+    pub const fn proof_clauses(&self) -> &crate::render::proof::ProofClauses {
+        &self.clauses
+    }
+
+    pub(crate) fn with_clauses(self, clauses: crate::render::proof::ProofClauses) -> Self {
+        Self { clauses, ..self }
     }
 
     /// Each line of the definition's lowest instruction, where it accounts for any: `O(lines)`.
@@ -431,6 +456,12 @@ pub(crate) struct CodeGenerator<'c> {
     depths: Vec<u8>,
     /// The one-based line of `output` the proof comment is written on.
     proof_line: Option<usize>,
+    /// Each break point as a byte of `output`, the parentheses open there and its cast index.
+    breaks: Vec<(usize, u16, u16)>,
+    /// The parentheses open where the next byte is written.
+    nesting: u16,
+    /// The casts written just before the next one, which continues their run.
+    casts: u16,
 }
 
 impl<'c> CodeGenerator<'c> {
@@ -454,7 +485,37 @@ impl<'c> CodeGenerator<'c> {
             wide_literal: false,
             depths: Vec::new(),
             proof_line: None,
+            breaks: Vec::new(),
+            nesting: 0,
+            casts: 0,
         }
+    }
+
+    /// A line may break at the next byte written.
+    fn may_break(&mut self) {
+        self.breaks.push((self.output.len(), self.nesting, 0));
+    }
+
+    /// A comment's text, breaking after each space: C17 6.4.9 lexes the comment as one token, and
+    /// a line break inside it is white space. `O(text)`.
+    fn emit_comment_breaking(&mut self, text: &str) {
+        for word in escape_comment_text(text).split_inclusive(' ') {
+            self.output.push_str(word);
+            if word.ends_with(' ') {
+                self.may_break();
+            }
+        }
+    }
+
+    /// `(`, which a break inside sits one level under.
+    fn open(&mut self, paren: char) {
+        self.output.push(paren);
+        self.nesting = self.nesting.saturating_add(1);
+    }
+
+    fn close(&mut self, paren: char) {
+        self.output.push(paren);
+        self.nesting = self.nesting.saturating_sub(1);
     }
 
     /// Write `text` in `role`.
@@ -582,6 +643,7 @@ impl<'c> CodeGenerator<'c> {
             links: crate::report::links(func, pointer_bits),
             calls: crate::report::calls(func),
             roles: std::mem::take(&mut self.roles),
+            clauses: crate::render::proof::ProofClauses::default(),
         }
     }
 
@@ -639,6 +701,8 @@ impl<'c> CodeGenerator<'c> {
         self.roles.clear();
         self.depths.clear();
         self.proof_line = None;
+        self.breaks.clear();
+        self.nesting = 0;
 
         // A declared address defines nothing: the reason stands where the body
         // would, and the declarations say what the address resolves to.
@@ -1032,7 +1096,7 @@ impl<'c> CodeGenerator<'c> {
                     self.emit_indent();
                     let start = self.output.len();
                     self.output.push_str("/* ");
-                    self.emit_comment_text(text);
+                    self.emit_comment_breaking(text);
                     self.output.push_str(" */");
                     self.mark(CRole::Comment, start);
                     self.output.push('\n');
@@ -1053,7 +1117,7 @@ impl<'c> CodeGenerator<'c> {
                 self.output.push_str("; ");
                 let start = self.output.len();
                 self.output.push_str("/* ");
-                self.emit_comment_text(&marker.to_string());
+                self.emit_comment_breaking(&marker.to_string());
                 self.output.push_str(" */");
                 self.mark(CRole::Comment, start);
                 self.output.push('\n');
@@ -1154,6 +1218,13 @@ impl<'c> CodeGenerator<'c> {
         self.output.push('(');
         self.emit_type(ty);
         self.output.push(')');
+        // After a cast the line may break, ranked after every operator (D620).
+        let index = self.casts.saturating_add(1);
+        self.breaks.push((self.output.len(), self.nesting, index));
+        self.casts = match inner.unobserved() {
+            CExpr::Cast { .. } => index,
+            _ => 0,
+        };
         self.wide_literal = matches!(ty, CType::Int { bits, .. } if *bits > 64)
             && matches!(inner.unobserved(), CExpr::UIntLit(_));
         self.emit_expr(inner, my_prec);
@@ -1171,7 +1242,7 @@ impl<'c> CodeGenerator<'c> {
         let need_parens = my_prec < parent_prec;
 
         if need_parens {
-            self.output.push('(');
+            self.open('(');
         }
         let role = expr_role(expr, std::mem::take(&mut self.callee));
         let start = self.output.len();
@@ -1246,6 +1317,7 @@ impl<'c> CodeGenerator<'c> {
                     self.output.push(' ');
                     self.output.push_str(render_op.as_str());
                     self.output.push(' ');
+                    self.may_break();
                     self.emit_positive_literal_magnitude(magnitude);
                 } else if let Some((render_op, positive_rhs)) =
                     additive_negative_product_rhs_rewrite(*op, right)
@@ -1254,12 +1326,14 @@ impl<'c> CodeGenerator<'c> {
                     self.output.push(' ');
                     self.output.push_str(render_op.as_str());
                     self.output.push(' ');
+                    self.may_break();
                     self.emit_expr(&positive_rhs, my_prec + 1);
                 } else {
                     self.emit_expr(left, operand_precedence_floor(*op, left, my_prec));
                     self.output.push(' ');
                     self.output.push_str(op.as_str());
                     self.output.push(' ');
+                    self.may_break();
                     // Right associativity for assignment operators
                     let right_prec = if matches!(
                         op,
@@ -1288,9 +1362,13 @@ impl<'c> CodeGenerator<'c> {
                 else_expr,
             } => {
                 self.emit_expr(cond, my_prec + 1);
-                self.output.push_str(" ? ");
+                self.output.push(' ');
+                self.may_break();
+                self.output.push_str("? ");
                 self.emit_expr(then_expr, 0);
-                self.output.push_str(" : ");
+                self.output.push(' ');
+                self.may_break();
+                self.output.push_str(": ");
                 self.emit_expr(else_expr, my_prec);
             }
             CExpr::Cast {
@@ -1299,9 +1377,9 @@ impl<'c> CodeGenerator<'c> {
             CExpr::Call { func, args, .. } => self.emit_call(func, args, my_prec),
             CExpr::Subscript { base, index } => {
                 self.emit_expr(base, my_prec);
-                self.output.push('[');
+                self.open('[');
                 self.emit_expr(index, 0);
-                self.output.push(']');
+                self.close(']');
             }
             CExpr::Member { base, member } => {
                 self.emit_expr(base, my_prec);
@@ -1337,14 +1415,15 @@ impl<'c> CodeGenerator<'c> {
                 for (i, e) in exprs.iter().enumerate() {
                     if i > 0 {
                         self.output.push_str(", ");
+                        self.may_break();
                     }
                     self.emit_expr(e, my_prec + 1);
                 }
             }
             CExpr::Paren(inner) => {
-                self.output.push('(');
+                self.open('(');
                 self.emit_expr(inner, 0);
-                self.output.push(')');
+                self.close(')');
             }
             CExpr::Observed { .. } => unreachable!("unobserved expression expected"),
         }
@@ -1353,7 +1432,7 @@ impl<'c> CodeGenerator<'c> {
         }
 
         if need_parens {
-            self.output.push(')');
+            self.close(')');
         }
     }
 
@@ -1367,14 +1446,15 @@ impl<'c> CodeGenerator<'c> {
         self.callee = true;
         self.emit_expr(func, my_prec);
         self.callee = false;
-        self.output.push('(');
+        self.open('(');
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
                 self.output.push_str(", ");
+                self.may_break();
             }
             self.emit_expr(arg, 0);
         }
-        self.output.push(')');
+        self.close(')');
     }
 
     /// Emit a type.
@@ -1614,6 +1694,29 @@ fn operand_precedence_floor(parent: BinaryOp, operand: &CExpr, default: u8) -> u
     }
 }
 
+/// Each break point as its line and byte in `definition`, in print order: one pass, `O(bytes)`.
+fn break_points(definition: &str, breaks: &[(usize, u16, u16)]) -> Vec<BreakPoint> {
+    let mut points = Vec::with_capacity(breaks.len());
+    let (mut line, mut start, mut scanned) = (0u32, 0usize, 0usize);
+    for &(at, depth, cast) in breaks {
+        for (index, byte) in definition.as_bytes()[scanned..at].iter().enumerate() {
+            if *byte == b'\n' {
+                line += 1;
+                start = scanned + index + 1;
+            }
+        }
+        scanned = at;
+        let offset = u32::try_from(at - start).unwrap_or(u32::MAX);
+        points.push(BreakPoint {
+            line,
+            offset,
+            depth,
+            cast,
+        });
+    }
+    points
+}
+
 /// A comment's text as C lexes it inside `/* */`: on one line, with no `*/` to close it early.
 pub(crate) fn escape_comment_text(text: &str) -> String {
     text.replace("*/", "* /").replace(['\r', '\n'], " ")
@@ -1653,6 +1756,21 @@ impl RenderedFunction {
     /// The tree that C was written from, for a consumer that walks rather than parses.
     pub const fn function(&self) -> &CFunction {
         &self.function
+    }
+
+    /// Each break point of the definition, by line then offset, from the tree written again; empty
+    /// where that text is not the definition's bytes. `O(tokens)`; doc/adr-display.md, D620.
+    pub fn break_points(&self) -> Vec<BreakPoint> {
+        let ready = EmissionReadyFunction {
+            function: self.function.clone(),
+            locations: None,
+        };
+        let mut generator = CodeGenerator::new(CodeGenConfig::default());
+        let definition = generator.generate_function(&ready);
+        match definition == self.emission.definition() {
+            true => break_points(&definition, &generator.breaks),
+            false => Vec::new(),
+        }
     }
 }
 

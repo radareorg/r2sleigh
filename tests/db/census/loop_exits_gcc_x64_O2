@@ -98,13 +98,12 @@ r2sleigh_word_u32 skip_then_find(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1,
     uint64_t rdi_1;
     uint8_t tmp_4010bb_0_1;
     uint64_t rax_1;
-    uint64_t rax_3;
     uint64_t rdx_2;
     uint32_t tmp_lane_4010e2_2_0_1;
     uint8_t tmp_4010d0_8_1;
     uint32_t tmp_lane_4010b0_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 78 source obligations: 68 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 78 source obligations: 68 rendered, 10 elided, 0 refused; 25 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         rcx_2 = 0;
         rdi_1 = arg0;
@@ -127,14 +126,13 @@ r2sleigh_word_u32 skip_then_find(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1,
         {
             if ((uint8_t)((uint8_t)tmp_4010bb_0_1 == (uint8_t)0U)) {
             } else {
-                rax_3 = rax_1;
                 rdx_2 = rdi_1;
-                while ((uint8_t)((uint32_t)rax_3 != (uint32_t)arg1)) {
+                while ((uint8_t)((uint32_t)rax_1 != (uint32_t)arg1)) {
                     tmp_4010d0_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdx_2 + (uint64_t)1U));
                     if ((uint8_t)((uint8_t)tmp_4010d0_8_1 == (uint8_t)0U)) {
                         return 0;
                     } else {
-                        rax_3 = (uint64_t)(uint32_t)(int8_t)tmp_4010d0_8_1;
+                        rax_1 = (uint64_t)(uint32_t)(int8_t)tmp_4010d0_8_1;
                         rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)1U);
                     }
                 }

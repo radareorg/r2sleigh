@@ -685,3 +685,18 @@ On the corpus the claim was real and bounded: a candidate loop sits at most 5 lo
 no candidate, then 492, 158, 30, 13 and 2 by the deepest one's depth), and the per-latch rescans were 366,432 of
 7,704,538 expression visits (4.8%). The worst function, libc 0x16b210, has 16 candidates side by side, which repeat
 nothing: only nesting repeats a statement.
+
+## Round 17: D605's trace
+
+A probe printed, for each test block of the 15 chains D474 left, what `tested` (`render/mod.rs`)
+returns and what `chain::link` reads.
+
+- zlib, 12 functions: every chain compares one `ValueId` (example O2: ValueId 2322,
+  `tmp:lane:4bf0:0:0`, in the tests at 0x4bf0, 0x4bf9, 0x4c02, 0x4c0b), so the names `rax_97` and
+  `rax_93` the text gives it are not D470's split. `tested` returned `None`: `proven_constant`
+  held for neither side, the literal 0x45 included, because the value-range solve broke its bound
+  and stated every value top. D650 keeps each literal's bits there; the 12 print `switch`.
+- grep O2 0x5050 and O2-noinline 0x7950: every link reads (`cmp bpl, 0x3a`, `test bpl, bpl` by
+  D604, `cmp bpl, 0x3d`); the chain refuses on condition 5, an arm holding the enclosing
+  `for (;;)`'s `break`.
+- gzip O2-noinline 0x9c00: D604's `test edx, edx`; a `switch` since D604.

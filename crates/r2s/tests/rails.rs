@@ -7,15 +7,25 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// A GCC-built x86-64 ELF carried in the tree, not stripped.
-fn hashes() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned/hashes_gcc_x64_O2")
+fn pinned(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/coverage/pinned")
+        .join(name)
 }
 
-/// The shell's stdout for `script`, run with stdout a pipe; it must succeed.
+fn hashes() -> PathBuf {
+    pinned("hashes_gcc_x64_O2")
+}
+
+/// The shell's stdout for `script` on hashes, run with stdout a pipe; it must succeed.
 fn piped(script: &str) -> String {
+    piped_on(&hashes(), script)
+}
+
+fn piped_on(binary: &std::path::Path, script: &str) -> String {
     let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
         .args(["-q", "-c", script])
-        .arg(hashes())
+        .arg(binary)
         .env_remove("NO_COLOR")
         .output()
         .expect("the shell runs");
@@ -23,22 +33,21 @@ fn piped(script: &str) -> String {
     String::from_utf8(done.stdout).expect("text")
 }
 
-/// Every function of hashes, by entry.
-fn entries() -> Vec<String> {
-    let listed = piped("afl");
-    let words = listed
-        .lines()
-        .filter_map(|line| line.split_whitespace().next());
-    words.map(str::to_owned).collect()
+/// One command per function of hashes, split by a fence, in `afl` order.
+fn each(command: &str) -> Vec<String> {
+    each_on(&hashes(), command)
 }
 
-/// One command per function, split by a fence, in `entries` order.
-fn each(command: &str) -> Vec<String> {
-    let script = (entries().iter())
+fn each_on(binary: &std::path::Path, command: &str) -> Vec<String> {
+    let listed = piped_on(binary, "afl");
+    let entries = listed
+        .lines()
+        .filter_map(|line| line.split_whitespace().next());
+    let script = entries
         .map(|entry| format!("?e ==F; {command} @ {entry}"))
         .collect::<Vec<_>>()
         .join("; ");
-    let out = piped(&script);
+    let out = piped_on(binary, &script);
     out.split("==F\n").skip(1).map(str::to_owned).collect()
 }
 
@@ -67,6 +76,21 @@ fn stripped(line: &str) -> (String, Option<u64>) {
     (format!("{}{rest}", " ".repeat(depth * 4)), address)
 }
 
+/// A laid out continuation line's bytes: after the column and the rails, 4 cells more (D620).
+fn continued(line: &str) -> Option<&str> {
+    let mut rest = line.get(11..)?;
+    while let Some(after) = rest.strip_prefix("│   ") {
+        rest = after;
+    }
+    if let Some((_, after)) = rest
+        .strip_prefix("│ ")
+        .and_then(|after| after.split_once("> "))
+    {
+        rest = after;
+    }
+    rest.strip_prefix("    ")
+}
+
 /// In a pipe `asm.rails` and `asm.pdd.addr` are off, so `pdd` is the definition's bytes: the same
 /// as with both keys set false.
 #[test]
@@ -82,17 +106,37 @@ fn a_piped_pdd_is_the_definitions_bytes() {
 /// line is at most the column's 11 cells past its plain width.
 #[test]
 fn the_laid_out_pdd_strips_back_to_the_plain_one() {
-    let plain = each("pdd");
-    let laid = each("e asm.rails=true; e asm.pdd.addr=true; pdd");
-    let listed = each("pdf");
+    for name in [
+        "hashes_gcc_x64_O2",
+        "branchy_gcc_x64_O0",
+        "shapes_gcc_x64_O0",
+    ] {
+        strips_back(&pinned(name));
+    }
+}
+
+fn strips_back(binary: &std::path::Path) {
+    let plain = each_on(binary, "pdd");
+    let laid = each_on(binary, "e asm.rails=true; e asm.pdd.addr=true; pdd");
+    let listed = each_on(binary, "pdf");
     for ((plain, laid), listed) in plain.iter().zip(&laid).zip(&listed) {
         let instructions = (listed.lines())
             .filter_map(|line| line[line.find("0x")?..].split_whitespace().next())
             .filter_map(|word| u64::from_str_radix(word.strip_prefix("0x")?, 16).ok())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut back = Vec::new();
-        let mut widths = Vec::new();
+        let mut back: Vec<String> = Vec::new();
+        let mut widths: Vec<usize> = Vec::new();
         for line in laid.lines() {
+            // A continuation is its statement's next bytes (D620); a cut line ends at a break point,
+            // after a space or a cast, where a struct member line's predecessor ends in `;` or `{`.
+            if let (Some(segment), Some(last), Some(width)) =
+                (continued(line), back.last_mut(), widths.last_mut())
+                && last.ends_with([' ', ')'])
+            {
+                last.push_str(segment);
+                *width = (*width).max(line.chars().count());
+                continue;
+            }
             let (back_line, address) = stripped(line);
             if let Some(address) = address {
                 assert!(
@@ -142,4 +186,66 @@ fn the_painted_layout_is_the_plain_layout() {
         assert!(painted.contains("\x1b["), "scr.color={depth}");
         assert_eq!(unpainted(&painted), plain, "scr.color={depth}");
     }
+}
+
+/// Each count of the plain proof line's type and unassigned clauses, as `N words`.
+fn clause_counts(text: &str) -> Vec<String> {
+    let Some(proof) = text.lines().find(|line| line.contains("r2dec proof:")) else {
+        return Vec::new();
+    };
+    let words = [
+        "data object type refused",
+        "data object types refused",
+        "never assigned",
+        "held from entry",
+    ];
+    let clauses = proof.split("; ").filter_map(|clause| {
+        let (count, rest) = clause.split_once(' ')?;
+        count.parse::<usize>().ok()?;
+        let said = words.iter().find(|said| rest.starts_with(**said))?;
+        Some(format!("{count} {said}"))
+    });
+    clauses.collect()
+}
+
+/// The railed proof lines count every refused data object type and unassigned read the plain
+/// proof line names (D621), read from the typed response, each under the refusal mark.
+#[test]
+fn the_railed_notes_count_the_proof_lines_type_clauses() {
+    let plain = each("pdd");
+    let laid = each("e asm.rails=true; pdd");
+    let mut seen = 0;
+    for (plain, laid) in plain.iter().zip(&laid) {
+        let notes = (laid.lines())
+            .find(|line| line.contains("/* "))
+            .unwrap_or_default();
+        for clause in clause_counts(plain) {
+            assert!(notes.contains(&format!("! {clause}")), "{clause}:\n{laid}");
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "hashes states a type or unassigned clause");
+}
+
+/// On a terminal no laid out line of a pinned function passes 160 cells (D620): a comment breaks
+/// at its spaces and a cast chain after a cast, where C reads the line break as white space.
+#[test]
+fn no_laid_out_line_of_a_pinned_function_passes_160_cells() {
+    let mut over = Vec::new();
+    for name in [
+        "hashes_gcc_x64_O2",
+        "branchy_gcc_x64_O0",
+        "shapes_gcc_x64_O0",
+    ] {
+        let laid = each_on(&pinned(name), "e asm.rails=true; e asm.pdd.addr=true; pdd");
+        let lines = laid.iter().flat_map(|text| text.lines());
+        let wide = lines.filter(|line| line.chars().count() > 160);
+        over.extend(wide.map(|line| format!("{name} {}: {line}", line.chars().count())));
+    }
+    assert!(
+        over.is_empty(),
+        "{} lines:\n{}",
+        over.len(),
+        over.join("\n")
+    );
 }

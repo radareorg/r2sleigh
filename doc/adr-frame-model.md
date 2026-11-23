@@ -272,6 +272,53 @@ entries` before.
 - Exit for the whole of P4: one owner of frame objects, and `afv` agrees with
   `pdd` on every local's name and extent.
 
+## P4 step 0: frame agreement by class (round 16)
+
+`scripts/frame_agree.py` at 768391be5 on the committed census (`tests/coverage/pinned`,
+`tests/fixtures`; 203 functions with a disagreement, 132 refused and not compared): 0 of 582
+offsets agree. Each class with one witness and its cause:
+
+| Class | Offsets | Witness | Cause |
+|---|---|---|---|
+| `afv-only`, slot promoted | 337 | branchy_gcc_x64_O0 `gate_one` 0x401156: `afv` lists `uint32_t stack_m12 @ entry.sp-0xc`, the spill of `edi` at `[rbp - 0x4]`; `pdd` reads `arg0` and declares nothing there | slot promotion (`slot_promotion.rs`) turns the slot into values; `afv` lists the slot from the access, not from its fate |
+| `afv-only`, inside a frame array | 171 | branchy_gcc_x64_O0 `main` 0x401764: `afv` lists `stack_m552` at `entry.sp-0x228`; `pdd` declares `uint8_t frame[568]` at offset 0 | the frame is one byte array where no layout proves its objects; `afv` lists the slots the array holds |
+| `afv-only`, register save | 20 | branchy_gcc_x64_O0 `__do_global_dtors_aux` 0x401120: `afv` lists `uint64_t stack_m8 @ entry.sp-0x8`, the `push rbp` | a save of a preserved register's entry value is elided by `pdd` and listed by `afv` |
+| `pdd-only` | 54 | the same `main`: `uint8_t frame[568]` at `stack:0` | the frame array's one declaration; `afv` has no row for it |
+| `name`, `type`, `afv-twice`, `pdd-twice` | 0 | none | no offset is named by both sides, so no name or type is compared yet |
+
+Every disagreement is one side stating an object the other states as something else: no offset
+holds two objects with different names or types. The first P4 code row is D633, from the
+largest class: the frame model states each slot's fate, and `afv` lists it by that fate.
+
+## D633 as built (round 17)
+
+`afv` and `pdd` read one frame model. r2ssa owns the frame array's layout (`FrameLayout`,
+moved from r2dec `render/frame.rs`, which is deleted) and each slot's fate (`SlotFate`):
+
+| Fate | Where it is proven | `afv` suffix |
+|---|---|---|
+| promoted | slot promotion's values (`SsaArtifact::promoted_slots`, `O(values)`); `holds` is the one value every version copies, no merge | `; promoted`, `; promoted, pdd reads arg0` where that value is a formal parameter |
+| save | a certified frame round trip (`StackFrameRoundTripCertificate.storage`), or a promoted slot holding a preserved register's entry lane (`saved_register`) | `; save of rbp` |
+| home | `stack_slot_role` states a parameter home | `; home of n`, with `, in frame at +0x8` where the array is listed |
+| member | the object's byte in `FrameLayout` (`SsaArtifact::slot_fates`, a dense column by `ObjectId`, `O(slots log slots)`) | `; in frame at +0x10` |
+
+`afv` lists `var uint8_t frame[N] @ entry.sp-<start>` where a listed slot is a member; `pddj`
+places `frame` at the same entry offset (`stack:-0x238`, `stack:+0x0` before). A promoted slot
+has no `ObjectId` (promotion removes its memory accesses), so promoted fates are a sorted list by
+offset beside the column; this departs from the ruled "column by `ObjectId`" for that class.
+
+`frame_agree.py` on the committed census: 0 of 582 offsets agreed at eb327af9a (`afv-only` 528,
+`pdd-only` 54); at D633 579 of 582 agree (`name` 0, `type` 0, `afv-only` 0, the twice classes
+0). The 3 left are `pdd-only` frame arrays: shapes_gcc_x64_O0 `mixed_fold` 0x40182c, 0x401515,
+rv_O0g 0x144c, where the only frame object is a parameter home the rendering also reads at
+narrower widths, so `pdd` names the home through `frame` while `afv` lists no member. Whether a
+rendering names an object is decided at spell time (`values.rs` declares `frame` on first use);
+stating it upstream is P4's next row. The 579 rows by fate: promoted 285
+(137 name the parameter `pdd` reads, each checked against the rendering's parameters, 0 wrong),
+home 115, member 108, the array 51, save 20. "Home" is a fifth fate the ruling did not list: a
+role `stack_slot_role` states, which agrees standing alone. `frame_agree.py --committed` runs in
+`scripts/quality-gate.sh` with these counts as its bounds.
+
 ## Consequences
 
 - Equivalence and the census change at P4.3 and P4.4, and each change is read

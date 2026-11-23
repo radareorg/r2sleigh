@@ -1,13 +1,13 @@
 //! D4: the function's own frame as one array in entry-SP coordinates, aligned as the convention
-//! states the entry stack (doc/adr-decompiler-rewrite.md, "D4's frame").
+//! states the entry stack (doc/adr-decompiler-rewrite.md, "D4's frame"); `afv` and `pdd` read it (D633).
 
 use std::collections::BTreeMap;
 
-use r2ssa::{ObjectId, SsaArtifact};
+use crate::{CanonicalStorageId, ObjectId, SsaArtifact, ValueId};
 
 /// Where each frame object lies in the one array, and the array's alignment and size.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Frame {
+pub struct FrameLayout {
     /// The least entry offset any object starts at; the array's byte `pad` stands for it.
     low: i64,
     pad: u32,
@@ -16,10 +16,10 @@ pub(super) struct Frame {
     objects: BTreeMap<ObjectId, (i64, u32)>,
 }
 
-impl Frame {
+impl FrameLayout {
     /// The layout of `objects` (entry offset, size) under `sp % alignment == residue` at entry, less
     /// any with a byte `callee` does not own; the array reaches entry, or a home past it.
-    pub(super) fn lay_out(
+    pub(crate) fn lay_out(
         objects: impl IntoIterator<Item = (ObjectId, i64, u32)>,
         (alignment, residue): (u32, u32),
         callee: impl Fn(i64) -> bool,
@@ -56,7 +56,7 @@ impl Frame {
 
     /// The frame of the objects whose entry-SP coordinates r2ssa states, where the convention states
     /// the entry stack's alignment: every byte below the entry stack pointer is the function's own.
-    pub(super) fn of(artifact: &SsaArtifact) -> Option<Self> {
+    pub fn of(artifact: &SsaArtifact) -> Option<Self> {
         let entry = artifact.machine_context().convention()?.forms.entry_stack?;
         let roots = &artifact.facts().objects.entry_stack_roots;
         let placed = artifact
@@ -69,7 +69,7 @@ impl Frame {
                 }
                 let root = roots
                     .get(object)
-                    .filter(|root| root.base == r2source::StackAddressBase::StackPointer)?;
+                    .filter(|root| root.base == crate::StackAddressBase::StackPointer)?;
                 Some((*object, root.offset, slot.size?))
             });
         let callee = |offset: i64| !artifact.caller_frame_offset(offset);
@@ -77,26 +77,52 @@ impl Frame {
     }
 
     /// The array's byte index of `object`'s first byte, and the object's size.
-    pub(super) fn at(&self, object: ObjectId) -> Option<(u32, u32)> {
+    pub fn at(&self, object: ObjectId) -> Option<(u32, u32)> {
         let (offset, size) = *self.objects.get(&object)?;
         let index = i64::from(self.pad) + (offset - self.low);
         Some((u32::try_from(index).ok()?, size))
     }
 
-    pub(super) const fn bytes(&self) -> u32 {
+    pub const fn bytes(&self) -> u32 {
         self.bytes
     }
 
-    pub(super) const fn alignment(&self) -> u32 {
+    pub const fn alignment(&self) -> u32 {
         self.alignment
     }
+
+    /// The entry-stack offset of the array's byte 0.
+    pub const fn start(&self) -> i64 {
+        self.low - self.pad as i64
+    }
+}
+
+/// What became of one frame slot, as the frame model proves it (D633).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotFate {
+    /// Promotion took it out of memory; `holds` is the one value every version copies, where one does.
+    Promoted { holds: Option<ValueId> },
+    /// It holds a preserved register's entry value and nothing reads it but a restore.
+    Save { storage: CanonicalStorageId },
+    /// The home of this parameter, at its byte in the frame array where it has one.
+    Home { parameter: u32, index: Option<u32> },
+    /// A member of the frame array at this byte.
+    Member { index: u32 },
+}
+
+/// A slot promotion took out of memory, at its entry-stack offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromotedSlot {
+    pub offset: i64,
+    pub size: u32,
+    pub fate: SlotFate,
 }
 
 #[cfg(test)]
 mod tests {
-    use r2ssa::ObjectId;
+    use crate::ObjectId;
 
-    use super::Frame;
+    use super::FrameLayout as Frame;
 
     fn below(offset: i64) -> bool {
         offset < 0

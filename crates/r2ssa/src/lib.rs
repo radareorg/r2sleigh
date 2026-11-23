@@ -51,6 +51,7 @@ pub(crate) mod integrity;
 pub mod interproc;
 pub mod lanes;
 pub mod liveness;
+pub mod local_classes;
 pub mod member_call;
 pub use member_call::{MemberCall, MemberCallRefusal, MemberCalls};
 pub(crate) mod liveout;
@@ -63,6 +64,7 @@ pub(crate) mod mirror;
 pub mod name;
 mod naming;
 pub use naming::frame_object_name;
+mod frame_layout;
 pub mod natural_loops;
 pub(crate) mod obligation;
 pub(crate) mod op;
@@ -119,6 +121,7 @@ pub use control::{
 };
 pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
+pub use frame_layout::{FrameLayout, PromotedSlot, SlotFate};
 pub use function::{
     AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeImports, CalleeLaneReads,
     CalleePreservedCarriers, CalleeWidths, DecompileInputs, DecompilePrepFacts, DefRef, DefSite,

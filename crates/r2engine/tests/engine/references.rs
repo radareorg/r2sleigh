@@ -51,7 +51,8 @@ fn the_index_carries_the_scope_it_was_read_over() {
     };
     assert_eq!(coverage.unresolved.get(&TWO), Some(&vec![stopped]));
     assert_eq!(coverage.unresolved.len(), 1, "{coverage:?}");
-    assert_eq!(coverage.indirect_count(), 1);
+    // An unwalked body may transfer anywhere, so the survey states no count (D619).
+    assert_eq!(coverage.indirect_count(), None);
 }
 
 #[test]
@@ -187,7 +188,7 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
     // The references to one address come back by source, each with the instruction and the function holding it.
     let to = index
         .to(CALLEE)
-        .map(|(fact, source)| (fact.from, source.line.address, source.owners.clone()))
+        .map(|(fact, source)| (fact.from, source.address, source.owners.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(
         to,
@@ -196,9 +197,10 @@ fn a_block_operation_and_a_computed_call_name_the_addresses_their_block_folds() 
             (CALLS + 7, CALLS + 7, vec![CALLS])
         ]
     );
-    let text = index
-        .to(CALLEE)
-        .filter_map(|(_, source)| Some(source.line.syntax.as_ref()?.text()))
+    // The index holds no line (D612): `axt` lists the owner again and takes it.
+    let answer = program.references_to(CALLEE).expect("the references list");
+    let text = (answer.referring.iter())
+        .filter_map(|referring| Some(referring.line.as_ref()?.syntax.as_ref()?.text()))
         .collect::<Vec<_>>();
     assert_eq!(text, ["lea rax, [0x1050]", "call rax"]);
 }
@@ -297,7 +299,7 @@ fn a_walk_stopped_before_it_read_its_tables_is_indexed_as_far_as_it_went() {
         [(BASE + 3, BASE + 0x28, Role::Jump, Basis::Decoded)]
     );
     assert!(index.coverage.unread.is_empty(), "{:?}", index.coverage);
-    assert_eq!(index.coverage.indirect_count(), 1);
+    assert_eq!(index.coverage.indirect_count(), Some(1));
     // The stop was the request's, not the program's: asked again, the arms are there.
     let again = program.references().expect("the index builds").value;
     assert!(again.facts().len() > index.facts().len());
@@ -390,7 +392,7 @@ fn a_tail_two_functions_share_is_held_by_each() {
     let index = program.references().expect("the index builds").value;
     let held = index
         .to(leaf)
-        .map(|(fact, source)| (fact.from, fact.role, source.owners.clone()))
+        .map(|(fact, source)| (fact.from, fact.role, source.owners.to_vec()))
         .collect::<Vec<_>>();
     assert_eq!(held, [(BASE + 0x10, Role::Call, vec![left, right])]);
 }

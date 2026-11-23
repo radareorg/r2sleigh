@@ -84,8 +84,8 @@ import time
 import tomllib
 
 VERDICTS = ("r2s-right", "r2-right", "unfilled", "deliberate")
-# A judged radare2-only value names radare2's line (6.2.4) when radare2 is wrong, an open row otherwise.
-MISSED_WITNESS = {"r2s-right": "r2_line", "r2-right": "row", "unfilled": "row"}
+# A judged radare2-only value names radare2's line (6.2.4) when radare2 is wrong or spells it on purpose, an open row otherwise.
+MISSED_WITNESS = {"r2s-right": "r2_line", "deliberate": "r2_line", "r2-right": "row", "unfilled": "row"}
 R2_LINE = re.compile(r"[\w./-]+\.\w+:\d+(-\d+)?")
 ROW = re.compile(r"[A-Z]+\d+(\.\d+)*[a-z]?")
 VALUE = re.compile(r"0x[0-9a-f]+|[a-z]+")
@@ -920,9 +920,14 @@ def our_frame(lines):
     """r2s's `afv`: each fact to its row; a refusal is one fact of its own."""
     found = {}
     for line in lines:
+        # radare2's line is the part before the fate r2s states after ` ; ` (D633).
+        line = line.split(" ; ", 1)[0]
         words = line.split()
         if line.startswith("refused:"):
             found[("refused", " ".join(words))] = " ".join(words)
+        elif words[:1] == ["var"] and re.fullmatch(r"frame\[\d+\]", words[-3]):
+            # The frame array has no radare2 counterpart: its byte 0 is no var's place (D633).
+            found.setdefault(("array", frame_key(words[-1])[1]), " ".join(words))
         elif words[:1] in (["arg"], ["var"]) and len(words) >= 3 and words[-2] == "@":
             found.setdefault(frame_key(words[-1]), " ".join(words))
         elif words[:1] == ["arg"] and len(words) >= 3:

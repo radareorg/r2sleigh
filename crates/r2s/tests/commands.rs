@@ -1134,11 +1134,11 @@ mod listing {
         let run = super::r2s("s 0x401330; pdf");
         assert!(run.ok, "{}", run.out);
         assert!(run.out.contains("0x0040135c"), "{}", run.out);
-        // The padding is a gap row, never a line of its own (D566).
+        // The padding is a gap row, never a line of its own (D566), and no walked body holds it (D622).
         assert!(!run.out.contains("0x0040135d      "), "{}", run.out);
         assert!(
             run.out
-                .contains(";-- 3 bytes not in this function: 0x0040135d..0x0040135f")
+                .contains(";-- ? 3 bytes in no block: 0x0040135d..0x0040135f")
         );
         assert!(run.out.contains("0x00401360"), "{}", run.out);
     }
@@ -1322,15 +1322,16 @@ mod dispatch_table {
         let frame = frame.collect::<Vec<_>>().join("\n");
         assert_eq!(
             frame,
-            // The loaded table leaves q0 written on the path that skips the loop, so the body does
-            // not say whether x0 or v0 is the result, and no operation states the arguments' sign.
+            // q0 is written on the path that skips the loop, so x0 or v0 is the result unproven;
+            // each slot's fate follows radare2's line (D633).
             "arg r2sleigh_word_u64 arg0 @ x0\n\
              arg r2sleigh_word_u64 arg1 @ x1\n\
-             var uint32_t stack_m76 @ entry.sp-0x4c\n\
-             var uint64_t stack_m72 @ entry.sp-0x48\n\
-             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40\n\
-             var uint64_t stack_m32 @ entry.sp-0x20\n\
-             var uint64_t stack_m24 @ entry.sp-0x18"
+             var uint32_t stack_m76 @ entry.sp-0x4c ; promoted\n\
+             var uint64_t stack_m72 @ entry.sp-0x48 ; promoted\n\
+             var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40 ; in frame at +0x0\n\
+             var uint8_t frame[64] @ entry.sp-0x40\n\
+             var uint64_t stack_m32 @ entry.sp-0x20 ; home of arg1, in frame at +0x20\n\
+             var uint64_t stack_m24 @ entry.sp-0x18 ; home of arg0, in frame at +0x28"
         );
     }
 

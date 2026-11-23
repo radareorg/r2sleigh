@@ -55,7 +55,7 @@ NAME=x86-64: a register written before it is read is not read
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aoj 2 @ 0x401348
 EXPECT=<<EOF
-[{"addr":4199240,"bytes":"0fb617","disasm":"movzx edx, byte [rdi]","il":["uniq:0x0[1] = LOAD [ram]RDI","EDX = ZEXT(uniq:0x0[1])","RDX = ZEXT(EDX)"],"mnemonic":"movzx","opcode":"movzx edx, byte [rdi]","reads":["rdi"],"size":3,"writes":["rdx"]},{"addr":4199243,"bytes":"4883c701","disasm":"add rdi, 0x1","il":["CF = CARRY(RDI, 0x1:8)","OF = SCARRY(RDI, 0x1:8)","uniq:0x0[8] = RDI & 0xf:8","uniq:0x8[8] = 0x1:8 & 0xf:8","uniq:0x10[8] = uniq:0x0[8] + uniq:0x8[8]","AF = 0xf:8 < uniq:0x10[8]","RDI = RDI + 0x1:8","SF = RDI s< 0x0:8","ZF = RDI == 0x0:8","uniq:0x18[8] = RDI & 0xff:8","uniq:0x20[1] = POPCOUNT(uniq:0x18[8])","uniq:0x21[1] = uniq:0x20[1] & 0x1:1","PF = uniq:0x21[1] == 0x0:1"],"mnemonic":"add","opcode":"add rdi, 0x1","reads":["rdi"],"size":4,"writes":["cf","of","af","rdi","sf","zf","pf"]}]
+[{"addr":4199240,"bytes":"0fb617","disasm":"movzx edx, byte [rdi]","il":["uniq:0x0[1] = LOAD [ram]RDI","EDX = ZEXT(uniq:0x0[1])","RDX = ZEXT(EDX)"],"mnemonic":"movzx","notes":[],"opcode":"movzx edx, byte [rdi]","reads":["rdi"],"size":3,"writes":["rdx"]},{"addr":4199243,"bytes":"4883c701","disasm":"add rdi, 0x1","il":["CF = CARRY(RDI, 0x1:8)","OF = SCARRY(RDI, 0x1:8)","uniq:0x0[8] = RDI & 0xf:8","uniq:0x8[8] = 0x1:8 & 0xf:8","uniq:0x10[8] = uniq:0x0[8] + uniq:0x8[8]","AF = 0xf:8 < uniq:0x10[8]","RDI = RDI + 0x1:8","SF = RDI s< 0x0:8","ZF = RDI == 0x0:8","uniq:0x18[8] = RDI & 0xff:8","uniq:0x20[1] = POPCOUNT(uniq:0x18[8])","uniq:0x21[1] = uniq:0x20[1] & 0x1:1","PF = uniq:0x21[1] == 0x0:1"],"mnemonic":"add","notes":[],"opcode":"add rdi, 0x1","reads":["rdi"],"size":4,"writes":["cf","of","af","rdi","sf","zf","pf"]}]
 EOF
 RUN
 
@@ -144,7 +144,7 @@ il:
     3: STORE [ram]mult_addr = r4
     4: mult_addr = mult_addr - 0x4:4
     5: sp = mult_addr + 0x4:4
-[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x0[4] = LOAD [ram]r12","uniq:0x4[4] = uniq:0x0[4] & 0x1:4","TB = uniq:0x4[4] != 0x0:4","pc = uniq:0x0[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","tb","pc"]}]
+[{"addr":66072,"bytes":"7cf0bce5","disasm":"ldr pc, [ip, 0x7c]!","il":["r12 = r12 + 0x7c:4","uniq:0x0[4] = LOAD [ram]r12","uniq:0x4[4] = uniq:0x0[4] & 0x1:4","TB = uniq:0x4[4] != 0x0:4","pc = uniq:0x0[4] & 0xfffffffe:4","BRANCHIND pc"],"mnemonic":"ldr","notes":[],"opcode":"ldr pc, [ip, 0x7c]!","reads":["ip"],"size":4,"writes":["ip","tb","pc"]}]
 EOF
 RUN
 
@@ -202,7 +202,7 @@ aoj 1 @ 0x401330
 EOF
 EXPECT=<<EOF
 2 bytes at 0x401330
-[{"addr":4199216,"bytes":"ff","disasm":"invalid","mnemonic":"invalid","opcode":"invalid","refused":"the bytes are not an instruction","size":1}]
+[{"addr":4199216,"bytes":"ff","disasm":"invalid","mnemonic":"invalid","notes":[],"opcode":"invalid","refused":"the bytes are not an instruction","size":1}]
 EOF
 RUN
 

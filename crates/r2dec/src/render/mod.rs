@@ -3,7 +3,6 @@
 
 mod calls;
 mod control;
-mod frame;
 pub(crate) mod globals;
 mod input;
 pub(crate) mod proof;
@@ -106,6 +105,14 @@ pub fn render(
     let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
     let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
     let role = |stmt: &CStmt| statement_role(stmt, &evidence, &selections);
+    let certified = certifier(input, &labels, &role);
+    let mut body = classes(
+        input,
+        (&c, values.as_ref()),
+        body,
+        &mut occurrences,
+        &certified,
+    );
     certify_control(input, &body, &occurrences, &labels, &role)?;
     crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
@@ -119,15 +126,40 @@ pub fn render(
     crate::ast::respell_nonconforming_main(&mut c, input.function().entry);
     let ledger = close_ledger(input, values.as_ref());
     let unassigned = values.as_ref().map(values::Values::unassigned);
-    // The proof line every rendering opens with: what became of each obligation the source owes.
+    let clauses = proof::ProofClauses::of(&c, unassigned.as_deref().unwrap_or_default());
+    open_proof_line(&mut c, input, &ledger, &clauses, &tags);
+    let mut ready = ready_with_carriers(c, &tags);
+    // Each marker names the instruction its statement was written for, so each line names its own.
+    ready.seal_observation_markers(
+        &mut crate::codegen::ObservationSealAuthority::staged(),
+        crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
+    );
+    let emission = CodeGenerator::new(CodeGenConfig::default())
+        .emit(&ready, input.ptr_bits())
+        .with_clauses(clauses);
+    Ok(Rendered {
+        function: crate::codegen::RenderedFunction::new(emission, ready.into_function()),
+        ledger,
+        stopped,
+    })
+}
+
+/// The proof line every rendering opens with: what became of each obligation the source owes.
+fn open_proof_line(
+    c: &mut CFunction,
+    input: &RenderInput<'_>,
+    ledger: &ObligationLedger,
+    clauses: &proof::ProofClauses,
+    tags: &tags::Tags,
+) {
     proof::note_unproven_constructs(
-        &mut c,
-        Some(&ledger),
+        c,
+        Some(ledger),
         0,
         input.declared_call_prototypes(),
         0,
         (
-            unassigned.as_deref().unwrap_or_default(),
+            clauses,
             (
                 (input.open_second_result(), input.integer_lane_unread_only()),
                 &input.body_disputed_lanes(),
@@ -142,18 +174,6 @@ pub fn render(
         input.arity_floor(),
         input.artifact().landing_pads(),
     );
-    let mut ready = ready_with_carriers(c, &tags);
-    // Each marker names the instruction its statement was written for, so each line names its own.
-    ready.seal_observation_markers(
-        &mut crate::codegen::ObservationSealAuthority::staged(),
-        crate::codegen::ObservationLocations::new(occurrences.into_addresses()),
-    );
-    let emission = CodeGenerator::new(CodeGenConfig::default()).emit(&ready, input.ptr_bits());
-    Ok(Rendered {
-        function: crate::codegen::RenderedFunction::new(emission, ready.into_function()),
-        ledger,
-        stopped,
-    })
 }
 
 /// D2 over every placed block. A late edge's copy is promised to render; when one gaps, spell again with
@@ -241,17 +261,8 @@ fn structured(
     marks: &mut Occurrences,
 ) -> CStmt {
     let unselected = std::collections::BTreeSet::new();
-    let certified = |stmt: &CStmt, marks: &Occurrences| {
-        let role = |stmt: &CStmt| statement_role(stmt, evidence, &unselected);
-        let certificate = control_certificate(input, stmt, marks, labels, &role);
-        match certificate.ok() {
-            true => Ok(()),
-            false => Err(format!(
-                "{certificate} {:?}",
-                certificate.violations.first()
-            )),
-        }
-    };
+    let role = |stmt: &CStmt| statement_role(stmt, evidence, &unselected);
+    let certified = certifier(input, labels, &role);
     let chains = |body: &mut CStmt, marks: &mut Occurrences| {
         crate::structure::condition::collapse(body, marks).collapsed != 0
     };
@@ -344,6 +355,24 @@ fn certify_control(
 /// The control certificate over a candidate body and its markers: `Err` names the first violation.
 type Certified<'a> = dyn Fn(&CStmt, &Occurrences) -> Result<(), String> + 'a;
 
+/// The control certificate as a stage reads it: `Ok` where it holds, else its first violation.
+fn certifier<'a, 'b: 'a>(
+    input: &'a RenderInput<'b>,
+    labels: &'a BTreeMap<u64, String>,
+    role: &'a dyn Fn(&CStmt) -> StatementRole,
+) -> impl Fn(&CStmt, &Occurrences) -> Result<(), String> + 'a {
+    move |stmt, marks| {
+        let certificate = control_certificate(input, stmt, marks, labels, role);
+        match certificate.ok() {
+            true => Ok(()),
+            false => Err(format!(
+                "{certificate} {:?}",
+                certificate.violations.first()
+            )),
+        }
+    }
+}
+
 /// Run one structure stage on `body`; its result stands only if the certificate still holds.
 /// `apply` says whether it changed anything, and an unchanged body is not certified again.
 fn stage(
@@ -388,6 +417,78 @@ fn select(
     let mut selections = std::collections::BTreeSet::new();
     crate::structure::shape::select(body, &convert, block_of, &mut selections);
     selections
+}
+
+/// D470: each class's members spelled as one symbol where the finished text proves it, then each
+/// loop whose arms that emptied rotated; each stage kept only under the control certificate.
+fn classes(
+    input: &RenderInput<'_>,
+    (c, values): (&CFunction, Option<&values::Values<'_>>),
+    body: CStmt,
+    marks: &mut Occurrences,
+    certified: &Certified<'_>,
+) -> CStmt {
+    let Some(values) = values else {
+        return body;
+    };
+    let members = class_members(input, c, values);
+    if members.is_empty() {
+        return body;
+    }
+    let symbols = c.symbols.borrow();
+    let same_type = |a, b| symbols.ty(a) == symbols.ty(b);
+    let mut deleted = Vec::new();
+    let body = stage("local classes", body, marks, certified, |body, _| {
+        let renamed = crate::structure::classes::rename(body, &members, symbols.len(), &same_type);
+        r2il::refusal_evidence!(
+            "local-classes",
+            "{}: {} members, {} joined, kept {:?}, spelled {:?}",
+            input.name().unwrap_or_default(),
+            renamed.members,
+            renamed.joined,
+            renamed.kept,
+            (renamed.spelled.iter())
+                .map(|(from, to)| format!("{}>{}", symbols.name(*from), symbols.name(*to)))
+                .collect::<Vec<_>>()
+        );
+        deleted = renamed.deleted;
+        deleted.sort();
+        renamed.joined != 0
+    });
+    if deleted.is_empty() {
+        return body;
+    }
+    stage("loop rotation", body, marks, certified, |body, marks| {
+        crate::structure::classes::rotate_emptied(body, &deleted, marks) != 0
+    })
+}
+
+/// The carriers whose values r2ssa classes with another carrier's, by class then value.
+fn class_members(
+    input: &RenderInput<'_>,
+    c: &CFunction,
+    values: &values::Values<'_>,
+) -> Vec<crate::structure::classes::Member> {
+    let classes = &input.artifact().facts().classes;
+    let symbols = c.symbols.borrow();
+    let mut members = (values.named())
+        .filter(|(_, symbol)| symbols.get(*symbol).role == crate::symbol::SymbolRole::Carrier)
+        .map(|(value, symbol)| crate::structure::classes::Member {
+            class: classes.class_of(value).0,
+            value: value.0,
+            symbol,
+        })
+        .collect::<Vec<_>>();
+    members.sort();
+    let shared = |at: usize| {
+        let class = members[at].class;
+        (at > 0 && members[at - 1].class == class)
+            || members.get(at + 1).is_some_and(|next| next.class == class)
+    };
+    let keep = (0..members.len()).map(shared).collect::<Vec<_>>();
+    let mut keep = keep.into_iter();
+    members.retain(|_| keep.next().unwrap_or(false));
+    members
 }
 
 /// What the certificate reads a statement as: a selection the stage recorded, or one ending control.

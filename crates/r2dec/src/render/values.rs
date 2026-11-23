@@ -57,7 +57,7 @@ pub(super) struct Values<'a> {
     /// By instruction index: whether a statement assigns the instruction's output where it stands.
     bound: Vec<bool>,
     /// The frame array each stack object a spelled term names is declared as, on first use.
-    frame: Option<super::frame::Frame>,
+    frame: Option<r2ssa::FrameLayout>,
     /// The frame array, once a spelled term names an object in it.
     frame_array: RefCell<Option<SymbolId>>,
     /// Each stack formal: its index, name, class, and whether it is declared other than its class.
@@ -828,7 +828,7 @@ impl<'a> Values<'a> {
             root: input.function().root(),
             reading: Cell::new(input.function().root()),
             bound,
-            frame: super::frame::Frame::of(artifact),
+            frame: r2ssa::FrameLayout::of(artifact),
             frame_array: RefCell::new(None),
             frame_formals: Vec::new(),
             symbols,
@@ -1183,10 +1183,11 @@ impl<'a> Values<'a> {
                 }),
                 Some(frame.bytes() as usize),
             );
-            let id =
-                self.symbols
-                    .borrow_mut()
-                    .declare("frame", ty.clone(), SymbolRole::StackLocal(0));
+            let id = self.symbols.borrow_mut().declare(
+                "frame",
+                ty.clone(),
+                SymbolRole::StackLocal(frame.start()),
+            );
             self.locals.borrow_mut().push(CLocal {
                 ty,
                 name: id,
@@ -1498,6 +1499,12 @@ impl<'a> Values<'a> {
         for inst in addressed {
             held[inst.0 as usize] = true;
         }
+    }
+
+    /// Each value with the symbol that names it, by value (D470's renaming reads it).
+    pub(super) fn named(&self) -> impl Iterator<Item = (ValueId, SymbolId)> + '_ {
+        (self.names.iter().enumerate())
+            .filter_map(|(value, name)| Some((ValueId(value as u32), name.as_ref()?.0)))
     }
 
     /// The values read as residuals for want of a value, each once, by cause and name.

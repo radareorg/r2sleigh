@@ -41,19 +41,17 @@ EXPECT=<<EOF
 r2sleigh_result_u64 _init(void)
 {
     uint64_t rax_1;
-    uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x403fe0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
-            rax_3 = rax_1;
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
-            rax_3 = r2sleigh_residual_u64(3);
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            rax_1 = r2sleigh_residual_u64(3);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         }
     }
 }
@@ -293,10 +291,9 @@ r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401348_0_1;
-    uint64_t rdi_2;
     uint32_t tmp_lane_401351_3_0_1;
 
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 11 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return (uint32_t)0x811c9dc5U;
@@ -306,11 +303,10 @@ r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdi_1 = arg0;
             do {
                 tmp_401348_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
                 tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)rax_2) * (uint64_t)0x1000193U);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401351_3_0_1;
-                rdi_1 = rdi_2;
-            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
+            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_1));
             {
                 return (uint32_t)tmp_lane_401351_3_0_1;
             }
@@ -333,33 +329,23 @@ r2sleigh_result_u64 fnv1a64(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401390_0_1;
-    uint64_t rdi_2;
-    uint64_t rax_4;
-    uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 28 rendered, 4 elided, 0 refused; 15 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 28 rendered, 4 elided, 0 refused; 10 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
-            rax_5 = (uint64_t)0xcbf29ce484222325U;
+            rax_2 = (uint64_t)0xcbf29ce484222325U;
         } else {
             rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
             rax_2 = (uint64_t)0xcbf29ce484222325U;
             rdi_1 = arg0;
-            for (; ; ) {
+            do {
                 tmp_401390_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                rax_4 = (uint64_t)((uint64_t)((uint64_t)rax_2 ^ (uint64_t)(uint8_t)tmp_401390_0_1) * (uint64_t)0x100000001b3U);
-                if ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2)) {
-                    rax_2 = rax_4;
-                    rdi_1 = rdi_2;
-                } else {
-                    rax_5 = rax_4;
-                    break;
-                }
-            }
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rax_2 = (uint64_t)((uint64_t)((uint64_t)rax_2 ^ (uint64_t)(uint8_t)tmp_401390_0_1) * (uint64_t)0x100000001b3U);
+            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_1));
         }
         {
-            return r2sleigh_carrier_u64((uint64_t)rax_5);
+            return r2sleigh_carrier_u64((uint64_t)rax_2);
         }
     }
 }
@@ -378,11 +364,10 @@ r2sleigh_result_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rsi_1;
     uint64_t rax_2;
     uint64_t rdi_1;
-    uint64_t rdi_2;
     uint8_t tmp_4013d3_8_1;
     uint32_t tmp_lane_4013d7_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 33 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 41 source obligations: 33 rendered, 8 elided, 0 refused; 11 statements rendered; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return r2sleigh_carrier_u32(0x1505);
@@ -391,12 +376,11 @@ r2sleigh_result_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rax_2 = 0x1505;
             rdi_1 = arg0;
             do {
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                tmp_4013d3_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdi_2 - (uint64_t)1U));
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                tmp_4013d3_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdi_1 - (uint64_t)1U));
                 tmp_lane_4013d7_6_0_1 = (uint32_t)((uint32_t)(uint8_t)tmp_4013d3_8_1 + (uint32_t)((uint32_t)((uint32_t)rax_2 * (uint32_t)32U) + (uint32_t)rax_2));
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_4013d7_6_0_1;
-                rdi_1 = rdi_2;
-            } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)rsi_1));
+            } while ((uint8_t)((uint64_t)rdi_1 != (uint64_t)rsi_1));
             {
                 return r2sleigh_carrier_u32((uint32_t)tmp_lane_4013d7_6_0_1);
             }
@@ -419,10 +403,9 @@ r2sleigh_word_u32 sdbm(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401406_0_1;
-    uint64_t rdi_2;
     uint32_t tmp_lane_40140d_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 11 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -432,11 +415,10 @@ r2sleigh_word_u32 sdbm(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdi_1 = arg0;
             do {
                 tmp_401406_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
                 tmp_lane_40140d_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)rax_2 * (uint64_t)0x1003fU) + (uint32_t)(uint8_t)tmp_401406_0_1);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_40140d_6_0_1;
-                rdi_1 = rdi_2;
-            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
+            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_1));
             {
                 return (uint32_t)tmp_lane_40140d_6_0_1;
             }
@@ -460,13 +442,12 @@ r2sleigh_word_u32 adler32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rdi_1;
     uint64_t rdx_2;
     uint8_t tmp_401440_0_1;
-    uint64_t rdi_2;
     uint64_t rdx_3;
     uint32_t tmp_lane_40145b_5_0_1;
     uint64_t rax_4;
     uint32_t tmp_lane_401478_5_0_1;
 
-    /* r2dec proof: no individual construct is marked; 65 source obligations: 57 rendered, 8 elided, 0 refused; 17 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 65 source obligations: 57 rendered, 8 elided, 0 refused; 16 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 1;
@@ -477,15 +458,14 @@ r2sleigh_word_u32 adler32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdx_2 = 1;
             do {
                 tmp_401440_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
                 rdx_3 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401440_0_1 + (uint32_t)rdx_2);
                 tmp_lane_40145b_5_0_1 = (uint32_t)((uint32_t)rdx_3 - (uint32_t)((uint64_t)(int32_t)((uint64_t)((uint64_t)rdx_3 * (uint64_t)0x80078071U) >> (uint64_t)(uint32_t)47U) * (uint64_t)0xfff1U));
                 rax_4 = (uint64_t)(uint32_t)((uint32_t)rax_2 + (uint32_t)tmp_lane_40145b_5_0_1);
                 tmp_lane_401478_5_0_1 = (uint32_t)((uint32_t)rax_4 - (uint32_t)((uint64_t)(int32_t)((uint64_t)((uint64_t)rax_4 * (uint64_t)0x80078071U) >> (uint64_t)(uint32_t)47U) * (uint64_t)0xfff1U));
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401478_5_0_1;
-                rdi_1 = rdi_2;
                 rdx_2 = (uint64_t)(uint32_t)tmp_lane_40145b_5_0_1;
-            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
+            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_1));
             {
                 return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401478_5_0_1 << (uint32_t)16U) | (uint32_t)tmp_lane_40145b_5_0_1);
             }
@@ -509,7 +489,6 @@ r2sleigh_word_u32 fletcher32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rdi_1;
     uint64_t rdx_2;
     uint16_t tmp_4014c0_0_1;
-    uint64_t rdi_2;
     uint64_t r8_1;
     uint64_t rdx_8;
     uint32_t tmp_lane_4014ed_5_0_1;
@@ -517,7 +496,7 @@ r2sleigh_word_u32 fletcher32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_8;
     uint32_t tmp_lane_401517_5_0_1;
 
-    /* r2dec proof: no individual construct is marked; 72 source obligations: 65 rendered, 7 elided, 0 refused; 19 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 72 source obligations: 65 rendered, 7 elided, 0 refused; 18 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return (uint32_t)0xffffffffU;
@@ -528,7 +507,7 @@ r2sleigh_word_u32 fletcher32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdx_2 = 0xffff;
             do {
                 tmp_4014c0_0_1 = r2sleigh_load_u16((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)2U);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)2U);
                 r8_1 = (uint64_t)(uint32_t)((uint64_t)rdx_2 + (uint64_t)(uint16_t)tmp_4014c0_0_1);
                 rdx_8 = (uint64_t)((uint64_t)((uint64_t)r8_1 + (uint64_t)((uint64_t)((uint64_t)r8_1 + (uint64_t)((uint64_t)r8_1 * (uint64_t)0x10000U)) * (uint64_t)0x8000U)) >> (uint64_t)(uint32_t)47U);
                 tmp_lane_4014ed_5_0_1 = (uint32_t)((uint32_t)((uint32_t)rdx_8 + (uint32_t)r8_1) - (uint32_t)((uint32_t)rdx_8 * (uint32_t)0x10000U));
@@ -536,9 +515,8 @@ r2sleigh_word_u32 fletcher32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
                 rax_8 = (uint64_t)((uint64_t)((uint64_t)rcx_4 + (uint64_t)((uint64_t)((uint64_t)rcx_4 + (uint64_t)((uint64_t)rcx_4 * (uint64_t)0x10000U)) * (uint64_t)0x8000U)) >> (uint64_t)(uint32_t)47U);
                 tmp_lane_401517_5_0_1 = (uint32_t)((uint32_t)((uint32_t)rax_8 + (uint32_t)rcx_4) - (uint32_t)((uint32_t)rax_8 * (uint32_t)0x10000U));
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401517_5_0_1;
-                rdi_1 = rdi_2;
                 rdx_2 = (uint64_t)(uint32_t)tmp_lane_4014ed_5_0_1;
-            } while ((uint8_t)((uint64_t)tmp_4014a9_8_1 != (uint64_t)rdi_2));
+            } while ((uint8_t)((uint64_t)tmp_4014a9_8_1 != (uint64_t)rdi_1));
             {
                 return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401517_5_0_1 << (uint32_t)16U) | (uint32_t)tmp_lane_4014ed_5_0_1);
             }
@@ -561,14 +539,11 @@ r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401548_0_1;
-    uint64_t rax_4;
     uint64_t rdx_3;
     uint32_t tmp_lane_401566_2_2_1;
-    uint64_t rax_8;
     uint32_t tmp_lane_401568_5_0_1;
-    uint64_t rdi_2;
 
-    /* r2dec proof: no individual construct is marked; 60 source obligations: 52 rendered, 8 elided, 0 refused; 19 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 60 source obligations: 52 rendered, 8 elided, 0 refused; 16 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -578,19 +553,16 @@ r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdi_1 = arg0;
             do {
                 tmp_401548_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rax_4 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401548_0_1 ^ (uint32_t)rax_2);
+                rax_2 = (uint64_t)(uint32_t)((uint32_t)(uint8_t)tmp_401548_0_1 ^ (uint32_t)rax_2);
                 rdx_3 = 8;
                 do {
-                    tmp_lane_401566_2_2_1 = (uint32_t)((uint32_t)((uint32_t)rax_4 >> (uint32_t)1U) ^ (uint32_t)((uint32_t)((uint32_t)0U - (uint32_t)((uint32_t)rax_4 & (uint32_t)1U)) & (uint32_t)0xedb88320U));
-                    rax_8 = (uint64_t)(uint32_t)tmp_lane_401566_2_2_1;
+                    tmp_lane_401566_2_2_1 = (uint32_t)((uint32_t)((uint32_t)rax_2 >> (uint32_t)1U) ^ (uint32_t)((uint32_t)((uint32_t)0U - (uint32_t)((uint32_t)rax_2 & (uint32_t)1U)) & (uint32_t)0xedb88320U));
+                    rax_2 = (uint64_t)(uint32_t)tmp_lane_401566_2_2_1;
                     tmp_lane_401568_5_0_1 = (uint32_t)((uint32_t)rdx_3 - (uint32_t)1U);
-                    rax_4 = rax_8;
                     rdx_3 = (uint64_t)(uint32_t)tmp_lane_401568_5_0_1;
                 } while ((uint8_t)((uint32_t)tmp_lane_401568_5_0_1 != (uint32_t)0U));
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                rax_2 = rax_8;
-                rdi_1 = rdi_2;
-            } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)rsi_1));
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+            } while ((uint8_t)((uint64_t)rdi_1 != (uint64_t)rsi_1));
             {
                 return (uint32_t)~(uint32_t)tmp_lane_401566_2_2_1;
             }
@@ -700,11 +672,9 @@ r2sleigh_result_u64 crc32_init(void)
     __uint128_t xmm0_41;
     uint32_t tmp_lane_40160f_3_1_1;
     __uint128_t xmm0_42;
-    __uint128_t xmm2_7;
     uint32_t tmp_lane_401618_5_0_1;
-    uint64_t rdx_3;
 
-    /* r2dec proof: 1 construct is marked below; 168 source obligations: 161 rendered, 5 elided, 0 refused, 2 residual; 102 statements rendered; no call reads the result (assuming closed-world); the result is unproven (Unread): 0 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 1 construct is marked below; 168 source obligations: 161 rendered, 5 elided, 0 refused, 2 residual; 100 statements rendered; no call reads the result (assuming closed-world); the result is unproven (Unread): 0 unproven-return carried, 1 unproven-return residual */
     {
         xmm3_1 = r2sleigh_load_u128((void*)(uint64_t)0x4022b0U);
         xmm5_1 = r2sleigh_load_u128((void*)(uint64_t)0x4022c0U);
@@ -799,16 +769,14 @@ r2sleigh_result_u64 crc32_init(void)
                 xmm0_41 = (__uint128_t)(((__uint128_t)xmm0_40 & (__uint128_t)((__uint128_t)0xffffffff00000000U << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_40160f_2_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 64U);
                 tmp_lane_40160f_3_1_1 = (uint32_t)((uint32_t)((uint32_t)tmp_lane_40160b_3_0_1 + (uint32_t)tmp_lane_40160b_3_1_1) << (uint32_t)5U);
                 xmm0_42 = (__uint128_t)(((__uint128_t)xmm0_41 & (__uint128_t)((__uint128_t)0xffffffffU << 64U | (__uint128_t)0xffffffffffffffffULL)) | ((__uint128_t)tmp_lane_40160f_3_1_1 & (__uint128_t)((__uint128_t)0U << 64U | (__uint128_t)0xffffffffU)) << 96U);
-                xmm2_7 = (__uint128_t)((__uint128_t)xmm2_6 ^ (__uint128_t)xmm0_42);
+                xmm2_2 = (__uint128_t)((__uint128_t)xmm2_6 ^ (__uint128_t)xmm0_42);
                 tmp_lane_401618_5_0_1 = (uint32_t)((uint32_t)rax_2 - (uint32_t)1U);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401618_5_0_1;
-                xmm2_2 = xmm2_7;
             } while ((uint8_t)((uint32_t)tmp_lane_401618_5_0_1 != (uint32_t)0U));
-            r2sleigh_store_u128((void*)rdx_2, (__uint128_t)xmm2_7);
-            rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)16U);
-            rdx_2 = rdx_3;
+            r2sleigh_store_u128((void*)rdx_2, (__uint128_t)xmm2_2);
+            rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)16U);
             xmm4_2 = xmm4_6;
-        } while ((uint8_t)((uint64_t)rdx_3 != (uint64_t)0x404440U));
+        } while ((uint8_t)((uint64_t)rdx_2 != (uint64_t)0x404440U));
         {
             return r2sleigh_residual_u64(1);
         }
@@ -832,11 +800,10 @@ r2sleigh_word_u32 crc32_table(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401648_0_1;
-    uint64_t rdi_2;
     uint32_t tmp_401657_10_1;
     uint32_t tmp_lane_401657_5_1_1;
 
-    /* r2dec proof: no individual construct is marked; 48 source obligations: 40 rendered, 8 elided, 0 refused; 13 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 48 source obligations: 40 rendered, 8 elided, 0 refused; 12 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -846,12 +813,11 @@ r2sleigh_word_u32 crc32_table(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdi_1 = arg0;
             do {
                 tmp_401648_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
                 tmp_401657_10_1 = r2sleigh_load_u32((void*)((uint64_t)((uint64_t)(uint8_t)((uint32_t)(uint8_t)tmp_401648_0_1 ^ (uint32_t)rax_2) * (uint64_t)4U) + (uint64_t)&crc_tab));
                 tmp_lane_401657_5_1_1 = (uint32_t)((uint32_t)((uint32_t)rax_2 >> (uint32_t)8U) ^ (uint32_t)tmp_401657_10_1);
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401657_5_1_1;
-                rdi_1 = rdi_2;
-            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
+            } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_1));
             {
                 return (uint32_t)~(uint32_t)tmp_lane_401657_5_1_1;
             }
@@ -873,15 +839,11 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
     uint64_t rcx_1;
     uint64_t rax_2;
     uint64_t tmp_401695_8_1;
-    uint64_t rcx_2;
     uint64_t rdx_2;
     uint32_t tmp_4016a0_0_1;
     uint32_t tmp_lane_4016a0_4_0_1;
-    uint64_t rdx_3;
     uint32_t tmp_lane_4016b3_2_2_1;
     uint64_t rax_7;
-    uint64_t rcx_3;
-    uint64_t rcx_4;
     uint64_t rdi_1;
     uint64_t rax_11;
     uint8_t tmp_401728_8_1;
@@ -890,36 +852,26 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
     uint64_t rdx_6;
     uint8_t tmp_4016e8_0_1;
     uint32_t tmp_lane_4016ed_3_0_1;
-    uint64_t rcx_6;
     uint32_t tmp_lane_4016fe_2_2_1;
     uint32_t tmp_lane_401708_3_0_1;
     uint32_t tmp_lane_401715_3_0_1;
 
-    /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 45 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 37 statements rendered; a call reads the result (assuming closed-world) */
     {
         rcx_1 = (uint64_t)(uint32_t)arg2;
         rax_2 = (uint64_t)((uint64_t)arg1 >> (uint64_t)(uint32_t)2U);
         if ((uint8_t)((uint64_t)rax_2 == (uint64_t)0U)) {
-            rcx_4 = rcx_1;
         } else {
             tmp_401695_8_1 = (uint64_t)((uint64_t)((uint64_t)rax_2 * (uint64_t)4U) + (uint64_t)arg0);
-            rcx_2 = rcx_1;
             rdx_2 = (uint64_t)arg0;
-            for (; ; ) {
+            do {
                 tmp_4016a0_0_1 = r2sleigh_load_u32((void*)rdx_2);
                 tmp_lane_4016a0_4_0_1 = (uint32_t)((uint64_t)(int32_t)tmp_4016a0_0_1 * (uint64_t)0xffffffffcc9e2d51U);
-                rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)4U);
-                tmp_lane_4016b3_2_2_1 = (uint32_t)((uint32_t)rcx_2 ^ (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4016a0_4_0_1, 15U) * (uint64_t)0x1b873593U));
+                rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)4U);
+                tmp_lane_4016b3_2_2_1 = (uint32_t)((uint32_t)rcx_1 ^ (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4016a0_4_0_1, 15U) * (uint64_t)0x1b873593U));
                 rax_7 = (uint64_t)(uint32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4016b3_2_2_1, 13U);
-                rcx_3 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rax_7 + (uint64_t)((uint64_t)rax_7 * (uint64_t)4U)) - (uint64_t)0x19ab949cU);
-                if ((uint8_t)((uint64_t)tmp_401695_8_1 != (uint64_t)rdx_3)) {
-                    rcx_2 = rcx_3;
-                    rdx_2 = rdx_3;
-                } else {
-                    rcx_4 = rcx_3;
-                    break;
-                }
-            }
+                rcx_1 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)rax_7 + (uint64_t)((uint64_t)rax_7 * (uint64_t)4U)) - (uint64_t)0x19ab949cU);
+            } while ((uint8_t)((uint64_t)tmp_401695_8_1 != (uint64_t)rdx_2));
         }
         {
             rdi_1 = (uint64_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x4) + (uint64_t)arg0);
@@ -944,8 +896,7 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
                 rdx_6 = 0;
                 break;
             default:
-                rcx_6 = rcx_4;
-                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_6 ^ (uint32_t)arg1);
+                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_1 ^ (uint32_t)arg1);
                 tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU);
                 tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U);
                 return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401715_3_0_1);
@@ -953,10 +904,10 @@ r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wor
             {
                 tmp_4016e8_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 tmp_lane_4016ed_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_4016e8_0_1 ^ (uint32_t)rdx_6) * (uint64_t)0xffffffffcc9e2d51U);
-                rcx_6 = (uint64_t)(uint32_t)((uint32_t)rcx_4 ^ (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4016ed_3_0_1, 15U) * (uint64_t)0x1b873593U));
+                rcx_1 = (uint64_t)(uint32_t)((uint32_t)rcx_1 ^ (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4016ed_3_0_1, 15U) * (uint64_t)0x1b873593U));
             }
             {
-                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_6 ^ (uint32_t)arg1);
+                tmp_lane_4016fe_2_2_1 = (uint32_t)((uint32_t)rcx_1 ^ (uint32_t)arg1);
                 tmp_lane_401708_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_4016fe_2_2_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_4016fe_2_2_1) * (uint64_t)0xffffffff85ebca6bU);
                 tmp_lane_401715_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401708_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401708_3_0_1) * (uint64_t)0xffffffffc2b2ae35U);
                 return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401715_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401715_3_0_1);
@@ -985,7 +936,6 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
     uint64_t rax_2;
     uint64_t rdx_2;
     uint32_t tmp_401788_0_1;
-    uint64_t rdx_3;
     uint32_t tmp_lane_401792_6_0_1;
     uint32_t tmp_lane_401798_3_0_1;
     uint32_t tmp_40179f_8_1;
@@ -1002,24 +952,14 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
     uint64_t rdx_12;
     uint64_t tmp_40181c_0_1;
     uint64_t rcx_14;
-    uint64_t rdx_13;
     uint32_t tmp_401830_8_1;
-    uint64_t rcx_15;
     uint32_t tmp_lane_40183b_6_0_1;
-    uint64_t rdx_14;
-    uint64_t rdi_4;
-    uint64_t rdx_15;
-    uint64_t rdi_5;
-    uint64_t rdx_16;
     uint8_t tmp_40185f_0_1;
-    uint64_t rdi_6;
     uint32_t tmp_lane_40186c_6_0_1;
-    uint64_t rdx_17;
-    uint64_t rdx_18;
     uint32_t tmp_lane_401884_3_0_1;
     uint32_t tmp_lane_401891_3_0_1;
 
-    /* r2dec proof: no individual construct is marked; 227 source obligations: 220 rendered, 7 elided, 0 refused; 65 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 227 source obligations: 220 rendered, 7 elided, 0 refused; 50 statements rendered; a call reads the result (assuming closed-world) */
     {
         rdx_1 = (uint64_t)(uint32_t)arg2;
         rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
@@ -1035,24 +975,23 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
             rdx_2 = arg0;
             do {
                 tmp_401788_0_1 = r2sleigh_load_u32((void*)rdx_2);
-                rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)16U);
+                rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)16U);
                 tmp_lane_401792_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_401788_0_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)r11_2);
                 tmp_lane_401798_3_0_1 = (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_401792_6_0_1, 13U) * (uint64_t)0xffffffff9e3779b1U);
-                tmp_40179f_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_3 - (uint64_t)12U));
+                tmp_40179f_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_2 - (uint64_t)12U));
                 tmp_lane_4017a6_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_40179f_8_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)rax_2);
-                tmp_4017a8_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_3 - (uint64_t)8U));
+                tmp_4017a8_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_2 - (uint64_t)8U));
                 tmp_lane_4017b2_3_0_1 = (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4017a6_6_0_1, 13U) * (uint64_t)0xffffffff9e3779b1U);
                 tmp_lane_4017b8_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_4017a8_8_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)r9_2);
                 tmp_lane_4017be_3_0_1 = (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4017b8_6_0_1, 13U) * (uint64_t)0xffffffff9e3779b1U);
-                tmp_4017c5_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_3 - (uint64_t)4U));
+                tmp_4017c5_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rdx_2 - (uint64_t)4U));
                 tmp_lane_4017cc_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_4017c5_8_1 * (uint64_t)0xffffffff85ebca77U) + (uint32_t)r10_2);
                 tmp_lane_4017d2_3_0_1 = (uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4017cc_6_0_1, 13U) * (uint64_t)0xffffffff9e3779b1U);
                 r10_2 = (uint64_t)(uint32_t)tmp_lane_4017d2_3_0_1;
                 r11_2 = (uint64_t)(uint32_t)tmp_lane_401798_3_0_1;
                 r9_2 = (uint64_t)(uint32_t)tmp_lane_4017be_3_0_1;
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_4017b2_3_0_1;
-                rdx_2 = rdx_3;
-            } while ((uint8_t)((uint64_t)rdx_3 <= (uint64_t)tmp_40176f_0_1));
+            } while ((uint8_t)((uint64_t)rdx_2 <= (uint64_t)tmp_40176f_0_1));
             {
                 rdi_2 = (uint64_t)((uint64_t)arg0 + (uint64_t)((uint8_t)((uint64_t)((uint64_t)arg0 + (uint64_t)1U) <= (uint64_t)((uint64_t)rsi_1 - (uint64_t)15U)) ? (uint64_t)((uint64_t)((uint64_t)((uint64_t)arg1 - (uint64_t)16U) & (uint64_t)-0x10) + (uint64_t)16U) : (uint64_t)16U));
                 rdx_11 = (uint64_t)(uint32_t)((uint32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4017d2_3_0_1, 18U) + (uint32_t)((uint32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4017be_3_0_1, 12U) + (uint32_t)((uint64_t)(uint32_t)((uint32_t)((uint32_t)tmp_lane_401798_3_0_1 << (uint32_t)1U) | (uint32_t)(uint8_t)((int32_t)tmp_lane_401798_3_0_1 < (int32_t)0U)) + (uint64_t)(uint32_t)r2sleigh_rotl32((uint32_t)tmp_lane_4017b2_3_0_1, 7U))));
@@ -1062,46 +1001,30 @@ r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
             rdx_12 = (uint64_t)(uint32_t)((uint32_t)rdx_11 + (uint32_t)arg1);
             tmp_40181c_0_1 = (uint64_t)((uint64_t)rdi_2 + (uint64_t)4U);
             if ((uint8_t)((uint64_t)rsi_1 < (uint64_t)tmp_40181c_0_1)) {
-                rdi_4 = rdi_2;
-                rdx_15 = rdx_12;
             } else {
                 rcx_14 = tmp_40181c_0_1;
-                rdx_13 = rdx_12;
                 do {
                     tmp_401830_8_1 = r2sleigh_load_u32((void*)(uint64_t)((uint64_t)rcx_14 - (uint64_t)4U));
-                    rcx_15 = (uint64_t)((uint64_t)rcx_14 + (uint64_t)4U);
-                    tmp_lane_40183b_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_401830_8_1 * (uint64_t)0xffffffffc2b2ae3dU) + (uint32_t)rdx_13);
-                    rdx_14 = (uint64_t)(uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_40183b_6_0_1, 17U) * (uint64_t)0x27d4eb2fU);
-                    rcx_14 = rcx_15;
-                    rdx_13 = rdx_14;
-                } while ((uint8_t)((uint64_t)rcx_15 <= (uint64_t)rsi_1));
+                    rcx_14 = (uint64_t)((uint64_t)rcx_14 + (uint64_t)4U);
+                    tmp_lane_40183b_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(int32_t)tmp_401830_8_1 * (uint64_t)0xffffffffc2b2ae3dU) + (uint32_t)rdx_12);
+                    rdx_12 = (uint64_t)(uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_40183b_6_0_1, 17U) * (uint64_t)0x27d4eb2fU);
+                } while ((uint8_t)((uint64_t)rcx_14 <= (uint64_t)rsi_1));
                 {
-                    rdi_4 = (uint64_t)((uint64_t)tmp_40181c_0_1 + (uint64_t)((uint64_t)((uint64_t)((uint64_t)rsi_1 - (uint64_t)rdi_2) - (uint64_t)4U) & (uint64_t)-0x4));
-                    rdx_15 = rdx_14;
+                    rdi_2 = (uint64_t)((uint64_t)tmp_40181c_0_1 + (uint64_t)((uint64_t)((uint64_t)((uint64_t)rsi_1 - (uint64_t)rdi_2) - (uint64_t)4U) & (uint64_t)-0x4));
                 }
             }
             {
-                if ((uint8_t)((uint64_t)rsi_1 <= (uint64_t)rdi_4)) {
-                    rdx_18 = rdx_15;
+                if ((uint8_t)((uint64_t)rsi_1 <= (uint64_t)rdi_2)) {
                 } else {
-                    rdi_5 = rdi_4;
-                    rdx_16 = rdx_15;
-                    for (; ; ) {
-                        tmp_40185f_0_1 = r2sleigh_load_u8((void*)rdi_5);
-                        rdi_6 = (uint64_t)((uint64_t)rdi_5 + (uint64_t)1U);
-                        tmp_lane_40186c_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(uint8_t)tmp_40185f_0_1 * (uint64_t)0x165667b1U) + (uint32_t)rdx_16);
-                        rdx_17 = (uint64_t)(uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_40186c_6_0_1, 11U) * (uint64_t)0xffffffff9e3779b1U);
-                        if ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_6)) {
-                            rdi_5 = rdi_6;
-                            rdx_16 = rdx_17;
-                        } else {
-                            rdx_18 = rdx_17;
-                            break;
-                        }
-                    }
+                    do {
+                        tmp_40185f_0_1 = r2sleigh_load_u8((void*)rdi_2);
+                        rdi_2 = (uint64_t)((uint64_t)rdi_2 + (uint64_t)1U);
+                        tmp_lane_40186c_6_0_1 = (uint32_t)((uint32_t)((uint64_t)(uint8_t)tmp_40185f_0_1 * (uint64_t)0x165667b1U) + (uint32_t)rdx_12);
+                        rdx_12 = (uint64_t)(uint32_t)((uint64_t)(int32_t)r2sleigh_rotl32((uint32_t)tmp_lane_40186c_6_0_1, 11U) * (uint64_t)0xffffffff9e3779b1U);
+                    } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
                 }
                 {
-                    tmp_lane_401884_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)rdx_18 >> (uint32_t)15U) ^ (uint32_t)rdx_18) * (uint64_t)0xffffffff85ebca77U);
+                    tmp_lane_401884_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)rdx_12 >> (uint32_t)15U) ^ (uint32_t)rdx_12) * (uint64_t)0xffffffff85ebca77U);
                     tmp_lane_401891_3_0_1 = (uint32_t)((uint64_t)(int32_t)((uint32_t)((uint32_t)tmp_lane_401884_3_0_1 >> (uint32_t)13U) ^ (uint32_t)tmp_lane_401884_3_0_1) * (uint64_t)0xffffffffc2b2ae3dU);
                     return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401891_3_0_1 >> (uint32_t)16U) ^ (uint32_t)tmp_lane_401891_3_0_1);
                 }
@@ -1127,14 +1050,9 @@ r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wo
     uint64_t rcx_1;
     uint64_t r10_3;
     uint64_t rsi_4;
-    uint64_t r11_3;
-    uint64_t rax_3;
-    uint64_t rcx_2;
     uint64_t rdi_1;
-    uint64_t rdx_2;
     uint64_t tmp_401908_0_1;
     uint64_t rax_4;
-    uint64_t rdi_2;
     uint64_t r11_5;
     uint64_t rcx_3;
     uint64_t rdx_3;
@@ -1149,29 +1067,15 @@ r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wo
     uint64_t rcx_9;
     uint64_t rdx_7;
     uint64_t rax_9;
-    uint64_t r11_11;
-    uint64_t rcx_11;
-    uint64_t rdx_8;
-    uint64_t rax_10;
-    uint64_t r11_12;
-    uint64_t rax_11;
-    uint64_t rcx_12;
-    uint64_t rdx_9;
     uint32_t tmp_lane_40197a_2_1_1;
     uint8_t tmp_401990_8_1;
     uint64_t rsi_6;
     uint8_t tmp_40199c_8_1;
-    uint64_t rsi_8;
     uint8_t tmp_4019a8_8_1;
-    uint64_t rsi_10;
     uint8_t tmp_4019b4_8_1;
-    uint64_t rsi_12;
     uint8_t tmp_4019c0_8_1;
-    uint64_t rsi_14;
     uint8_t tmp_4019cc_8_1;
-    uint64_t rsi_16;
     uint8_t tmp_4019d8_0_1;
-    uint64_t rsi_18;
     uint64_t rcx_13;
     uint64_t tmp_4019e2_8_1;
     uint64_t rdx_10;
@@ -1221,7 +1125,7 @@ r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wo
     uint64_t rax_36;
     uint64_t rdx_27;
 
-    /* r2dec proof: no individual construct is marked; 323 source obligations: 312 rendered, 11 elided, 0 refused; 135 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 323 source obligations: 312 rendered, 11 elided, 0 refused; 110 statements rendered; a call reads the result (assuming closed-world); the result is unproven (PointerWide): 1 unproven-return carried */
     {
         rax_2 = (uint64_t)((uint64_t)arg2 ^ (uint64_t)0x736f6d6570736575U);
         rdx_1 = (uint64_t)((uint64_t)arg2 ^ (uint64_t)0x6c7967656e657261U);
@@ -1230,23 +1134,15 @@ r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wo
         r10_3 = (uint64_t)((uint64_t)((uint64_t)arg1 & (uint64_t)-0x8) + (uint64_t)arg0);
         rsi_4 = (uint64_t)((uint64_t)arg1 << (uint64_t)(uint32_t)56U);
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)r10_3)) {
-            r11_12 = r11_2;
-            rax_11 = rax_2;
-            rcx_12 = rcx_1;
-            rdx_9 = rdx_1;
         } else {
-            r11_3 = r11_2;
-            rax_3 = rax_2;
-            rcx_2 = rcx_1;
             rdi_1 = (uint64_t)arg0;
-            rdx_2 = rdx_1;
-            for (; ; ) {
+            do {
                 tmp_401908_0_1 = r2sleigh_load_u64((void*)rdi_1);
-                rax_4 = (uint64_t)((uint64_t)rax_3 + (uint64_t)r11_3);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)8U);
-                r11_5 = (uint64_t)((uint64_t)rax_4 ^ (uint64_t)r2sleigh_rotl64((uint64_t)r11_3, 13U));
-                rcx_3 = (uint64_t)((uint64_t)rcx_2 ^ (uint64_t)tmp_401908_0_1);
-                rdx_3 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)rcx_3);
+                rax_4 = (uint64_t)((uint64_t)rax_2 + (uint64_t)r11_2);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)8U);
+                r11_5 = (uint64_t)((uint64_t)rax_4 ^ (uint64_t)r2sleigh_rotl64((uint64_t)r11_2, 13U));
+                rcx_3 = (uint64_t)((uint64_t)rcx_1 ^ (uint64_t)tmp_401908_0_1);
+                rdx_3 = (uint64_t)((uint64_t)rdx_1 + (uint64_t)rcx_3);
                 rcx_5 = (uint64_t)((uint64_t)rdx_3 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_3, 16U));
                 rdx_4 = (uint64_t)((uint64_t)rdx_3 + (uint64_t)r11_5);
                 rax_6 = (uint64_t)((uint64_t)rcx_5 + (uint64_t)r2sleigh_rotl64((uint64_t)rax_4, 32U));
@@ -1258,24 +1154,11 @@ r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wo
                 rcx_9 = (uint64_t)((uint64_t)rdx_6 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_7, 16U));
                 rdx_7 = (uint64_t)((uint64_t)rdx_6 + (uint64_t)r11_9);
                 rax_9 = (uint64_t)((uint64_t)rcx_9 + (uint64_t)r2sleigh_rotl64((uint64_t)rax_7, 32U));
-                r11_11 = (uint64_t)((uint64_t)rdx_7 ^ (uint64_t)r2sleigh_rotl64((uint64_t)r11_9, 17U));
-                rcx_11 = (uint64_t)((uint64_t)rax_9 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_9, 21U));
-                rdx_8 = r2sleigh_rotl64((uint64_t)rdx_7, 32U);
-                rax_10 = (uint64_t)((uint64_t)rax_9 ^ (uint64_t)tmp_401908_0_1);
-                if ((uint8_t)((uint64_t)r10_3 != (uint64_t)rdi_2)) {
-                    r11_3 = r11_11;
-                    rax_3 = rax_10;
-                    rcx_2 = rcx_11;
-                    rdi_1 = rdi_2;
-                    rdx_2 = rdx_8;
-                } else {
-                    r11_12 = r11_11;
-                    rax_11 = rax_10;
-                    rcx_12 = rcx_11;
-                    rdx_9 = rdx_8;
-                    break;
-                }
-            }
+                r11_2 = (uint64_t)((uint64_t)rdx_7 ^ (uint64_t)r2sleigh_rotl64((uint64_t)r11_9, 17U));
+                rcx_1 = (uint64_t)((uint64_t)rax_9 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_9, 21U));
+                rdx_1 = r2sleigh_rotl64((uint64_t)rdx_7, 32U);
+                rax_2 = (uint64_t)((uint64_t)rax_9 ^ (uint64_t)tmp_401908_0_1);
+            } while ((uint8_t)((uint64_t)r10_3 != (uint64_t)rdi_1));
         }
         {
             tmp_lane_40197a_2_1_1 = (uint32_t)((uint32_t)arg1 & (uint32_t)7U);
@@ -1290,59 +1173,53 @@ r2sleigh_result_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_wo
                 rsi_6 = rsi_4;
                 break;
             case 5:
-                rsi_8 = rsi_4;
                 goto L2;
             case 4:
-                rsi_10 = rsi_4;
                 goto L3;
             case 3:
-                rsi_12 = rsi_4;
                 goto L4;
             case 2:
-                rsi_14 = rsi_4;
                 goto L5;
             case 1:
-                rsi_16 = rsi_4;
                 goto L6;
             case 0:
-                rsi_18 = rsi_4;
                 goto L7;
             }
             {
                 tmp_40199c_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)5U * 1U));
-                rsi_8 = (uint64_t)((uint64_t)rsi_6 | (uint64_t)((uint64_t)(uint8_t)tmp_40199c_8_1 << (uint64_t)(uint32_t)40U));
+                rsi_4 = (uint64_t)((uint64_t)rsi_6 | (uint64_t)((uint64_t)(uint8_t)tmp_40199c_8_1 << (uint64_t)(uint32_t)40U));
             }
             {
 L2: ;
                 tmp_4019a8_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)4U * 1U));
-                rsi_10 = (uint64_t)((uint64_t)rsi_8 | (uint64_t)((uint64_t)(uint8_t)tmp_4019a8_8_1 << (uint64_t)(uint32_t)32U));
+                rsi_4 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)((uint64_t)(uint8_t)tmp_4019a8_8_1 << (uint64_t)(uint32_t)32U));
             }
             {
 L3: ;
                 tmp_4019b4_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)3U * 1U));
-                rsi_12 = (uint64_t)((uint64_t)rsi_10 | (uint64_t)((uint64_t)(uint8_t)tmp_4019b4_8_1 << (uint64_t)(uint32_t)24U));
+                rsi_4 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)((uint64_t)(uint8_t)tmp_4019b4_8_1 << (uint64_t)(uint32_t)24U));
             }
             {
 L4: ;
                 tmp_4019c0_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)2U * 1U));
-                rsi_14 = (uint64_t)((uint64_t)rsi_12 | (uint64_t)((uint64_t)(uint8_t)tmp_4019c0_8_1 << (uint64_t)(uint32_t)16U));
+                rsi_4 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)((uint64_t)(uint8_t)tmp_4019c0_8_1 << (uint64_t)(uint32_t)16U));
             }
             {
 L5: ;
                 tmp_4019cc_8_1 = r2sleigh_load_u8((void*)((uint64_t)r10_3 + (uint64_t)1U * 1U));
-                rsi_16 = (uint64_t)((uint64_t)rsi_14 | (uint64_t)((uint64_t)(uint8_t)tmp_4019cc_8_1 << (uint64_t)(uint32_t)8U));
+                rsi_4 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)((uint64_t)(uint8_t)tmp_4019cc_8_1 << (uint64_t)(uint32_t)8U));
             }
             {
 L6: ;
                 tmp_4019d8_0_1 = r2sleigh_load_u8((void*)r10_3);
-                rsi_18 = (uint64_t)((uint64_t)rsi_16 | (uint64_t)(uint8_t)tmp_4019d8_0_1);
+                rsi_4 = (uint64_t)((uint64_t)rsi_4 | (uint64_t)(uint8_t)tmp_4019d8_0_1);
             }
             {
 L7: ;
-                rcx_13 = (uint64_t)((uint64_t)rcx_12 ^ (uint64_t)rsi_18);
-                tmp_4019e2_8_1 = (uint64_t)((uint64_t)rax_11 + (uint64_t)r11_12);
-                rdx_10 = (uint64_t)((uint64_t)rdx_9 + (uint64_t)rcx_13);
-                r11_14 = (uint64_t)((uint64_t)tmp_4019e2_8_1 ^ (uint64_t)r2sleigh_rotl64((uint64_t)r11_12, 13U));
+                rcx_13 = (uint64_t)((uint64_t)rcx_1 ^ (uint64_t)rsi_4);
+                tmp_4019e2_8_1 = (uint64_t)((uint64_t)rax_2 + (uint64_t)r11_2);
+                rdx_10 = (uint64_t)((uint64_t)rdx_1 + (uint64_t)rcx_13);
+                r11_14 = (uint64_t)((uint64_t)tmp_4019e2_8_1 ^ (uint64_t)r2sleigh_rotl64((uint64_t)r11_2, 13U));
                 rcx_15 = (uint64_t)((uint64_t)rdx_10 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_13, 16U));
                 rdx_11 = (uint64_t)((uint64_t)rdx_10 + (uint64_t)r11_14);
                 tmp_401a01_8_1 = (uint64_t)((uint64_t)rcx_15 + (uint64_t)r2sleigh_rotl64((uint64_t)tmp_4019e2_8_1, 32U));
@@ -1357,7 +1234,7 @@ L7: ;
                 rax_20 = (uint64_t)((uint64_t)rdx_14 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rax_18, 17U));
                 rdx_15 = r2sleigh_rotl64((uint64_t)rdx_14, 32U);
                 rcx_21 = (uint64_t)((uint64_t)rdi_20 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rcx_19, 21U));
-                rsi_20 = (uint64_t)((uint64_t)((uint64_t)rsi_18 ^ (uint64_t)rdi_20) + (uint64_t)rax_20);
+                rsi_20 = (uint64_t)((uint64_t)((uint64_t)rsi_4 ^ (uint64_t)rdi_20) + (uint64_t)rax_20);
                 tmp_lane_401a50_2_1_1 = (uint8_t)((uint32_t)(uint8_t)rdx_15 ^ (uint32_t)(uint8_t)255U);
                 rdx_16 = (uint64_t)(((uint64_t)rdx_15 & (uint64_t)-0x100) | ((uint64_t)tmp_lane_401a50_2_1_1 & (uint64_t)255U) << 0U);
                 rax_22 = (uint64_t)((uint64_t)rsi_20 ^ (uint64_t)r2sleigh_rotl64((uint64_t)rax_20, 13U));
@@ -1410,11 +1287,10 @@ r2sleigh_result_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401b20_0_1;
-    uint64_t rdi_2;
     uint8_t tmp_401b29_8_1;
     uint32_t tmp_lane_401b29_2_0_1;
 
-    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 12 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world); the result is unproven (WidthBetween): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return r2sleigh_carrier_u32(0);
@@ -1424,12 +1300,11 @@ r2sleigh_result_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
             rdi_1 = arg0;
             do {
                 tmp_401b20_0_1 = r2sleigh_load_u8((void*)rdi_1);
-                rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
+                rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
                 tmp_401b29_8_1 = r2sleigh_load_u8((void*)((uint64_t)(uint8_t)((uint32_t)(uint8_t)rax_2 ^ (uint32_t)tmp_401b20_0_1) + (uint64_t)&pearson_tab));
                 tmp_lane_401b29_2_0_1 = (uint32_t)(uint8_t)tmp_401b29_8_1;
                 rax_2 = (uint64_t)(uint32_t)tmp_lane_401b29_2_0_1;
-                rdi_1 = rdi_2;
-            } while ((uint8_t)((uint64_t)rdi_2 != (uint64_t)rsi_1));
+            } while ((uint8_t)((uint64_t)rdi_1 != (uint64_t)rsi_1));
             {
                 return r2sleigh_carrier_u32((uint32_t)tmp_lane_401b29_2_0_1);
             }

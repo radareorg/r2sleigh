@@ -29,12 +29,17 @@ pub struct FunctionInfo {
     /// the parameters (D37).
     pub floor: Option<r2source::SourceArityFloor>,
     pub locals: Vec<Local>,
+    /// The frame array the rendering declares its members in, where one holds a listed local (D633).
+    pub frame: Option<FrameArray>,
     /// What a definition of it declares it returns, and what that rests on: the decided type, or
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
     /// (none where C has no carrier that wide). Absent where r2types refuses a type.
     pub returns: Option<Fact<Option<CTypeLike>>>,
     /// Where the result is unproven: the convention's carrier and why (doc/adr-scratch-result.md).
     pub unproven: Option<UnprovenResult>,
+    /// What a proven result's closed decision takes for granted (`result_premises`, D592); empty
+    /// where it rests on nothing or is unproven (D566).
+    pub result_premises: Vec<r2source::Premise>,
     /// Why control never comes back from it, and what that takes for granted: a proof, or a bound
     /// such as a walk that reached no return (D380). `None` where nothing says it never does.
     pub noreturn: Option<r2source::Never>,
@@ -90,6 +95,30 @@ pub struct Local {
     pub offset: i64,
     /// The type it is declared at, as C spells it.
     pub ty: String,
+    /// What the frame model proves became of it, where it proves one (D633).
+    pub fate: Option<Fate>,
+}
+
+/// What became of a frame slot, as `afv` states it beside the slot (D633).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fate {
+    /// Promotion took it out of memory; `reads` is the parameter whose value it holds throughout.
+    Promoted { reads: Option<String> },
+    /// The save of a preserved register's entry value.
+    Save { storage: r2ssa::CanonicalStorageId },
+    /// The home of a parameter, named as the rendering names it, at its byte in the frame array
+    /// where `afv` lists the array.
+    Home { parameter: String, at: Option<u32> },
+    /// A member of the frame array at this byte.
+    InFrame { at: u32 },
+}
+
+/// The one byte array the rendering declares the frame's members in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameArray {
+    /// The entry-stack offset of its byte 0.
+    pub offset: i64,
+    pub bytes: u32,
 }
 
 impl Argument {
@@ -109,10 +138,12 @@ impl FunctionInfo {
     ) -> Self {
         let facts = sealed.report();
         let certificates = artifact.certificates();
+        let arguments = arguments(artifact, sealed);
         let entities = facts
             .render()
             .map(|render| render.certified_entities.values().collect::<Vec<_>>())
             .unwrap_or_default();
+        let (locals, frame) = locals(artifact, sealed, &entities);
         Self {
             entry,
             blocks: blocks(artifact),
@@ -123,7 +154,7 @@ impl FunctionInfo {
                 .collect(),
             convention: (artifact.machine_context().function_interface())
                 .map(r2source::SourceFunctionInterface::convention),
-            arguments: arguments(artifact, sealed),
+            arguments,
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),
             floor: (artifact.machine_context().function_interface())
@@ -139,7 +170,14 @@ impl FunctionInfo {
                         _ => None,
                     },
                 }),
-            locals: locals(artifact, sealed, &entities),
+            result_premises: match sealed.return_type() {
+                Some(fact) if !fact.is_unproven() => {
+                    (artifact.function().result_premises().iter().copied()).collect()
+                }
+                _ => Vec::new(),
+            },
+            locals,
+            frame,
             noreturn,
             refused: None,
         }
@@ -204,8 +242,10 @@ impl FunctionInfo {
             variadic: false,
             floor: None,
             locals: Vec::new(),
+            frame: None,
             returns: None,
             unproven: None,
+            result_premises: Vec::new(),
             noreturn,
             refused: Some(refusal),
         }
@@ -339,58 +379,71 @@ fn returns(
     Some(Fact::new(declared, fact.basis(artifact)?))
 }
 
-/// Every declarable stack object, and every frame slot promotion took out of memory: the frame
-/// model `afv` lists for either pipeline.
+/// Every declarable stack object and every promoted frame slot, each with its fate: the frame model
+/// `afv` lists for either pipeline; and the frame array, where a listed member is in it.
 fn locals(
     artifact: &r2ssa::SsaArtifact,
     sealed: &SourceOwnedFunctionFacts,
     entities: &[&CertifiedEntity],
-) -> Vec<Local> {
+) -> (Vec<Local>, Option<FrameArray>) {
+    let layout = r2ssa::FrameLayout::of(artifact);
+    let fates = artifact.slot_fates(layout.as_ref());
     let objects = entities
         .iter()
-        .filter_map(|entity| object(artifact, sealed, entity))
+        .filter_map(|entity| object(artifact, sealed, entity, &fates))
         .collect::<Vec<_>>();
-    // A frame-management slot is no local: a slot promotion holds the value a return reads as its
-    // return address in is that address's save (r2ssa's return boundary names the value).
-    let graph = artifact.graph();
-    let mut returns_to = r2ssa::dense::IdSet::new(graph.values.len());
-    for boundary in artifact.facts().boundaries.returns.values() {
-        if let Some(address) = &boundary.return_address {
-            returns_to.insert(address.value);
-        }
-    }
-    let saves_return_address = |value: r2ssa::ValueId| {
-        matches!(
-            graph.def_inst(value).and_then(|def| graph.inst(def)),
-            Some(r2ssa::GraphInst {
-                payload: r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { src, .. }),
-                ..
-            }) if returns_to.contains(*src)
-        )
-    };
     let held = objects
         .iter()
         .map(|local| local.offset)
         .collect::<BTreeSet<_>>();
-    let promoted = graph
-        .values
-        .iter()
-        .filter(|value| !saves_return_address(value.id))
-        .filter_map(|value| value.canonical_storage)
-        .filter_map(|storage| Some((r2ssa::promoted_slot_offset(&storage)?, storage.size)))
-        .filter(|(offset, _)| !artifact.caller_frame_offset(*offset))
-        .filter(|(offset, _)| !held.contains(offset))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|(offset, bytes)| Local {
-            name: r2ssa::frame_object_name(offset),
+    // A parameter's name is the one the rendering reads; another value's name is r2dec's own.
+    let named = |index: usize| sealed.report().parameter_name(index);
+    let reads = |value: r2ssa::ValueId| {
+        let index = artifact.decompile_prep_facts().formal_parameter_of(value)?;
+        Some(named(index))
+    };
+    let promoted = (artifact.promoted_slots().into_iter())
+        .filter(|slot| !held.contains(&slot.offset))
+        .map(|slot| Local {
+            name: r2ssa::frame_object_name(slot.offset),
             base: StackBase::StackPointer,
-            offset,
-            ty: CTypeLike::machine_bits(bytes * 8).to_string(),
+            offset: slot.offset,
+            ty: CTypeLike::machine_bits(slot.size * 8).to_string(),
+            fate: Some(fate(slot.fate, &reads, &named)),
         });
     let mut locals = objects.into_iter().chain(promoted).collect::<Vec<_>>();
     locals.sort_by_key(|local| local.offset);
-    locals
+    let member = (locals.iter()).any(|local| matches!(local.fate, Some(Fate::InFrame { .. })));
+    let frame = layout.filter(|_| member).map(|layout| FrameArray {
+        offset: layout.start(),
+        bytes: layout.bytes(),
+    });
+    // A home's byte in the array is stated only where the array is listed.
+    for local in locals.iter_mut().filter(|_| frame.is_none()) {
+        if let Some(Fate::Home { at, .. }) = &mut local.fate {
+            *at = None;
+        }
+    }
+    (locals, frame)
+}
+
+/// A fate r2ssa proves, as `afv` states it.
+fn fate(
+    fate: r2ssa::SlotFate,
+    reads: &impl Fn(r2ssa::ValueId) -> Option<String>,
+    named: &impl Fn(usize) -> String,
+) -> Fate {
+    match fate {
+        r2ssa::SlotFate::Promoted { holds } => Fate::Promoted {
+            reads: holds.and_then(reads),
+        },
+        r2ssa::SlotFate::Save { storage } => Fate::Save { storage },
+        r2ssa::SlotFate::Home { parameter, index } => Fate::Home {
+            parameter: named(parameter as usize),
+            at: index,
+        },
+        r2ssa::SlotFate::Member { index } => Fate::InFrame { at: index },
+    }
 }
 
 /// A stack object the rendering can declare, typed as declared or by its width.
@@ -398,6 +451,7 @@ fn object(
     artifact: &r2ssa::SsaArtifact,
     sealed: &SourceOwnedFunctionFacts,
     entity: &CertifiedEntity,
+    fates: &r2ssa::dense::IdVec<r2ssa::ObjectId, Option<r2ssa::SlotFate>>,
 ) -> Option<Local> {
     let CertifiedEntity::StackSlot {
         object,
@@ -420,5 +474,10 @@ fn object(
         base: *base,
         offset: *offset,
         ty: ty.clone().unwrap_or(storage).to_string(),
+        fate: (fates.get(*object).copied().flatten()).map(|found| {
+            fate(found, &|_| None, &|index| {
+                sealed.report().parameter_name(index)
+            })
+        }),
     })
 }

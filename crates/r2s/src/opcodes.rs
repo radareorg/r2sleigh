@@ -9,7 +9,7 @@ use r2engine::query::{Completion, Instruction, Line, Listing, Register, Stop};
 /// `ao [n]`: each instruction's facts, one `key: value` line each.
 pub(crate) fn text(session: &mut Session, argument: &str) -> Result<String, String> {
     let mut out = String::new();
-    for one in read(session, argument, true)? {
+    for one in read(session, argument, Grade::Function)? {
         out.push_str(&format!("address: {:#x}\n", one.address));
         out.push_str(&format!("opcode: {}\n", one.opcode));
         out.push_str(&format!("disasm: {}\n", one.disasm));
@@ -67,10 +67,9 @@ fn listed(key: &str, names: &[String]) -> String {
     }
 }
 
-/// `aoj [n]`: the same facts, one object per instruction.
+/// `aoj [n]`: the same facts, one object per instruction, with the notes `pd` prints on its line.
 pub(crate) fn json(session: &mut Session, argument: &str) -> Result<String, String> {
-    // No notes: they read the holder's analysis, and `aoj` stays instruction-cheap (D582's stop).
-    let rows = read(session, argument, false)?
+    let rows = read(session, argument, Grade::Instruction)?
         .into_iter()
         .map(|one| {
             let mut row = serde_json::json!({
@@ -91,6 +90,8 @@ pub(crate) fn json(session: &mut Session, argument: &str) -> Result<String, Stri
             if let Some(il) = one.il {
                 row["il"] = il.into();
             }
+            let notes = one.notes.into_iter().map(|(_, note)| note);
+            row["notes"] = serde_json::to_value(notes.collect::<Vec<_>>()).unwrap_or_default();
             row
         })
         .collect::<Vec<_>>();
@@ -172,13 +173,21 @@ struct Spelled {
     registers: Result<(Vec<String>, Vec<String>), String>,
     /// Its operations as `pdil` prints them, absent where it did not lift.
     il: Option<Vec<String>>,
-    /// What `pdf` notes on the line, from the listing of the function holding it: each one's
-    /// painted `M text` and its typed fields.
+    /// The line's notes at the verb's grade: each one's painted `M text` and its typed fields.
     notes: Vec<(String, NoteJson)>,
 }
 
-/// `n` instructions from the seek, radare2's default of one; with `notes`, each line's `pdf` notes.
-fn read(session: &mut Session, argument: &str, notes: bool) -> Result<Vec<Spelled>, String> {
+/// Where a verb reads an instruction's notes (doc/adr-display.md, "Round 16 as built").
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grade {
+    /// The line's own annotations, as `pd` prints them: no function is read (`aoj`).
+    Instruction,
+    /// The holder's `pdf` listing of the line (`ao`).
+    Function,
+}
+
+/// `n` instructions from the seek, radare2's default of one, each with its notes at `grade`.
+fn read(session: &mut Session, argument: &str, grade: Grade) -> Result<Vec<Spelled>, String> {
     let count = parse_count(argument, 1)?;
     let answer = session.program.instructions(Listing {
         start: session.addr,
@@ -190,24 +199,27 @@ fn read(session: &mut Session, argument: &str, notes: bool) -> Result<Vec<Spelle
         return Err(format!("nothing mapped at {at:#x}"));
     }
     let names = session.program.names();
-    let held = match notes {
-        true => holder_lines(session, session.addr),
-        false => Vec::new(),
+    let held = match grade {
+        Grade::Function => holder_lines(session, session.addr),
+        Grade::Instruction => Vec::new(),
     };
     let next = crate::listing::next_calls(&held);
+    // The run's own next calls, as `pd n` reads them for a line no holder lists.
+    let run = answer
+        .value
+        .iter()
+        .map(|one| one.line.clone())
+        .collect::<Vec<_>>();
+    let run_next = crate::listing::next_calls(&run);
     let mut spelled_all = Vec::new();
-    for one in &answer.value {
+    for (one, run_next) in answer.value.iter().zip(run_next) {
         let at = held.binary_search_by_key(&one.line.address, |line| line.address);
         let (line, next_call) = match at {
             Ok(at) => (&held[at], next[at]),
-            Err(_) => (&one.line, None),
-        };
-        let notes = match notes {
-            true => explained_notes(session, line, next_call),
-            false => Vec::new(),
+            Err(_) => (&one.line, run_next),
         };
         spelled_all.push(Spelled {
-            notes,
+            notes: explained_notes(session, line, next_call),
             ..spelled(one, &names)
         });
     }

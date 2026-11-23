@@ -167,7 +167,8 @@ golden harness.
   removed.
 - Plain mode uses the 160 grid with no cut (with D565, D566).
 - Marks and the header stay; `pdfj` and `aoj` carry each note's `Confidence`
-  and refusal as typed fields (D582).
+  and refusal as typed fields (D582). `aoj` carries its line's notes as `pd`
+  prints them, `pdfj` the function's (Round 16 as built: explain, verbs).
 
 The differential stays green:
 
@@ -416,10 +417,8 @@ tests whether a setter's call is the next call line.
   sites, so no second map of callers exists; `xrefs_of` answers in
   `O(log F + k)`. `FunctionListing.header` holds the calls, the tails,
   `unresolved` and the `FunctionInfo` read off the seal the `ret` notes read.
-  `unresolved` is `None`: a trace counts neither the indirect calls it walks
-  past nor which dispatch stops a table later resolved, so the header prints
-  `; ? xrefs may be short: indirect transfers unread` on every function
-  (default-deny). r2s spells radare2's grammar (`disasm.c:1723-1734`,
+  `unresolved` was `None` in round 15 (the `? ... unread` line on every
+  function); round 16 counts it (below, D619). r2s spells radare2's grammar (`disasm.c:1723-1734`,
   `:1849-1866`): `CALL XREF`/`CALL XREFS` per caller, `CODE XREF` for a tail
   branch, `; XREFS(N)` past 5. `┌ realsz: name (args);` takes the proven
   parameters by name and `?` where the interface states a floor (`?` alone
@@ -455,3 +454,104 @@ tests whether a setter's call is the next call line.
   hashes has 57 lines over 149 cells, branchy 12, shapes 41; bash `main`
   reaches 2,594 with the proof line and 310 without); a rail never widens a
   line, so with the column a line is at most 11 cells past its plain width.
+
+## Round 16 as built: header facts (rd16-cost-index)
+
+- D619: each walk keeps its opaque calls (an `IndirectCall` no fold names,
+  a sealed slot's too, and a link-register call); `Survey.unresolved` sums
+  them with the `IndirectBranch` stops the table rounds left, pads included,
+  and is `None` where a body is unwalked. The header prints
+  `; ? xrefs may be short: N indirect transfers unresolved` (`1 indirect
+  transfer`) and drops the line only on `Some(0)`; `axt`'s coverage line
+  reads the same count.
+- D622: `FunctionListing.gaps` states each gap and whether a walked body
+  holds any of its bytes (`Holders::holds_any`). Unheld: `;-- ? N bytes in
+  no block: A..B`, the unknown mark; held: `;-- N bytes not in this
+  function: A..B`.
+- D566: `FunctionInfo.result_premises` is a proven result's closed
+  premises (`result_premises()`). `afi` prints `result: proven ; * rests on
+  closed-world`; the header prints `│ ; * result rests on closed-world`,
+  both from `function.rs` `premised`. `pdd`'s laid-out proof line reads
+  `notes` without it: the response's premises already state it there.
+
+## Round 16 as built: explain, verbs
+
+- D582, three grades, three verbs. `aoj` is the instruction record scripts
+  loop over: it reads no function. Its `notes` are the instruction's own
+  line's annotations, what `pd` prints there (the run's next call included,
+  as `pd n` reads it), each a `NoteJson` as `pdfj` writes one. `ao` keeps the
+  holder's notes from the first function holding the address, and `pdfj` is
+  the function-grade JSON. So `ao` and `aoj` may differ on one address: `ao`
+  reads the function, `aoj` the line. Cost: `O(1)` per instruction past the
+  decode; D490's `aoj` sample reads no function.
+- D575, verbs radare2 6.2.4 spells. `aaa` runs `aa`'s handler: r2s's `aa`
+  already states everything it can. `ij` and `izj` serialise typed structs
+  (r2engine `json.rs`: `InfoJson`, `StringJson`) under radare2's keys, and `i`
+  and `iz` print the same structs, so the text and the JSON read one fact.
+  `s-` and `s+` step a seek history on `Session` (a `Vec<u64>` and a cursor,
+  `O(1)` amortised; every `s` pushes, `@` does not, as `r_io_sundo_push`
+  does). A letter more than one verb starts with (`a?`, `i?`, `p?`, `s?`,
+  `w?`) prints its group in table order; a multi-letter `pd?` keeps its
+  usage. An unknown verb names its nearest verb by Levenshtein distance, at
+  most 2 and less than the verb's length, ties by table order
+  (`O(|VERBS| x len^2)`).
+
+- D624, the call line. A line that starts with `'` is radare2's call: one
+  command read whole, so a name holding `~`, `;`, `@` or `>` (every
+  destructor, every template) is typed as a listing prints it:
+  `'s LIEF::corrupted::~corrupted()`. A seek the line cut at an operator
+  that names nothing says so and shows the form.
+
+## Round 16 as built: rails
+
+- D621: the proof line's refusal clauses are one typed value. r2dec's `ProofClauses` holds the
+  refused data object types by name and each unassigned cause with its names; the proof line is
+  spelled from it and `Emission::proof_clauses` carries it, so `pdd` under `asm.rails` prints
+  `! 55 data object types refused; ! 16 never assigned` (bash `main`) from the same struct, and
+  `pddj` carries it as `clauses`.
+- D620: r2dec records each point a line may break at (after a binary operator, after an
+  argument comma, before `?` and `:`) as `BreakPoint { line, offset, depth }`, `depth` the
+  parentheses open there. No rendering holds them: `RenderedFunction::break_points` writes the
+  held tree again on a terminal and keeps them only where its bytes equal the definition's
+  (held in `Emission` they cost the 50-function session +133 MB). On a terminal `rails::laid` wraps a line past 160 cells: greedy, each
+  cut the fitting point of lowest depth, then latest offset (Oppen, TOPLAS 1980), `O(line length)`.
+  A continuation line is the blank column, the statement's rails and 4 cells; deleting each
+  inserted newline and prefix gives the plain bytes. Plain `pdd` and a pipe never wrap.
+- Left over 160 cells: a run with no break point wider than the room. On the pinned hashes,
+  branchy and shapes (57, 12 and 41 lines over 160 at 768391be5) 2, 2 and 3 remain, each an
+  `r2dec gap` comment (a comment holds no break point). bash `main`: 91 to 48, 43 gap comments
+  and 4 cast chains at depth 18 or more, where the room is under 60 cells; one more line is
+  161 cells only by the space its cut leaves.
+
+## Round 17 as built: `afv` fates (rd17-stubs-frame-pads)
+
+- D633: `afv` keeps radare2's row and states the slot's fate after ` ; `, which `diff_r2.py`
+  (`our_frame`) and the test helpers strip before comparing. The fate is painted in the comment
+  role (`\x1b[90m` at 16 colours); plain mode and a pipe stay ANSI-free. branchy_gcc_x64_O0:
+
+```
+before  var uint32_t stack_m12 @ entry.sp-0xc
+after   var uint32_t stack_m12 @ entry.sp-0xc ; promoted, pdd reads arg0
+before  var uint64_t stack_m8 @ entry.sp-0x8
+after   var uint64_t stack_m8 @ entry.sp-0x8 ; save of rbp
+before  var uint64_t stack_m552 @ entry.sp-0x228
+after   var uint8_t frame[568] @ entry.sp-0x238
+after   var uint64_t stack_m552 @ entry.sp-0x228 ; in frame at +0x10
+colour  var uint32_t stack_m12 @ entry.sp-0xc\x1b[90m ; promoted, pdd reads arg0\x1b[0m
+```
+
+## Round 17: rails, comments (rd17-render-rest)
+
+- D620's remainder: a comment is one token to C's lexer and a line break inside it is white space
+  (C17 6.4.9), so every space of a statement comment's text and of an `r2dec gap` comment is a
+  break point, written after the space at the statement's depth. A cast's closing parenthesis is a
+  break point too, its `BreakPoint::cast` its place in a run of casts. `rails::wrapped` ranks a
+  point by (after a cast, depth plus that place): any operator or space fits before any cast, so a
+  cast cut appears only where no other point fits, and no line that wrapped at an operator moves.
+- The 4 cast chains of bash `main` (0x1e6f2, 0x1e7cf, 0x1e7dc, 0x1ea28), read by hand: 7, 7, 10
+  and 7 casts; no adjacent pair folds under C17 6.3.1.3 (each is a sign-extending widening, a
+  narrowing then a widening, or an integer to pointer conversion). The casts to the operand's own
+  type (3, 3, 1, 3; C17 6.3p2) shorten only 0x1e7cf's run under the room, so the wrap is the fix.
+- Laid lines over 160 cells: hashes 2 to 0, branchy 2 to 0, shapes 3 to 0, bash `main` 48 to 0.
+  Plain `pdd` bytes unchanged; break points stay computed on demand; the laid text strips back to
+  the plain bytes on the three pinned fixtures and bash `main`.

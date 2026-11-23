@@ -57,3 +57,108 @@ EXPECT=<<EOF
 /usr/lib/libSystem.B.dylib
 EOF
 RUN
+
+# D577: an ELF whose section table `object` refuses opens from its header and program headers,
+# states the refusal and infers nothing a section header would state.
+NAME=a section table past the file's end
+FILE=tests/fixtures/crackme_shoff_past_end
+CMDS=i~refused; iS; afl
+EXPECT=<<EOF
+sections refused: Invalid ELF section header offset/size/alignment
+nth paddr        size vaddr       vsize perm flags type        name
+-------------------------------------------------------------------
+0x00400530    1     24 fcn.00400530
+0x00400558    1      6 sym.imp.printf
+0x00400568    1      6 sym.imp.puts
+0x00400578    1      6 sym.imp.__libc_start_main
+0x00400588    1      6 sym.imp.fgets
+0x00400598    1      6 sym.imp.strcmp
+0x004005a8    1      6 sym.imp.fflush
+0x004005c0    1     41 entry0
+0x004005ec    3     23 fcn.004005ec
+0x00400610    6    100 fcn.00400610
+0x00400680    4     34 fcn.00400680
+0x004006a4    4    127 fcn.004006a4
+0x00400730    1      2 fcn.00400730
+0x00400740    4    137 fcn.00400740
+0x004007d0    4     54 fcn.004007d0
+0x00400808    1     14 fcn.00400808
+EOF
+RUN
+
+NAME=a section header entry size that is not the format's
+FILE=tests/fixtures/crackme_shentsize
+CMDS=i~refused; ie
+EXPECT=<<EOF
+sections refused: Invalid ELF section header entry size
+paddr      vaddr      phaddr     vhaddr     type
+------------------------------------------------
+0x000005c0 0x004005c0 0x00000018 0x00400018 program
+EOF
+RUN
+
+NAME=an e_machine this build has no decoder for is named with its value
+FILE=tests/fixtures/crackme_unknown_machine
+CMDS=i
+EXPECT_ERR=<<EOF
+r2s: this build decodes no code for e_machine 0x653e
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=a header entry no code backs is listed and walked from nowhere
+FILE=tests/fixtures/crackme_entry_in_data
+CMDS=ie; i~^entry; afl~0x0040052f
+EXPECT=<<EOF
+paddr      vaddr      phaddr     vhaddr     type
+------------------------------------------------
+0x0000052f 0x0040052f 0x00000018 0x00400018 program
+entry    0x0040052f (no code)
+EOF
+RUN
+
+NAME=a raw blob at 0 states no function
+FILE=tests/fixtures/raw_x64_start.bin
+ARGS=-a x86 -b 64
+CMDS=afl; ie; pd 3 @ 0; i~format
+EXPECT=<<EOF
+paddr      vaddr      phaddr     vhaddr     type
+------------------------------------------------
+            0x00000000      31ed           xor ebp, ebp
+            0x00000002      4989d1         mov r9, rdx
+            0x00000005      5e             pop rsi
+format   any
+EOF
+RUN
+
+NAME=a raw blob of an architecture this build has no raw form for
+FILE=tests/fixtures/raw_x64_start.bin
+ARGS=-a mips -b 32
+CMDS=i
+EXPECT_ERR=<<EOF
+r2s: this build decodes no raw mips code at 32 bits
+EOF
+EXPECT=<<EOF
+EOF
+RUN
+
+NAME=e_entry 0 states no entry
+FILE=tests/fixtures/x86_64_common_code.o
+CMDS=ie; i~^entry
+EXPECT=<<EOF
+paddr      vaddr      phaddr     vhaddr     type
+------------------------------------------------
+entry    none
+EOF
+RUN
+
+# D636: x86-64 lazy stubs no section states are unnamed, so `__libc_start_main`'s handed `main` is
+# unread; radare2 and `nm` of the undamaged crackme place `main` at 0x4006a4.
+NAME=a refused section table still reaches main through __libc_start_main
+FILE=tests/fixtures/crackme_shoff_past_end
+CMDS=afl~0x004006a4
+EXPECT=<<EOF
+0x004006a4    4    127 fcn.004006a4
+EOF
+RUN

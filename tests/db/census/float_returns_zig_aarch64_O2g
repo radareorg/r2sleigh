@@ -166,7 +166,6 @@ double loop_sum(const double* v, int32_t n)
     uint64_t x9_2;
     uint64_t x10_2;
     uint64_t x11_2;
-    struct r2sleigh_bits_256 z0_5;
     uint64_t tmp_1010598_0_1;
     __uint128_t tmp_lane_1010598_1_0_1;
     uint64_t tmp_1010598_8_1;
@@ -181,12 +180,8 @@ double loop_sum(const double* v, int32_t n)
     struct r2sleigh_bits_256 z0_18;
     struct r2sleigh_bits_256 z0_19;
     struct r2sleigh_bits_256 z0_20;
-    struct r2sleigh_bits_256 z0_21;
-    uint64_t x9_3;
-    struct r2sleigh_bits_256 z0_22;
     uint64_t x10_5;
     uint64_t x8_3;
-    struct r2sleigh_bits_256 z0_23;
     uint64_t tmp_lane_10105d0_2_0_1;
     uint64_t tmp_10105d4_8_1;
     uint64_t tmp_lane_10105d8_0_0_1;
@@ -194,10 +189,8 @@ double loop_sum(const double* v, int32_t n)
     struct r2sleigh_bits_256 z0_24;
     struct r2sleigh_bits_256 z0_25;
     struct r2sleigh_bits_256 z0_26;
-    struct r2sleigh_bits_256 z0_27;
-    struct r2sleigh_bits_256 z0_28;
 
-    /* r2dec proof: no individual construct is marked; 91 source obligations: 91 rendered, 0 elided, 0 refused; 57 statements rendered */
+    /* r2dec proof: no individual construct is marked; 91 source obligations: 91 rendered, 0 elided, 0 refused; 48 statements rendered */
     {
         if ((uint8_t)((int32_t)n < (int32_t)1U)) {
             return (double)r2sleigh_float_from_bits_64((uint64_t)0U);
@@ -211,7 +204,6 @@ double loop_sum(const double* v, int32_t n)
                 x9_2 = (uint64_t)((uint64_t)x8_1 & (uint64_t)0x7ffffffcU);
                 x10_2 = (uint64_t)((uint64_t)v + (uint64_t)16U);
                 x11_2 = (uint64_t)((uint64_t)x8_1 & (uint64_t)0x7ffffffcU);
-                z0_5 = z0_4;
                 do {
                     tmp_1010598_0_1 = (uint64_t)((uint64_t)x10_2 - (uint64_t)16U);
                     tmp_lane_1010598_1_0_1 = r2sleigh_load_u128((void*)tmp_1010598_0_1);
@@ -219,7 +211,7 @@ double loop_sum(const double* v, int32_t n)
                     tmp_lane_1010598_5_0_1 = r2sleigh_load_u128((void*)tmp_1010598_8_1);
                     tmp_101059c_8_1 = (uint64_t)((uint64_t)x11_2 - (uint64_t)4U);
                     tmp_lane_10105a4_0_0_1 = (uint64_t)((__uint128_t)tmp_lane_1010598_1_0_1 >> 64U);
-                    tmp_lane_10105a8_0_0_1 = r2sleigh_bits_extract_256_64(z0_5, 0U);
+                    tmp_lane_10105a8_0_0_1 = r2sleigh_bits_extract_256_64(z0_4, 0U);
                     tmp_lane_10105a8_0_1_1 = (uint64_t)tmp_lane_1010598_1_0_1;
                     tmp_lane_10105ac_0_0_1 = (uint64_t)((__uint128_t)tmp_lane_1010598_5_0_1 >> 64U);
                     tmp_lane_10105b4_0_1_1 = (uint64_t)tmp_lane_1010598_5_0_1;
@@ -227,49 +219,41 @@ double loop_sum(const double* v, int32_t n)
                     z0_18 = r2sleigh_bits_insert_256_64(r2sleigh_bits_zero_extend_64_256((uint64_t)0U), (uint64_t)r2sleigh_float_to_bits_64(tmp_lane_10105b8_0_2_1), 0U);
                     z0_19 = r2sleigh_bits_insert_256_64(z0_18, (uint64_t)0U, 64U);
                     z0_20 = r2sleigh_bits_insert_256_64(z0_19, (uint64_t)0U, 128U);
-                    z0_21 = r2sleigh_bits_insert_256_64(z0_20, (uint64_t)0U, 192U);
+                    z0_4 = r2sleigh_bits_insert_256_64(z0_20, (uint64_t)0U, 192U);
                     x10_2 = (uint64_t)((uint64_t)x10_2 + (uint64_t)32U);
                     x11_2 = tmp_101059c_8_1;
-                    z0_5 = z0_21;
                 } while ((uint8_t)((uint64_t)tmp_101059c_8_1 != (uint64_t)0U));
                 {
                     if ((uint8_t)((uint64_t)x9_2 == (uint64_t)x8_1)) {
-                        z0_28 = z0_21;
-                        return (double)r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64(z0_28, 0U));
+                        return (double)r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64(z0_4, 0U));
                     } else {
-                        x9_3 = x9_2;
-                        z0_22 = z0_21;
                     }
                 }
             } else {
-                x9_3 = 0;
-                z0_22 = z0_4;
+                x9_2 = 0;
             }
             {
-                x10_5 = (uint64_t)((uint64_t)v + (uint64_t)((uint64_t)x9_3 * (uint64_t)8U));
-                x8_3 = (uint64_t)((uint64_t)x8_1 - (uint64_t)x9_3);
-                z0_23 = z0_22;
+                x10_5 = (uint64_t)((uint64_t)v + (uint64_t)((uint64_t)x9_2 * (uint64_t)8U));
+                x8_3 = (uint64_t)((uint64_t)x8_1 - (uint64_t)x9_2);
                 for (; ; ) {
                     tmp_lane_10105d0_2_0_1 = r2sleigh_load_u64((void*)x10_5);
                     tmp_10105d4_8_1 = (uint64_t)((uint64_t)x8_3 - (uint64_t)1U);
-                    tmp_lane_10105d8_0_0_1 = r2sleigh_bits_extract_256_64(z0_23, 0U);
+                    tmp_lane_10105d8_0_0_1 = r2sleigh_bits_extract_256_64(z0_4, 0U);
                     tmp_lane_10105d8_0_2_1 = r2sleigh_float_from_bits_64(tmp_lane_10105d8_0_0_1) + r2sleigh_float_from_bits_64(tmp_lane_10105d0_2_0_1);
                     z0_24 = r2sleigh_bits_insert_256_64(r2sleigh_bits_zero_extend_64_256((uint64_t)0U), (uint64_t)r2sleigh_float_to_bits_64(tmp_lane_10105d8_0_2_1), 0U);
                     z0_25 = r2sleigh_bits_insert_256_64(z0_24, (uint64_t)0U, 64U);
                     z0_26 = r2sleigh_bits_insert_256_64(z0_25, (uint64_t)0U, 128U);
-                    z0_27 = r2sleigh_bits_insert_256_64(z0_26, (uint64_t)0U, 192U);
+                    z0_4 = r2sleigh_bits_insert_256_64(z0_26, (uint64_t)0U, 192U);
                     if ((uint8_t)((uint64_t)tmp_10105d4_8_1 != (uint64_t)0U)) {
                         x10_5 = (uint64_t)((uint64_t)x10_5 + (uint64_t)8U);
                         x8_3 = tmp_10105d4_8_1;
-                        z0_23 = z0_27;
                     } else {
-                        z0_28 = z0_27;
                         break;
                     }
                 }
             }
             {
-                return (double)r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64(z0_28, 0U));
+                return (double)r2sleigh_float_from_bits_64(r2sleigh_bits_extract_256_64(z0_4, 0U));
             }
         }
     }

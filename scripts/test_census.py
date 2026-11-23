@@ -407,6 +407,24 @@ class TimedCases(unittest.TestCase):
                 census.time_cases(args)
 
 
+class SessionHeld(unittest.TestCase):
+    """D588: a session's peak RSS stays within 1.3x one cold request's, both of the head's build."""
+
+    session, cold, _ = census.SESSION_HELD
+
+    def test_the_d573_session_fails(self) -> None:
+        over = census.session_held({self.session: 3897, self.cold: 422})
+        self.assertIsNotNone(over)
+        self.assertIn("9.23x", over)
+
+    def test_a_session_within_the_bound_passes(self) -> None:
+        self.assertIsNone(census.session_held({self.session: 548, self.cold: 422}))
+
+    def test_both_cases_are_timed(self) -> None:
+        labels = {f"{name} {label[0] if label else command}" for name, command, *label in census.TIMED}
+        self.assertLessEqual({self.session, self.cold}, labels)
+
+
 class StatsRatchet(unittest.TestCase):
     """D403: the engine's work counts are held exactly, a rise and a fall alike."""
 
@@ -424,6 +442,18 @@ class StatsRatchet(unittest.TestCase):
     def test_the_baseline_reads_back_what_the_printer_writes(self) -> None:
         text = "r2s: stats: sealed.computed 12\nr2s: stats: frames_built 7\n"
         self.assertEqual(census.STAT.findall(text), [("sealed.computed", "12"), ("frames_built", "7")])
+
+
+class CarrierLocals(unittest.TestCase):
+    def test_only_locals_at_no_stack_offset_count(self):
+        record = {"variables": [
+            {"name": "arg0", "kind": "param", "location": "arg:0"},
+            {"name": "rdi_1", "kind": "local", "location": "carrier"},
+            {"name": "local_8", "kind": "local", "location": "stack:-0x8"},
+            {"name": "rdi_2", "kind": "local", "location": "carrier"},
+        ]}
+        self.assertEqual(census.carrier_count(record), 2)
+        self.assertEqual(census.carrier_count({"cause": "timeout"}), 0)
 
 
 if __name__ == "__main__":
