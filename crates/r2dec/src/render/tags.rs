@@ -70,18 +70,9 @@ impl Tags {
             let defined = (stated.iter())
                 .filter(|(name, _)| candidates.contains_key(*name))
                 .filter_map(|(name, definition)| {
-                    let members = spelled_members(&definition.members, &candidates, &declarable)
-                        .or_else(|| {
-                            // An inferred record's member is a byte copy: a pointer to a tag the
-                            // unit cannot name is a pointer still, `void *` (D643).
-                            let inferred = inferred.contains_key(name);
-                            let members = definition.members.iter().map(|(ty, member)| {
-                                let ty = spelled_member(ty, &candidates, &declarable)
-                                    .or_else(|| inferred.then(|| void_pointer(ty)).flatten())?;
-                                Some((ty, member.clone()))
-                            });
-                            members.collect()
-                        })?;
+                    let spelled = (&candidates, &declarable);
+                    let inferred = inferred.contains_key(name);
+                    let members = spelled_members(&definition.members, spelled, inferred)?;
                     Some((name.clone(), (definition.is_union, members)))
                 })
                 .collect::<BTreeMap<_, _>>();
@@ -237,14 +228,19 @@ impl Tags {
     }
 }
 
-/// Each of `members` as the definition spells it, where every one is spelled.
+/// Each of `members` as the definition spells it, where every one is spelled. An inferred record's
+/// member is a byte copy: a pointer to a tag the unit cannot name stays a pointer, `void *` (D643).
 fn spelled_members(
     members: &[(CType, String)],
-    defined: &BTreeMap<String, bool>,
-    declarable: &BTreeMap<String, bool>,
+    (defined, declarable): (&BTreeMap<String, bool>, &BTreeMap<String, bool>),
+    inferred: bool,
 ) -> Option<Vec<(CType, String)>> {
+    let spelled = |ty: &CType| {
+        spelled_member(ty, defined, declarable)
+            .or_else(|| inferred.then(|| void_pointer(ty)).flatten())
+    };
     (members.iter())
-        .map(|(ty, member)| Some((spelled_member(ty, defined, declarable)?, member.clone())))
+        .map(|(ty, member)| Some((spelled(ty)?, member.clone())))
         .collect()
 }
 

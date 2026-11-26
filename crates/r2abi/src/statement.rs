@@ -862,9 +862,8 @@ pub enum WriteKind {
     /// A word the psABI reserves for the dynamic loader's link map or lazy
     /// resolver (x86-64 psABI 5.2, AAELF64 GOT[1..2]): never an address of this image.
     Reserved,
-    /// Another image's object copied here (`R_*_COPY`): its relocated bytes, which name this image
-    /// only through definitions it exports, never a function only this image names. `symbol` is
-    /// the object's, where its symbol states a size: the write's width is then that size (D653).
+    /// Another image's object copied here (`R_*_COPY`), naming this image only through its exports;
+    /// `symbol` is the object's where its symbol states a size, the write's width (D653).
     Copy { symbol: Option<String> },
     /// Written, with no value the container states: a whole table a psABI
     /// reserves, a signed pointer, or a format this reader does not decode.

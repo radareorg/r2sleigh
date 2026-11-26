@@ -22,7 +22,7 @@ use crate::model::{Signedness, Type, TypeArena, TypeId};
 
 use crate::signedness::ScalarSignednessEvidence;
 use crate::solver::IncrementalSolver;
-use r2ssa::dense::IdMap;
+use r2ssa::dense::{Condensation, Csr, DenseId, IdMap, Node};
 
 /// A node of the recovered type graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -73,61 +73,49 @@ pub struct RecordClass {
     pub recursive: bool,
 }
 
-/// Which nodes lie on a cycle of `edges` (Tarjan, iterative): `O(N + E)`.
-fn on_cycles(edges: &[Vec<usize>]) -> Vec<bool> {
-    let n = edges.len();
-    let (mut index, mut low, mut on_stack) = (vec![usize::MAX; n], vec![0; n], vec![false; n]);
-    let (mut stack, mut cyclic, mut next) = (Vec::new(), vec![false; n], 0);
-    for start in 0..n {
-        if index[start] != usize::MAX {
-            continue;
-        }
-        let mut frames = vec![(start, 0usize)];
-        index[start] = next;
-        low[start] = next;
-        next += 1;
-        stack.push(start);
-        on_stack[start] = true;
-        while let Some(&mut (node, ref mut child)) = frames.last_mut() {
-            if let Some(&to) = edges[node].get(*child) {
-                *child += 1;
-                if to == node {
-                    cyclic[node] = true;
-                }
-                if index[to] == usize::MAX {
-                    index[to] = next;
-                    low[to] = next;
-                    next += 1;
-                    stack.push(to);
-                    on_stack[to] = true;
-                    frames.push((to, 0));
-                } else if on_stack[to] {
-                    low[node] = low[node].min(index[to]);
-                }
-                continue;
-            }
-            frames.pop();
-            if let Some(&(parent, _)) = frames.last() {
-                low[parent] = low[parent].min(low[node]);
-            }
-            if low[node] == index[node] {
-                let mut members = Vec::new();
-                while let Some(member) = stack.pop() {
-                    on_stack[member] = false;
-                    members.push(member);
-                    if member == node {
-                        break;
-                    }
-                }
-                if members.len() > 1 {
-                    for member in members {
-                        cyclic[member] = true;
-                    }
-                }
+/// Where `field_based`'s walk stands at one access position.
+#[derive(Clone, Copy, PartialEq)]
+enum Based {
+    Unseen,
+    Open,
+    Done(bool),
+}
+
+impl Based {
+    /// Answer `start` and each position it is loaded through, on an explicit stack: a position is
+    /// pushed only while unseen, so each is answered once.
+    fn settle(
+        start: usize,
+        places: &[&r2ssa::AccessPlace],
+        structured: &r2ssa::StructuredDataflowFacts,
+        state: &mut [Based],
+    ) {
+        let mut stack = vec![start];
+        while let Some(&at) = stack.last() {
+            let place = places[at];
+            let below = match place.base {
+                r2ssa::PlaceBase::Loaded(load) => structured.position(load),
+                _ => None,
+            };
+            let next = Based::next(place, below.map(|below| (below, state[below])));
+            state[at] = next.map_or(Based::Open, Based::Done);
+            match next {
+                Ok(_) => _ = stack.pop(),
+                Err(below) => stack.push(below),
             }
         }
     }
-    cyclic
+
+    /// A place's answer, or the position below it still to answer; a cycle of loads reads `false`.
+    fn next(place: &r2ssa::AccessPlace, below: Option<(usize, Based)>) -> Result<bool, usize> {
+        let field = matches!(place.place, r2ssa::Place::Field { .. });
+        match (place.base, below) {
+            (r2ssa::PlaceBase::Parameter(_), _) => Ok(field),
+            (r2ssa::PlaceBase::Loaded(_), Some((_, Based::Done(based)))) => Ok(field && based),
+            (r2ssa::PlaceBase::Loaded(_), Some((below, Based::Unseen))) => Err(below),
+            _ => Ok(false),
+        }
+    }
 }
 
 /// The declared pointers met so far at one entry value; a conflict stays one (D262).
@@ -1001,50 +989,18 @@ impl<'a> EvidenceBuilder<'a> {
         }
     }
 
-    /// Whether each access, by position, is a field of a parameter's record or of a pointer
-    /// loaded from such a field. Each position is resolved once on an explicit stack; one on a
-    /// cycle of loads reads `false`. `O(A)`.
+    /// Whether each access, by position, is a field of a parameter's record or of a pointer loaded
+    /// from one; each is resolved once on an explicit stack, a cycle of loads `false`. `O(A)`.
     fn field_based(&self) -> Vec<bool> {
-        #[derive(Clone, Copy, PartialEq)]
-        enum State {
-            Unseen,
-            Open,
-            Done(bool),
-        }
         let source = self.source;
         let structured = &source.facts().structured;
         let places = source.certificates().places.iter().collect::<Vec<_>>();
-        let mut state = vec![State::Unseen; places.len()];
+        let mut state = vec![Based::Unseen; places.len()];
         for start in 0..places.len() {
-            let mut stack = vec![start];
-            while let Some(&at) = stack.last() {
-                let place = places[at];
-                let field = matches!(place.place, r2ssa::Place::Field { .. });
-                let below = match place.base {
-                    r2ssa::PlaceBase::Loaded(load) => structured.position(load),
-                    _ => None,
-                };
-                let answer = match (place.base, below.map(|below| (below, state[below]))) {
-                    (r2ssa::PlaceBase::Parameter(_), _) => Some(field),
-                    (r2ssa::PlaceBase::Loaded(_), Some((_, State::Done(based)))) => {
-                        Some(field && based)
-                    }
-                    (r2ssa::PlaceBase::Loaded(_), Some((_, State::Open))) => Some(false),
-                    (r2ssa::PlaceBase::Loaded(_), Some((below, State::Unseen))) => {
-                        state[at] = State::Open;
-                        stack.push(below);
-                        None
-                    }
-                    _ => Some(false),
-                };
-                if let Some(answer) = answer {
-                    state[at] = State::Done(answer);
-                    stack.pop();
-                }
-            }
+            Based::settle(start, &places, structured, &mut state);
         }
         (state.into_iter())
-            .map(|state| state == State::Done(true))
+            .map(|state| state == Based::Done(true))
             .collect()
     }
 
@@ -1132,16 +1088,21 @@ impl<'a> EvidenceBuilder<'a> {
         let index = (roots.iter().enumerate())
             .map(|(at, (class, ..))| (*class, at))
             .collect::<BTreeMap<_, _>>();
-        let edges = (roots.iter())
-            .map(|(class, ..)| {
-                let pointees = self.solver.pointees_of_class(*class);
-                (pointees.into_iter())
-                    .filter_map(|pointee| index.get(&pointee).copied())
-                    .collect()
+        // A class is recursive where its pointee edges close a cycle: r2ssa's condensation, O(N + E).
+        let index = &index;
+        let edges = (roots.iter().enumerate()).flat_map(|(at, (class, ..))| {
+            let pointees = self.solver.pointees_of_class(*class).into_iter();
+            pointees.filter_map(move |pointee| {
+                Some((
+                    Node::from_index(at),
+                    Node::from_index(*index.get(&pointee)?),
+                ))
             })
-            .collect::<Vec<Vec<usize>>>();
-        let cyclic = on_cycles(&edges);
-        for ((_, node, name), recursive) in roots.iter().zip(cyclic) {
+        });
+        let edges = Csr::from_pairs(roots.len(), edges.collect::<Vec<_>>());
+        let cycles = Condensation::of(&edges, []);
+        for (at, (_, node, name)) in roots.iter().enumerate() {
+            let recursive = cycles.is_cyclic(cycles.component(Node::from_index(at)));
             let accesses = (self.solver.record(node).into_iter())
                 .map(|(offset, width, value)| {
                     let value = value.and_then(|node| match node {

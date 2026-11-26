@@ -911,25 +911,13 @@ impl<'a> Values<'a> {
         }
         // One pass over the places: each access through a pointing parameter or a loaded pointer
         // whose record the unit defines, `O(A log M)`.
-        let structured = &self.artifact.facts().structured;
         let places = self.artifact.certificates().places.iter();
         let cells = places.filter_map(|place| {
             let r2ssa::Place::Field { offset, width } = place.place else {
                 return None;
             };
-            let named = |record: &r2types::ParameterRecord| {
-                let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
-                if (record
-                    .refused
-                    .binary_search_by_key(&(offset, width), refused))
-                .is_ok()
-                {
-                    return None;
-                }
-                let definition = records.definitions.get(&record.tag)?;
-                let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
-                Some(name.clone())
-            };
+            let named =
+                |record: &r2types::ParameterRecord| member_name(records, record, offset, width);
             let cell = self.roots.access(place.access)?.canonical;
             match place.base {
                 r2ssa::PlaceBase::Parameter(slot) => {
@@ -940,23 +928,10 @@ impl<'a> Values<'a> {
                     };
                     Some((cell, MemberCell::At(CExpr::addr_of(member))))
                 }
-                // A member through a loaded pointer: the variable holding the pointer, cast.
                 r2ssa::PlaceBase::Loaded(load) => {
                     let record =
                         (records.loaded(load)).filter(|record| tags.defines(&record.tag, false))?;
-                    let member = named(record)?;
-                    let result = structured.memory_accesses.get(&load)?.value?;
-                    let word = self.roots.access(load)?.canonical;
-                    let pointer = CType::Pointer(Box::new(CType::Struct(record.tag.clone())));
-                    Some((
-                        cell,
-                        MemberCell::Through {
-                            pointer,
-                            member,
-                            result,
-                            word,
-                        },
-                    ))
+                    Some((cell, self.through_loaded(load, record, named(record)?)?))
                 }
                 _ => None,
             }
@@ -969,6 +944,30 @@ impl<'a> Values<'a> {
             self.place(&mut members, cells);
         }
         members
+    }
+
+    /// A member through a loaded pointer: the variable holding the pointer, cast to its record.
+    fn through_loaded(
+        &self,
+        load: r2ssa::StructuredAccessId,
+        record: &r2types::ParameterRecord,
+        member: String,
+    ) -> Option<MemberCell> {
+        let result = self
+            .artifact
+            .facts()
+            .structured
+            .memory_accesses
+            .get(&load)?
+            .value?;
+        let word = self.roots.access(load)?.canonical;
+        let pointer = CType::Pointer(Box::new(CType::Struct(record.tag.clone())));
+        Some(MemberCell::Through {
+            pointer,
+            member,
+            result,
+            word,
+        })
     }
 
     /// Each cell a projection roots at a loaded pointer member, as a member of the struct that
@@ -3214,6 +3213,26 @@ fn joined(stated: impl IntoIterator<Item = CExternDecl>) -> BTreeMap<String, Opt
         }
     }
     decided
+}
+
+/// The member `record` names at `(offset, width)`, unless the record refused that span.
+fn member_name(
+    records: &r2types::Records,
+    record: &r2types::ParameterRecord,
+    offset: i64,
+    width: u32,
+) -> Option<String> {
+    let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
+    if (record
+        .refused
+        .binary_search_by_key(&(offset, width), refused))
+    .is_ok()
+    {
+        return None;
+    }
+    let definition = records.definitions.get(&record.tag)?;
+    let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
+    Some(name.clone())
 }
 
 #[cfg(test)]

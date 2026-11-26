@@ -1,6 +1,5 @@
-//! An import data object (`optarg`) is typed only where three statements agree (ROADMAP D653,
-//! doc/adr-memory-places.md invariant 12): the loader copies the symbol there, the image's C
-//! library declares it, and the copy is the type's size. The name alone proves nothing.
+//! An import data object (`optarg`) is typed only where the loader's copy, the C library's row and
+//! the copy's size agree (D653, doc/adr-memory-places.md invariant 12); a name proves nothing.
 
 use crate::common;
 

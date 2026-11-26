@@ -152,14 +152,10 @@ impl<K: SolverNode> IncrementalSolver<K> {
             } else {
                 (std::mem::take(&mut kept), moved)
             };
-            for (offset, node) in moved {
-                match kept.get(&offset) {
-                    Some(held) => pending.push((*held, node)),
-                    None => {
-                        kept.insert(offset, node);
-                    }
-                }
-            }
+            let met = moved
+                .into_iter()
+                .map(|(offset, node)| (*kept.entry(offset).or_insert(node), node));
+            pending.extend(met.filter(|(held, node)| held != node));
             self.pointees[root] = kept;
         }
     }

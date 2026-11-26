@@ -126,21 +126,7 @@ type Laid = (
 /// The members, spans and refusals of `accesses`, sorted by offset then width. Members are the
 /// accesses that contain no other; `O(A log A)`: one pass, and a search per wider access.
 pub(crate) fn layout(accesses: &[(i64, u32, Option<CTypeLike>)]) -> Result<Laid, RecordRefusal> {
-    let mut distinct = Vec::<(i64, u32, Option<CTypeLike>, bool)>::new();
-    for (offset, width, ty) in accesses {
-        match distinct.last_mut() {
-            Some((at, bytes, held, agreed)) if *at == *offset && *bytes == *width => {
-                // Two solved types of one member leave it untyped: its bytes are all it states.
-                if *agreed && ty.is_some() && held.is_some() && held != ty {
-                    *agreed = false;
-                }
-                if held.is_none() {
-                    held.clone_from(ty);
-                }
-            }
-            _ => distinct.push((*offset, *width, ty.clone(), true)),
-        }
-    }
+    let distinct = distinct(accesses);
     let end = |offset: i64, width: u32| offset.saturating_add(i64::from(width));
     // Sorted by offset then width, an access contains another exactly when the one before it
     // starts where it does, or some later one ends no later: a suffix minimum of ends, `O(A)`.
@@ -208,6 +194,36 @@ pub(crate) fn layout(accesses: &[(i64, u32, Option<CTypeLike>)]) -> Result<Laid,
         return Err(RecordRefusal::OneWidth);
     }
     refused.sort();
+    let (definition, fields) = definition(members);
+    Ok((definition, fields, spans, refused))
+}
+
+/// One entry per `(offset, width)`, in order, with its type and whether every solved type agreed.
+fn distinct(
+    accesses: &[(i64, u32, Option<CTypeLike>)],
+) -> Vec<(i64, u32, Option<CTypeLike>, bool)> {
+    let mut distinct = Vec::<(i64, u32, Option<CTypeLike>, bool)>::new();
+    for (offset, width, ty) in accesses {
+        match distinct.last_mut() {
+            Some((at, bytes, held, agreed)) if *at == *offset && *bytes == *width => {
+                // Two solved types of one member leave it untyped: its bytes are all it states.
+                if *agreed && ty.is_some() && held.is_some() && held != ty {
+                    *agreed = false;
+                }
+                if held.is_none() {
+                    held.clone_from(ty);
+                }
+            }
+            _ => distinct.push((*offset, *width, ty.clone(), true)),
+        }
+    }
+    distinct
+}
+
+/// The definition of sorted, disjoint `members`, padded between them, and each member's index.
+fn definition(
+    members: Vec<(i64, u32, Option<CTypeLike>)>,
+) -> (AggregateDefinition, BTreeMap<i64, usize>) {
     let mut definition = Vec::new();
     let mut fields = BTreeMap::new();
     let mut at = 0i64;
@@ -223,13 +239,13 @@ pub(crate) fn layout(accesses: &[(i64, u32, Option<CTypeLike>)]) -> Result<Laid,
         });
         fields.insert(offset, definition.len());
         definition.push((ty, format!("f_{offset:x}")));
-        at = end(offset, width);
+        at = offset.saturating_add(i64::from(width));
     }
     let definition = AggregateDefinition {
         is_union: false,
         members: definition,
     };
-    Ok((definition, fields, spans, refused))
+    (definition, fields)
 }
 
 /// A scalar a member can be spelled at: C aligns it to its own width. A sign the solve left

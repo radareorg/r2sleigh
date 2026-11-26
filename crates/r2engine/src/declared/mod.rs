@@ -126,9 +126,8 @@ pub(crate) enum ObjectType<'a> {
     },
 }
 
-/// The library row for the object at `address`, where three statements agree (ADR invariant 12):
-/// the loader copies the symbol `name` there, the image's C library declares `name`, and the
-/// copy's width is the type's ([`object_types`] checks it). The name alone binds nothing. O(log W).
+/// The library row for the object at `address` where the loader's copy, the C library's row and
+/// the type's width agree (doc/adr-memory-places.md invariant 12); a name binds nothing. O(log W).
 pub(crate) fn copied_object<'a>(
     target: &NativeTarget<'a>,
     writes: &[crate::program::LoaderWrite],

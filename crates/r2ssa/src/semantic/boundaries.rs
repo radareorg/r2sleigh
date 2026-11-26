@@ -982,17 +982,6 @@ pub(crate) fn convention_call_boundary(
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Result<ConventionCallBoundary, CallBoundaryRefusal> {
     let convention = (machine_context.convention()).ok_or(CallBoundaryRefusal::NoConvention)?;
-    let results = |convention: &r2source::ConventionModel| {
-        convention
-            .result()
-            .and_then(|storage| {
-                observed_convention_call_result_after_call(
-                    graph, live_out, block_addr, op_index, storage,
-                )
-            })
-            .into_iter()
-            .collect()
-    };
     let at = CallPosition {
         function,
         prep,
@@ -1003,34 +992,24 @@ pub(crate) fn convention_call_boundary(
     let arity = stated.map(|statement| statement.arity);
     let homes = stated.and_then(|statement| statement.homes.as_deref());
     if let Some(crate::SourceArity::Exact(count)) = arity {
-        let (arguments, arguments_proven) = match homes {
-            Some(homes) if homes.len() == count => {
-                stated_call_arguments(at, machine_context, homes, entry_values, stack_pointer)
-            }
-            _ => (Vec::new(), false),
-        };
+        let (arguments, arguments_proven) = stated_call_arguments(
+            at,
+            machine_context,
+            (homes, count),
+            entry_values,
+            stack_pointer,
+        );
         return Ok(ConventionCallBoundary {
             convention: convention.id,
             arguments,
             unproven: (!arguments_proven).then_some(CallBoundaryRefusal::StatedArgumentUnreached {
                 count: position(count),
             }),
-            results: results(convention),
+            results: call_results(&at, live_out, convention),
         });
     }
     let at_least = arity.map_or(0, crate::SourceArity::floor);
-    // The slots a call fills: the callee's homes below its floor, then the integer slots past them.
-    let integer = convention.arguments(r2source::convention::SlotClass::Integer);
-    let slots = call_slots(integer, homes, at_least).map_err(|index| {
-        r2il::refusal_evidence!(
-            "call-argument",
-            "callsite ({block_addr:#x}, {op_index}) reads no slot at formal {index}'s home {:?}",
-            homes.and_then(|homes| homes.get(index))
-        );
-        CallBoundaryRefusal::DeclaredArgumentUnreached {
-            index: position(index),
-        }
-    })?;
+    let slots = call_slots_at(convention, homes, at_least, (block_addr, op_index))?;
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
     let result_slot = |slot: CanonicalStorageId| {
         (machine_context.function_interface().into_iter())
@@ -1173,13 +1152,14 @@ pub(crate) fn convention_call_boundary(
                     break;
                 }
                 // A home below the floor the callee reads and no walk reaches: never dropped.
-                if position < at_least {
+                let unreached = (position < at_least).then(|| {
                     r2il::refusal_evidence!(
                         "call-argument",
                         "callsite ({block_addr:#x}, {op_index}) reaches no value in formal {position}'s home {slot:?}"
                     );
-                    unproven = Some(CallBoundaryRefusal::DeclaredArgumentUnreached { index });
-                }
+                    CallBoundaryRefusal::DeclaredArgumentUnreached { index }
+                });
+                unproven = unreached.or(unproven);
                 break;
             }
         };
@@ -1274,13 +1254,52 @@ pub(crate) fn convention_call_boundary(
         convention: convention.id,
         arguments,
         unproven,
-        results: results(convention),
+        results: call_results(&at, live_out, convention),
     })
 }
 
 /// A count or slot position as a refusal states it.
 fn position(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// The convention's result register where the code after the call reads it.
+fn call_results(
+    at: &CallPosition<'_>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    convention: &r2source::ConventionModel,
+) -> Vec<CallBoundaryValueFact> {
+    let observed = |storage| {
+        observed_convention_call_result_after_call(
+            at.graph,
+            live_out,
+            at.block_addr,
+            at.op_index,
+            storage,
+        )
+    };
+    convention.result().and_then(observed).into_iter().collect()
+}
+
+/// The slots a call at `(block_addr, op_index)` fills: the callee's homes below its floor, then
+/// the integer slots past them; a formal no slot reads refuses the call.
+fn call_slots_at(
+    convention: &r2source::ConventionModel,
+    homes: Option<&[r2source::SourceParameterLocation]>,
+    at_least: usize,
+    (block_addr, op_index): (u64, usize),
+) -> Result<Vec<CanonicalStorageId>, CallBoundaryRefusal> {
+    let integer = convention.arguments(r2source::convention::SlotClass::Integer);
+    call_slots(integer, homes, at_least).map_err(|index| {
+        r2il::refusal_evidence!(
+            "call-argument",
+            "callsite ({block_addr:#x}, {op_index}) reads no slot at formal {index}'s home {:?}",
+            homes.and_then(|homes| homes.get(index))
+        );
+        CallBoundaryRefusal::DeclaredArgumentUnreached {
+            index: position(index),
+        }
+    })
 }
 
 /// The slots a call fills: the callee's homes below `at_least`, then integer slots past them
@@ -1312,15 +1331,18 @@ fn call_slots(
         .collect())
 }
 
-/// The arguments a callee's body states it takes, each read at its formal home as it reaches the
-/// call; and whether each was found. O(homes) reaching walks.
+/// The `count` arguments a callee's body states it takes, each read at its formal home as it
+/// reaches the call; and whether each was found (none without `count` homes). O(homes) walks.
 fn stated_call_arguments(
     at: CallPosition<'_>,
     machine_context: &SourceMachineContext,
-    homes: &[r2source::SourceParameterLocation],
+    (homes, count): (Option<&[r2source::SourceParameterLocation]>, usize),
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> (Vec<SourceCallArgumentFact>, bool) {
+    let Some(homes) = homes.filter(|homes| homes.len() == count) else {
+        return (Vec::new(), false);
+    };
     let mut arguments = Vec::with_capacity(homes.len());
     for (position, home) in homes.iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {

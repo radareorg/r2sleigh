@@ -107,6 +107,103 @@ fn note_landing_pads(detail: &mut String, landing_pads: u32) {
     }
 }
 
+/// How many data object types C library rows and the source supplied, and how many were refused.
+fn note_object_types(detail: &mut String, func: &CFunction, clauses: &ProofClauses) {
+    let source_typed_objects =
+        func.extern_objects
+            .iter()
+            .filter(|object| {
+                object.type_fact.as_ref().is_some_and(|fact| {
+                    fact.provenance == r2types::DataObjectTypeProvenance::Source
+                })
+            })
+            .count();
+    let library_typed_objects = (func.extern_objects.iter())
+        .filter(|object| {
+            object.type_fact.as_ref().is_some_and(|fact| {
+                matches!(
+                    fact.provenance,
+                    r2types::DataObjectTypeProvenance::Library { .. }
+                )
+            })
+        })
+        .count();
+    let refused_object_types = clauses.refused_object_types.len();
+    if library_typed_objects > 0 {
+        let noun = if library_typed_objects == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(
+            detail,
+            "; {library_typed_objects} {noun} from C library rows the loader's copy binds"
+        );
+    }
+    if source_typed_objects > 0 {
+        let noun = if source_typed_objects == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(
+            detail,
+            "; {source_typed_objects} {noun} supplied by the source"
+        );
+    }
+    if refused_object_types > 0 {
+        let noun = if refused_object_types == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(detail, "; {refused_object_types} {noun} refused");
+    }
+}
+
+/// The structures laid out from accesses, the records refused as recursive, and the tags stated two ways.
+fn note_layouts(detail: &mut String, conflicting: &[String], laid_out: (usize, usize, usize)) {
+    // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
+    // A tag two graphs state as different kinds has no one declaration: its pointers are words.
+    for tag in conflicting {
+        let _ = write!(
+            detail,
+            "; tag `{tag}` is stated as both a struct and a union, so a pointer to it is spelled at its class"
+        );
+    }
+    let (laid_out, through_loaded, recursive) = laid_out;
+    match through_loaded {
+        0 => {}
+        1 => detail.push_str("; 1 structure laid out from a loaded pointer's accesses"),
+        n => {
+            let _ = write!(
+                detail,
+                "; {n} structures laid out from loaded pointers' accesses"
+            );
+        }
+    }
+    match recursive {
+        0 => {}
+        1 => detail.push_str("; 1 record refused: a pointer field leads back to it (Recursive)"),
+        n => {
+            let _ = write!(
+                detail,
+                "; {n} records refused: a pointer field leads back to each (Recursive)"
+            );
+        }
+    }
+    match laid_out {
+        0 => {}
+        1 => detail.push_str("; 1 structure laid out from a parameter's accesses"),
+        n => {
+            let _ = write!(
+                detail,
+                "; {n} structures laid out from parameters' accesses"
+            );
+        }
+    }
+}
+
 /// State what the rendering did and did not show; always emitted, since silence would claim
 /// everything was proven (doc/adr-decompiler-rewrite.md, "The proof line").
 pub(crate) fn note_unproven_constructs(
@@ -150,56 +247,7 @@ pub(crate) fn note_unproven_constructs(
         _ => detail,
     };
     note_unassigned_reads(&mut detail, clauses);
-    let source_typed_objects =
-        func.extern_objects
-            .iter()
-            .filter(|object| {
-                object.type_fact.as_ref().is_some_and(|fact| {
-                    fact.provenance == r2types::DataObjectTypeProvenance::Source
-                })
-            })
-            .count();
-    let library_typed_objects = (func.extern_objects.iter())
-        .filter(|object| {
-            object.type_fact.as_ref().is_some_and(|fact| {
-                matches!(
-                    fact.provenance,
-                    r2types::DataObjectTypeProvenance::Library { .. }
-                )
-            })
-        })
-        .count();
-    let refused_object_types = clauses.refused_object_types.len();
-    if library_typed_objects > 0 {
-        let noun = if library_typed_objects == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {library_typed_objects} {noun} from C library rows the loader's copy binds"
-        );
-    }
-    if source_typed_objects > 0 {
-        let noun = if source_typed_objects == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {source_typed_objects} {noun} supplied by the source"
-        );
-    }
-    if refused_object_types > 0 {
-        let noun = if refused_object_types == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(&mut detail, "; {refused_object_types} {noun} refused");
-    }
+    note_object_types(&mut detail, func, clauses);
     if radare2_variadic_format_counts > 0 {
         let noun = if radare2_variadic_format_counts == 1 {
             "variadic callsite argument count"
@@ -250,45 +298,7 @@ pub(crate) fn note_unproven_constructs(
     }
     note_unproven_parameters(&mut detail, parameters);
     note_disputed(&mut detail, disputed);
-    // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
-    // A tag two graphs state as different kinds has no one declaration: its pointers are words.
-    for tag in conflicting {
-        let _ = write!(
-            &mut detail,
-            "; tag `{tag}` is stated as both a struct and a union, so a pointer to it is spelled at its class"
-        );
-    }
-    let (laid_out, through_loaded, recursive) = laid_out;
-    match through_loaded {
-        0 => {}
-        1 => detail.push_str("; 1 structure laid out from a loaded pointer's accesses"),
-        n => {
-            let _ = write!(
-                &mut detail,
-                "; {n} structures laid out from loaded pointers' accesses"
-            );
-        }
-    }
-    match recursive {
-        0 => {}
-        1 => detail.push_str("; 1 record refused: a pointer field leads back to it (Recursive)"),
-        n => {
-            let _ = write!(
-                &mut detail,
-                "; {n} records refused: a pointer field leads back to each (Recursive)"
-            );
-        }
-    }
-    match laid_out {
-        0 => {}
-        1 => detail.push_str("; 1 structure laid out from a parameter's accesses"),
-        n => {
-            let _ = write!(
-                &mut detail,
-                "; {n} structures laid out from parameters' accesses"
-            );
-        }
-    }
+    note_layouts(&mut detail, conflicting, laid_out);
     if radare2_local_names > 0 {
         let noun = if radare2_local_names == 1 {
             "local name"
