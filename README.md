@@ -8,6 +8,10 @@ guesses when it cannot prove what it would print. `r2s` speaks radare2's
 command language with no radare2 in the process; radare2 is the differential
 target the engine is graded against.
 
+![r2s on a word counter: afl, pdf flow lines, the Sleigh IL of one instruction, axt, pdd with its proof line and marks, the pd? legend, and the visual split and graph views](doc/demo/r2s-demo.gif)
+
+*`r2s` on [`doc/demo/wc.c`](doc/demo/wc.c), built with gcc 13.3 `-O1 -g` for x86-64 Linux. Regenerate with `scripts/record_demo.sh`.*
+
 ```
 bytes --> Sleigh --> r2il (low) --> r2ssa (medium) --> r2dec (high) --> C
               |                          |                  |
