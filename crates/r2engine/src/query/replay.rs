@@ -32,8 +32,8 @@ pub struct ReplayRequest {
 pub struct ReplayResponse {
     /// Each asked register's value at the stop, where every byte of it is known.
     pub results: BTreeMap<String, u128>,
-    /// Each memory write, in the order the run made them, with the bytes the address holds at the
-    /// stop; an address in the image is the file's.
+    /// Each address the run wrote, once, in address order, at its widest write's width with the
+    /// bytes it holds at the stop; an address in the image is the file's.
     pub writes: Vec<ReplayWrite>,
     pub stop: ReplayStop,
     /// Instructions the run executed.
@@ -135,16 +135,18 @@ pub fn replay<S: Source + 'static>(
             Some((name.clone(), state.register(*offset, *size)?))
         })
         .collect();
-    let writes = (writes.into_iter())
-        .map(|access| {
-            let bytes = (0..u64::from(access.width))
-                .filter_map(|at| state.load(access.address.wrapping_add(at), 1).ok())
+    let mut widest = BTreeMap::<u64, u32>::new();
+    for access in writes {
+        let width = widest.entry(access.address).or_default();
+        *width = (*width).max(access.width);
+    }
+    let writes = (widest.into_iter())
+        .map(|(address, width)| {
+            let bytes = (0..u64::from(width))
+                .filter_map(|at| state.load(address.wrapping_add(at), 1).ok())
                 .map(|byte| byte as u8)
                 .collect();
-            ReplayWrite {
-                address: access.address,
-                bytes,
-            }
+            ReplayWrite { address, bytes }
         })
         .collect();
     Ok(ReplayResponse {
