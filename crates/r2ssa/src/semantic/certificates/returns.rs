@@ -809,7 +809,10 @@ mod tests {
     fn declarable_visits(returns: u64) -> u64 {
         let artifact = artifact(&saved_return_body(returns));
         let objects = artifact.objects().objects.keys();
-        assert!(objects.len() as u64 > returns, "one question per local");
+        assert!(
+            artifact.objects().objects.len() as u64 > returns,
+            "one question per local"
+        );
         let here = || crate::dense::element_visits_on_this_thread().expect("a work-meter build");
         let before = here();
         let declarable =

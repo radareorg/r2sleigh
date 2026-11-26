@@ -637,8 +637,7 @@ fn build_type_analysis_inner(
         // Enrichment states these as it writes each slot.
         parameter_types: crate::ParameterTypes::default(),
         // Enrichment states these from the solve, beside the exact signature.
-        inferred_aggregates: BTreeMap::new(),
-        parameter_structures: BTreeMap::new(),
+        records: crate::Records::default(),
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
         program_data_objects: input.parsed_context.program_data_objects.clone(),

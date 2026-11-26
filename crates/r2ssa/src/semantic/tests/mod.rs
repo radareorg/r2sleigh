@@ -1,7 +1,7 @@
 mod boundaries;
 mod certificates;
-mod fields;
 mod objects;
+mod places;
 mod predicates;
 mod values;
 
@@ -436,16 +436,18 @@ fn raw_memory_access(
         .map_or(SpaceId::Ram, |location| location.space);
     let mut objects = ObjectModel::default();
     for location in &locations {
-        objects
-            .objects
-            .entry(location.object)
-            .or_insert(ObjectFact {
-                id: location.object,
-                kind: ObjectKind::Global {
-                    space: location.space,
-                    address: 0,
+        if objects.objects.get(&location.object).is_none() {
+            objects.objects.insert(
+                location.object,
+                ObjectFact {
+                    id: location.object,
+                    kind: ObjectKind::Global {
+                        space: location.space,
+                        address: 0,
+                    },
                 },
-            });
+            );
+        }
     }
     let mut memory = MemorySSAFacts::default();
     if is_write {

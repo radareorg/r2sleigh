@@ -51,6 +51,83 @@ pub struct EvidenceTypes {
     /// Each parameter entry value handed whole to callees whose bodies access through it: the
     /// widths they access at (D610).
     handed: r2ssa::dense::IdMap<r2ssa::ValueId, r2ssa::AccessWidths>,
+    /// Each record class a parameter or a field-based loaded pointer roots (doc/adr-memory-places.md).
+    records: Vec<RecordClass>,
+    /// The record class each loaded base's load roots, by the load's access id.
+    loaded_records: Vec<(r2ssa::StructuredAccessId, usize)>,
+}
+
+/// What names a record class: its lowest parameter slot, else its lowest accessing instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecordName {
+    Parameter(usize),
+    At(u64),
+}
+
+/// One record class: its accesses `(offset, width, value)` by offset then width, and whether its
+/// pointer fields lead back to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordClass {
+    pub name: RecordName,
+    pub accesses: Vec<(i64, u32, Option<r2ssa::ValueId>)>,
+    pub recursive: bool,
+}
+
+/// Which nodes lie on a cycle of `edges` (Tarjan, iterative): `O(N + E)`.
+fn on_cycles(edges: &[Vec<usize>]) -> Vec<bool> {
+    let n = edges.len();
+    let (mut index, mut low, mut on_stack) = (vec![usize::MAX; n], vec![0; n], vec![false; n]);
+    let (mut stack, mut cyclic, mut next) = (Vec::new(), vec![false; n], 0);
+    for start in 0..n {
+        if index[start] != usize::MAX {
+            continue;
+        }
+        let mut frames = vec![(start, 0usize)];
+        index[start] = next;
+        low[start] = next;
+        next += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        while let Some(&mut (node, ref mut child)) = frames.last_mut() {
+            if let Some(&to) = edges[node].get(*child) {
+                *child += 1;
+                if to == node {
+                    cyclic[node] = true;
+                }
+                if index[to] == usize::MAX {
+                    index[to] = next;
+                    low[to] = next;
+                    next += 1;
+                    stack.push(to);
+                    on_stack[to] = true;
+                    frames.push((to, 0));
+                } else if on_stack[to] {
+                    low[node] = low[node].min(index[to]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == index[node] {
+                let mut members = Vec::new();
+                while let Some(member) = stack.pop() {
+                    on_stack[member] = false;
+                    members.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                if members.len() > 1 {
+                    for member in members {
+                        cyclic[member] = true;
+                    }
+                }
+            }
+        }
+    }
+    cyclic
 }
 
 /// The declared pointers met so far at one entry value; a conflict stays one (D262).
@@ -281,6 +358,16 @@ impl EvidenceTypes {
         self.declared.get(value)
     }
 
+    /// Each record class, in the order `loaded_record` indexes.
+    pub fn records(&self) -> &[RecordClass] {
+        &self.records
+    }
+
+    /// The record class each field-based loaded pointer roots, by its load's access id, sorted.
+    pub fn loaded_records(&self) -> &[(r2ssa::StructuredAccessId, usize)] {
+        &self.loaded_records
+    }
+
     /// The widths callees access at through parameter entry value `value`, where one handed it
     /// whole loads or stores through it (D610).
     pub fn handed_dereferenced(&self, value: r2ssa::ValueId) -> Option<r2ssa::AccessWidths> {
@@ -308,6 +395,7 @@ pub fn solve_evidence_types(
     builder.gather_allocation_element_widths(callsite_signatures);
 
     builder.gather_indexed_pointer_bases();
+    builder.gather_fields();
     builder.read_back()
 }
 
@@ -334,6 +422,8 @@ struct EvidenceBuilder<'a> {
     asserted: FxHashSet<(EvidenceNode, TypeId)>,
     /// Each callee slot bound with the basis its callee states it on.
     callee_slots: Vec<(EvidenceNode, CTypeLike, r2source::Basis)>,
+    /// Whether each access, by position, is a field of a parameter or a field-based pointer.
+    based: Vec<bool>,
 }
 
 impl<'a> EvidenceBuilder<'a> {
@@ -345,6 +435,7 @@ impl<'a> EvidenceBuilder<'a> {
             spellings: Vec::new(),
             asserted: FxHashSet::default(),
             callee_slots: Vec::new(),
+            based: Vec::new(),
         }
     }
 
@@ -891,6 +982,189 @@ impl<'a> EvidenceBuilder<'a> {
         }
     }
 
+    /// The node an access's base is, where it is a parameter or a pointer loaded from a field
+    /// of one (`based`); a pointer loaded from anywhere else joins nothing (invariant 3).
+    fn base_node(&self, base: r2ssa::PlaceBase, based: &[bool]) -> Option<EvidenceNode> {
+        let source = self.source;
+        match base {
+            r2ssa::PlaceBase::Parameter(slot) => (source.facts().boundaries.parameters.get(&slot))
+                .and_then(|parameter| parameter.value())
+                .map(EvidenceNode::Value),
+            r2ssa::PlaceBase::Loaded(load) => {
+                let structured = &source.facts().structured;
+                (structured.position(load))
+                    .filter(|at| based.get(*at) == Some(&true))
+                    .and_then(|_| structured.memory_accesses.get(&load)?.value)
+                    .map(EvidenceNode::Value)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether each access, by position, is a field of a parameter's record or of a pointer
+    /// loaded from such a field. Each position is resolved once on an explicit stack; one on a
+    /// cycle of loads reads `false`. `O(A)`.
+    fn field_based(&self) -> Vec<bool> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum State {
+            Unseen,
+            Open,
+            Done(bool),
+        }
+        let source = self.source;
+        let structured = &source.facts().structured;
+        let places = source.certificates().places.iter().collect::<Vec<_>>();
+        let mut state = vec![State::Unseen; places.len()];
+        for start in 0..places.len() {
+            let mut stack = vec![start];
+            while let Some(&at) = stack.last() {
+                let place = places[at];
+                let field = matches!(place.place, r2ssa::Place::Field { .. });
+                let below = match place.base {
+                    r2ssa::PlaceBase::Loaded(load) => structured.position(load),
+                    _ => None,
+                };
+                let answer = match (place.base, below.map(|below| (below, state[below]))) {
+                    (r2ssa::PlaceBase::Parameter(_), _) => Some(field),
+                    (r2ssa::PlaceBase::Loaded(_), Some((_, State::Done(based)))) => {
+                        Some(field && based)
+                    }
+                    (r2ssa::PlaceBase::Loaded(_), Some((_, State::Open))) => Some(false),
+                    (r2ssa::PlaceBase::Loaded(_), Some((below, State::Unseen))) => {
+                        state[at] = State::Open;
+                        stack.push(below);
+                        None
+                    }
+                    _ => Some(false),
+                };
+                if let Some(answer) = answer {
+                    state[at] = State::Done(answer);
+                    stack.pop();
+                }
+            }
+        }
+        (state.into_iter())
+            .map(|state| state == State::Done(true))
+            .collect()
+    }
+
+    /// One `Field` per access a parameter, or a pointer loaded from one of its fields, places at a
+    /// constant offset, and one pointer field per load used as a base: `O(A)`.
+    fn gather_fields(&mut self) {
+        let source = self.source;
+        let structured = &source.facts().structured;
+        let based = self.field_based();
+        let places = source.certificates().places.iter().collect::<Vec<_>>();
+        let mut bases = vec![false; places.len()];
+        for place in &places {
+            if let r2ssa::PlaceBase::Loaded(load) = place.base
+                && let Some(at) = structured.position(load)
+                && let Some(slot) = bases.get_mut(at)
+            {
+                *slot = true;
+            }
+        }
+        for (at, place) in places.iter().enumerate() {
+            let r2ssa::Place::Field { offset, width } = place.place else {
+                continue;
+            };
+            if !based[at] {
+                continue;
+            }
+            let Some(base) = self.base_node(place.base, &based) else {
+                continue;
+            };
+            let value = (structured.memory_accesses.get(&place.access))
+                .and_then(|access| access.value)
+                .map(EvidenceNode::Value);
+            self.solver.field(&base, offset, width, value.as_ref());
+            if bases[at]
+                && let Some(value) = value
+            {
+                self.solver.pointer_field(&base, offset, &value);
+            }
+        }
+        self.based = based;
+    }
+
+    /// Each record class a parameter or a field-based loaded pointer roots, its accesses, and
+    /// whether its pointer fields lead back to it (`Recursive`, refused until D645).
+    fn read_records(&mut self, types: &mut EvidenceTypes) {
+        let source = self.source;
+        let structured = &source.facts().structured;
+        let places = source.certificates().places.iter().collect::<Vec<_>>();
+        let mut roots = Vec::<(usize, EvidenceNode, RecordName)>::new();
+        for (slot, parameter) in &source.facts().boundaries.parameters {
+            let (Some(value), Ok(slot)) = (parameter.value(), usize::try_from(*slot)) else {
+                continue;
+            };
+            let node = EvidenceNode::Value(value);
+            let class = self.solver.class_seeing(&node);
+            roots.push((class, node, RecordName::Parameter(slot)));
+        }
+        let mut loads = Vec::new();
+        for (at, place) in places.iter().enumerate() {
+            let r2ssa::PlaceBase::Loaded(load) = place.base else {
+                continue;
+            };
+            if self.based.get(at) != Some(&true) {
+                continue;
+            }
+            let Some(value) = structured
+                .memory_accesses
+                .get(&load)
+                .and_then(|access| access.value)
+            else {
+                continue;
+            };
+            let node = EvidenceNode::Value(value);
+            let class = self.solver.class_seeing(&node);
+            let address = source
+                .graph()
+                .instruction_for_inst(place.access.inst)
+                .unwrap_or(0);
+            roots.push((class, node, RecordName::At(address)));
+            loads.push((load, class));
+        }
+        // One record per class, named by its lowest parameter slot, else its lowest instruction.
+        roots.sort_by_key(|(class, _, name)| (*class, *name));
+        roots.dedup_by_key(|(class, ..)| *class);
+        let index = (roots.iter().enumerate())
+            .map(|(at, (class, ..))| (*class, at))
+            .collect::<BTreeMap<_, _>>();
+        let edges = (roots.iter())
+            .map(|(class, ..)| {
+                let pointees = self.solver.pointees_of_class(*class);
+                (pointees.into_iter())
+                    .filter_map(|pointee| index.get(&pointee).copied())
+                    .collect()
+            })
+            .collect::<Vec<Vec<usize>>>();
+        let cyclic = on_cycles(&edges);
+        for ((_, node, name), recursive) in roots.iter().zip(cyclic) {
+            let accesses = (self.solver.record(node).into_iter())
+                .map(|(offset, width, value)| {
+                    let value = value.and_then(|node| match node {
+                        EvidenceNode::Value(value) => Some(value),
+                        EvidenceNode::Object(_) => None,
+                    });
+                    (offset, width, value)
+                })
+                .collect::<Vec<_>>();
+            types.records.push(RecordClass {
+                name: *name,
+                accesses,
+                recursive,
+            });
+        }
+        let mut loaded = (loads.into_iter())
+            .filter_map(|(load, class)| Some((load, *index.get(&class)?)))
+            .collect::<Vec<_>>();
+        loaded.sort();
+        loaded.dedup();
+        types.loaded_records = loaded;
+    }
+
     fn read_back(&mut self) -> EvidenceTypes {
         // A spelling names the solved type only when it is that type. The class
         // carries it because every member of an equality class is one variable.
@@ -929,7 +1203,7 @@ impl<'a> EvidenceBuilder<'a> {
                 types.value_types.insert(value, resolved);
             }
         }
-
+        self.read_records(&mut types);
         types
     }
 

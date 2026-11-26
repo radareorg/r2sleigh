@@ -206,7 +206,66 @@ D659 step 0: `doc/adr-decompiler-rewrite.md`, "D659 step 0".
 
 ## As built: places and records (D641 to D645, D649, D652)
 
-Open.
+### D641 step 0 (record half): counted from engine facts
+
+A local probe (never committed) printed per function, from r2ssa's address facts and certificates at 5f39d32a6, over DecBench's 2,621 functions. Certified accesses equal the structured accesses one to one, and each instruction's ordinals run from 0 without a gap, so a position column is exact.
+
+RAM accesses (84,079) by the address fact that states them and by index terms:
+
+| Address fact | 0 terms | 1 term | 2 or more |
+|---|---|---|---|
+| parameter expression | 18,130 | 1,577 | 227 |
+| pointee expression | 2,271 | 1,177 | 120 |
+| frame expression | 35,561 | 384 | 1 |
+| none | 24,631 | | |
+
+These are engine accesses; a promoted slot's access prints no site, so they do not add to the `pdd` site counts.
+
+The loaded pointer class (11,041 parsed sites). An access is based on a loaded pointer where its address, through copies and constant adds, roots at a load:
+
+| Where the pointer was loaded from | Accesses | Join |
+|---|---|---|
+| a parameter or pointee field at a constant offset (pointee expression) | 2,161 | keyed by field |
+| an address with no expression, itself a load root | 4,920 | keyed by field, one level per load |
+| a frame slot | 276 + 16 | a reaching store through `MemoryVersion` |
+| a global | 164 | none this round |
+| an indexed parameter or pointee address | 25 | `Element` (D649) |
+| no load root (a merge of two pointers, or an index) | 1,391 with a pointee expression, 19,246 without | none |
+
+D644's pin is in engine accesses, not `pdd` sites: at most 7,081 accesses join by field, 292 more only through a proven reaching store. A promoted or folded access prints no site, so the `pdd` count D644 grades sits below these.
+
+Readers of `PointeeObjectKey` equality as must alias (invariant 10):
+
+1. `build_memory_ssa` (`semantic/objects.rs`): accesses of one pointee object at one offset are one location. Refused as a proof of same content (read, untested): a pointer loaded before a write that re-points its field and dereferenced after a second load of the same field shares the key, and no version tells them apart (`p1 = a->f; f(); p2 = a->f; p2->x = v; y = p1->x` reads `v`'s version).
+2. `same_content_reads` (`function/mod.rs`): two reads of one object, offset and width under the same versions hold one content. Over pointee objects, 60 DecBench pairs read through one pointer load (proven: one pointer) and 37 through two loads of one path (unproven, case 1). Refusing the 37 can change liveness and so the output; it is recorded here, and D642 keeps the builder's map.
+3. `collect_memory_round_trips` (`semantic/private_objects.rs`): keyed by the address value, not the key, so proven by value identity. Its "no other write" check reads writes of the same object only; a call between the read and the write is not one. Read, untested; recorded for its owner, not built here.
+4. `backward_slice` (`slice.rs`): a diagnostic; it prints the versions and decides nothing.
+
+`ObjectId` is minted dense from 0 per function: 2,621 of 2,621 functions, 31,782 objects.
+
+Parameter view: in 177 parameters the places alone (every access whose parameter expression names the slot) lay out another structure than `ParameterFields`' def-use reach (54 with other fields, 93 where the reach refused `NotAffine`, 24 the reach never saw, 6 the other way). D642 keeps the reach so its output is byte identical; D643 drops it.
+
+### D642: `MemoryPlaces`
+
+r2ssa `memory_places.rs`: one `AccessPlace` per structured access in `memory_accesses` order, base `Parameter`, `Loaded`, `Frame`, `Global` or `None`, place `Field`, `Element` (one positive stride with the access inside one stride) or `Unplaced` (`NotAffine`, `IndexPastStride`, `Unmodelled`, `NoBase`). `StructuredDataflowFacts::position` is the first position per instruction plus the ordinal, `O(1)`. A loaded root is a dense column over values filled once; a value on a cycle has none. `ObjectModel::objects` is a dense `ObjectTable`; `parameter_objects` and `pointee_objects` left the model (builder only); `global_objects` stays, a lookup by address. Other maps keyed by `ObjectId` or `StructuredAccessId` stay with LX. DecBench records 0 of 2,621 moved.
+
+Two deviations, recorded. `parameter_expressions` and `pointee_expressions` stay `address.rs`'s maps and feed the index; they are not yet views of it. The loaded-root column is a second affine walk beside `address.rs` (copies, constant adds, phis); D670 moves it into `address.rs` so one owner states every load-rooted affine form.
+
+### D643: `Constraint::Field`
+
+r2types: `Constraint::Field { base, offset, width, value }` adds one record access to the base's class; `IncrementalSolver::equal` moves the smaller record list into the larger, so each access moves `O(log N)` times; `record` sorts one class's accesses, `O(k log k)`. `solve_evidence_types` emits one `Field` per access `MemoryPlaces` states as a constant field of a parameter (`gather_fields`, `O(A)`). `records.rs` lays a class out: members are the accesses that contain no other (a suffix minimum of ends, `O(A)`); a member at a negative offset or unaligned to its width is refused alone; a wider access is a span where it starts at a member and its last byte ends a member or lies in padding, else refused alone as `Interior` or `Straddle`. A member read as two solved types is untyped (its width). `OneWidth` counts members and refused accesses, not spans: `{8@0, 8@8, 16@0}` stays refused, `{8@0, 4@4}` lays out `f_4`. Deleted: `aggregates.rs` (`layout`, `parameter_aggregates`, `InferredAggregate`), `FunctionTypeFacts::{inferred_aggregates, parameter_structures}` (now `records`), and D642's parameter reach (`memory_places/reach.rs`). r2dec `members_of` spells each access through a parameter at the member or span its record states, else keeps the byte arithmetic; the all or nothing rule is gone. A pointer member of an inferred record whose tag the unit cannot name is `void *` (r2dec `tags.rs`); it had refused the whole record once a callee's own record named the pointee.
+
+`argN` always names the entry value: formals are no class members (r2ssa `local_classes.rs` `member`), so `&argN->f_K` is exact wherever the place says base `Parameter(N)`, through a copy, a reload or a merged register name alike.
+
+DecBench at the head: typed address sites 4,721 to 14,207 (+9,486); loads 34,819, stores 20,361, residual sites 7,282, 0 functions moved on any of the three. Gains by the refusal the parameter had at eb327af9a: `Indexed` 4,015, `Overlap` 3,357, `NotAffine` 796, none traced 719, `Unaligned` 336, `Conflict` 153, `OneWidth` 62 (a refused access of another width), `Unmodelled` 48. 502 functions move; every moved line is (a) a byte address to `&argN->f_K` (9,075, and 411 where the text named a copy, reload or merged register), (b) a struct definition with pads (4,755), (c) a parameter's declared type moving to the record pointer, here or as a callee's prototype, forward declaration or argument cast in a caller (1,723), or (d) a proof line (264). `clang -fsyntax-only` with `compile_check.py`'s flags on all 502 with an `offsetof` assertion per member (3,214): 0 assertion fails, errors 2 at base and 2 at the head. Goldens 500 of 500 unchanged. A 16-byte span keeps its byte arithmetic: r2dec spells 128-bit accesses through a path that reads no member (D671).
+
+Not built here: `certified_parameter_pointers` reads the records and stays a second owner (D74 held). A local copy needs no declaration: it is spelled through the parameter.
+
+### D644: loaded pointer records
+
+The solver keeps, per class, its pointer fields: offset to a node every value loaded from that field joins (`pointer_field`); a union merges the smaller field map into the larger and joins colliding pointees through a pending queue, so each union is one fewer class, `O((V + A) α(V) + A log A)`. A field is a pointer field when the value loaded from it bases another access. Only field-based pointers take part: a load is a record base when its own place is a field of a parameter or of another field-based pointer (`field_based`, one pass, `O(A)`); a pointer loaded from a frame slot, a global or an unplaced address joins nothing (invariant 3; no reaching store join is built). A class whose pointer fields lead back to it (Tarjan over the record classes) is refused `Recursive`, named on the proof line; D645 admits the cycles a phi closes. A class is named by its lowest parameter slot (`fcn_<entry>_arg<slot>`), else by its lowest accessing instruction (`fcn_<entry>_at_<addr>`). r2dec spells a member through a loaded pointer as `&((struct T *)q)->f_K`, `q` the variable holding the loaded word (`MemberCell::Through`, as D359 does); no local's declaration changes. The address is `q + K` by the printed layout whatever `q` points at, so a wrong join costs refused accesses, never a wrong address; the cast asserts `struct T`'s alignment, the premise already listed (Premises 1).
+
+DecBench from D643's head: typed address sites 14,207 to 20,401 (+6,194); loads, stores and residual sites 0 functions moved. 272 records laid out through loaded pointers; 2 records refused `Recursive` (diffutils diff O2-noinline 0xc290 loses its parameter record, 31 sites back to byte arithmetic; one more function). 301 functions move: member addresses through a cast 6,225 lines, struct definitions 3,929, proof lines 300, the 32 lines of 0xc290's refusal, and in find O2 0xa990 and O2-noinline 0xbde0 2 lines each where D470's text renaming reuses `rbx_1` once the addresses no longer read it. 2,658 `offsetof` assertions hold; compile errors 2 before and after. Goldens 500 of 500 unchanged.
 
 ## As built: frame objects (D654, D655)
 

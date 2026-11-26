@@ -875,8 +875,8 @@ impl<'a> Values<'a> {
         Some(values)
     }
 
-    /// Each cell a parameter that points to its inferred structure addresses, as that member. All
-    /// or nothing per parameter: one access with no member keeps the byte spelling for every one.
+    /// Each cell a parameter that points to its inferred record addresses, as the member or span
+    /// the record states at the access's offset; an access it refuses keeps its byte spelling.
     fn members_of(
         &self,
         input: &RenderInput<'_>,
@@ -888,8 +888,9 @@ impl<'a> Values<'a> {
         if !self.little_endian {
             return members;
         }
-        let fields = &self.artifact.certificates().parameter_fields;
         let through = self.accesses_by_parameter(&pointing);
+        let records = input.records();
+        let mut inferred = BTreeMap::new();
         for (slot, tag, base, stated) in pointing {
             if let Some(cells) = stated
                 .then(|| self.projected_members(slot, &base, through.get(slot)?))
@@ -898,34 +899,71 @@ impl<'a> Values<'a> {
                 self.place(&mut members, cells);
                 continue;
             }
-            let Some(structure) = input.parameter_structures().get(&slot) else {
+            let Some(record) = (records.parameters.get(&slot)).filter(|record| record.tag == tag)
+            else {
                 continue;
             };
-            let (Some(definition), Ok(key)) = (
-                (structure.tag == tag)
-                    .then(|| input.inferred_aggregates().get(&tag))
-                    .flatten(),
-                u32::try_from(slot),
-            ) else {
-                continue;
-            };
-            let Some(r2ssa::ParameterFields::Constant(accesses)) = fields.get(&key) else {
-                continue;
-            };
-            let cells = accesses.iter().map(|access| {
-                let (_, name) = definition
-                    .members
-                    .get(*structure.fields.get(&access.offset)?)?;
-                let cell = self.roots.access(access.access)?.canonical;
-                let member = CExpr::PtrMember {
-                    base: Box::new(base.clone()),
-                    member: name.clone(),
-                };
-                Some((cell, MemberCell::At(CExpr::addr_of(member))))
-            });
-            if let Some(cells) = cells.collect::<Option<Vec<_>>>() {
-                self.place(&mut members, cells);
+            if let (Some(definition), Ok(slot)) =
+                (records.definitions.get(&tag), u32::try_from(slot))
+            {
+                inferred.insert(slot, (record, definition, base));
             }
+        }
+        // One pass over the places: each access through a pointing parameter or a loaded pointer
+        // whose record the unit defines, `O(A log M)`.
+        let structured = &self.artifact.facts().structured;
+        let places = self.artifact.certificates().places.iter();
+        let cells = places.filter_map(|place| {
+            let r2ssa::Place::Field { offset, width } = place.place else {
+                return None;
+            };
+            let named = |record: &r2types::ParameterRecord| {
+                let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
+                if (record
+                    .refused
+                    .binary_search_by_key(&(offset, width), refused))
+                .is_ok()
+                {
+                    return None;
+                }
+                let definition = records.definitions.get(&record.tag)?;
+                let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
+                Some(name.clone())
+            };
+            let cell = self.roots.access(place.access)?.canonical;
+            match place.base {
+                r2ssa::PlaceBase::Parameter(slot) => {
+                    let (record, _, base) = inferred.get(&slot)?;
+                    let member = CExpr::PtrMember {
+                        base: Box::new(base.clone()),
+                        member: named(record)?,
+                    };
+                    Some((cell, MemberCell::At(CExpr::addr_of(member))))
+                }
+                // A member through a loaded pointer: the variable holding the pointer, cast.
+                r2ssa::PlaceBase::Loaded(load) => {
+                    let record =
+                        (records.loaded(load)).filter(|record| tags.defines(&record.tag, false))?;
+                    let member = named(record)?;
+                    let result = structured.memory_accesses.get(&load)?.value?;
+                    let word = self.roots.access(load)?.canonical;
+                    let pointer = CType::Pointer(Box::new(CType::Struct(record.tag.clone())));
+                    Some((
+                        cell,
+                        MemberCell::Through {
+                            pointer,
+                            member,
+                            result,
+                            word,
+                        },
+                    ))
+                }
+                _ => None,
+            }
+        });
+        let cells = cells.collect::<Vec<_>>();
+        if !cells.is_empty() {
+            self.place(&mut members, cells);
         }
         if let Some(cells) = self.member_rooted(tags) {
             self.place(&mut members, cells);

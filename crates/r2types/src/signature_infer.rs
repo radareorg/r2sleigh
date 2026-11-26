@@ -54,9 +54,8 @@ pub(crate) fn infer_signature_from_prepared_ssa(
                 param.initial_ty.clone(),
                 certified_parameter_widths.get(&param.arg_index),
             );
-            let aggregate = (solved.aggregates.get(&param.arg_index)).map(|aggregate| {
-                CTypeLike::Pointer(Box::new(CTypeLike::Struct(aggregate.tag.clone())))
-            });
+            let aggregate = (solved.records.get(&param.arg_index))
+                .map(|record| CTypeLike::Pointer(Box::new(CTypeLike::Struct(record.tag.clone()))));
             let ty = aggregate.unwrap_or_else(|| {
                 param
                     .value
@@ -123,11 +122,11 @@ fn certified_memory_parameter(
         })
 }
 
-/// Each parameter a certified access addresses, as a pointer to the structure its accesses lay
+/// Each parameter a certified access addresses, as a pointer to the record its accesses lay
 /// out, else to the one width they read, signed or float as they use it (D265, D353), or `void`.
 pub(crate) fn certified_parameter_pointers(
     prepared: &SsaArtifact,
-    aggregates: &BTreeMap<usize, crate::aggregates::InferredAggregate>,
+    records: &BTreeMap<usize, crate::records::InferredRecord>,
     signedness: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
 ) -> BTreeMap<usize, CTypeLike> {
     let signs = pointee_signs(prepared, signedness);
@@ -135,8 +134,8 @@ pub(crate) fn certified_parameter_pointers(
     certified_parameter_memory_widths(prepared)
         .into_iter()
         .map(|(index, widths)| {
-            if let Some(aggregate) = aggregates.get(&index) {
-                let tag = CTypeLike::Struct(aggregate.tag.clone());
+            if let Some(record) = records.get(&index) {
+                let tag = CTypeLike::Struct(record.tag.clone());
                 return (index, CTypeLike::Pointer(Box::new(tag)));
             }
             let pointer = match certified_parameter_pointer_type(CTypeLike::Void, Some(&widths)) {

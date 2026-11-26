@@ -56,6 +56,13 @@ pub fn solve_constraints<K: SolverNode>(
         match constraint {
             Constraint::Equal { a, b, .. } => solver.equal(a, b),
             Constraint::Subtype { var, ty, .. } => solver.bound(var, *ty),
+            Constraint::Field {
+                base,
+                offset,
+                width,
+                value,
+                ..
+            } => solver.field(base, *offset, *width, value.as_ref()),
         }
     }
     solver.into_solved()
@@ -76,6 +83,10 @@ pub struct IncrementalSolver<K> {
     classes: NodeClasses,
     /// Each class's type, held at its root.
     types: Vec<Option<TypeId>>,
+    /// Each class's record accesses `(offset, width, value)`, held at its root (doc/adr-memory-places.md).
+    records: Vec<Vec<(i64, u32, Option<VarId>)>>,
+    /// Each class's pointer fields: a node every value loaded from the field at that offset joins.
+    pointees: Vec<std::collections::BTreeMap<i64, VarId>>,
     meets: FxHashMap<(TypeId, TypeId), TypeId>,
 }
 
@@ -86,6 +97,8 @@ impl<K: SolverNode> IncrementalSolver<K> {
             nodes: NodeInterner::default(),
             classes: NodeClasses::default(),
             types: Vec::new(),
+            records: Vec::new(),
+            pointees: Vec::new(),
             meets: FxHashMap::default(),
         }
     }
@@ -99,19 +112,103 @@ impl<K: SolverNode> IncrementalSolver<K> {
         &mut self.arena
     }
 
-    /// `a` and `b` are one variable.
+    /// `a` and `b` are one variable. Their records' pointer fields at one offset hold one
+    /// pointee, so those join too, by a pending queue: each union is one fewer class.
     pub fn equal(&mut self, a: &K, b: &K) {
         let (a, b) = (self.intern(a), self.intern(b));
-        let (a, b) = (self.classes.find(a), self.classes.find(b));
-        if a == b {
-            return;
+        self.unify(a, b);
+    }
+
+    fn unify(&mut self, a: VarId, b: VarId) {
+        let mut pending = vec![(a, b)];
+        while let Some((a, b)) = pending.pop() {
+            let (a, b) = (self.classes.find(a), self.classes.find(b));
+            if a == b {
+                continue;
+            }
+            let met = match (self.types[a], self.types[b]) {
+                (Some(x), Some(y)) => Some(self.meet(x, y)),
+                (x, y) => x.or(y),
+            };
+            let root = self.classes.union(a, b);
+            self.types[root] = met;
+            let other = if root == a { b } else { a };
+            // The smaller lists move into the larger: each entry moves `O(log N)` times in all.
+            let (mut kept, mut moved) = (
+                std::mem::take(&mut self.records[root]),
+                std::mem::take(&mut self.records[other]),
+            );
+            if kept.len() < moved.len() {
+                std::mem::swap(&mut kept, &mut moved);
+            }
+            kept.append(&mut moved);
+            self.records[root] = kept;
+            let (mut kept, moved) = (
+                std::mem::take(&mut self.pointees[root]),
+                std::mem::take(&mut self.pointees[other]),
+            );
+            let (mut kept, moved) = if kept.len() < moved.len() {
+                (moved, kept)
+            } else {
+                (std::mem::take(&mut kept), moved)
+            };
+            for (offset, node) in moved {
+                match kept.get(&offset) {
+                    Some(held) => pending.push((*held, node)),
+                    None => {
+                        kept.insert(offset, node);
+                    }
+                }
+            }
+            self.pointees[root] = kept;
         }
-        let met = match (self.types[a], self.types[b]) {
-            (Some(x), Some(y)) => Some(self.meet(x, y)),
-            (x, y) => x.or(y),
+    }
+
+    /// `value` was loaded from the pointer field at `offset` of `base`'s record: every value
+    /// loaded from that field is one pointee (doc/adr-memory-places.md, invariant 4).
+    pub fn pointer_field(&mut self, base: &K, offset: i64, value: &K) {
+        let value = self.intern(value);
+        let base = self.intern(base);
+        let class = self.classes.find(base);
+        match self.pointees[class].get(&offset).copied() {
+            Some(held) => self.unify(held, value),
+            None => {
+                self.pointees[class].insert(offset, value);
+            }
+        }
+    }
+
+    /// The pointer fields of the class rooted at `class`, as class roots.
+    pub fn pointees_of_class(&mut self, class: usize) -> Vec<usize> {
+        let fields = self.pointees[class].values().copied().collect::<Vec<_>>();
+        (fields.into_iter())
+            .map(|node| self.classes.find(node))
+            .collect()
+    }
+
+    /// `base` points at a record with a `width`-byte member at `offset` that moves `value`.
+    pub fn field(&mut self, base: &K, offset: i64, width: u32, value: Option<&K>) {
+        let value = value.map(|value| self.intern(value));
+        let base = self.intern(base);
+        let class = self.classes.find(base);
+        self.records[class].push((offset, width, value));
+    }
+
+    /// The record accesses of `node`'s class, by offset then width, each with its value node.
+    /// `O(k log k)` for the class's `k` accesses.
+    pub fn record(&mut self, node: &K) -> Vec<(i64, u32, Option<K>)> {
+        let Some(id) = self.nodes.get(node) else {
+            return Vec::new();
         };
-        let root = self.classes.union(a, b);
-        self.types[root] = met;
+        let class = self.classes.find(id);
+        let mut accesses = (self.records[class].iter())
+            .map(|(offset, width, value)| {
+                let value = value.map(|value| self.nodes.nodes[value].clone());
+                (*offset, *width, value)
+            })
+            .collect::<Vec<_>>();
+        accesses.sort_by_key(|(offset, width, _)| (*offset, *width));
+        accesses
     }
 
     /// `node` lies below `ty`.
@@ -177,6 +274,8 @@ impl<K: SolverNode> IncrementalSolver<K> {
         let id = self.nodes.intern(node, &mut self.classes);
         if id == self.types.len() {
             self.types.push(None);
+            self.records.push(Vec::new());
+            self.pointees.push(std::collections::BTreeMap::new());
         }
         id
     }

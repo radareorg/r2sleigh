@@ -1,7 +1,7 @@
-//! What a parameter's pointee is read as (doc/adr-aggregates.md).
+//! Each access's base and place (doc/adr-memory-places.md).
 
 use super::*;
-use crate::semantic::{ParameterFieldRefusal, ParameterFields};
+use crate::{Place, PlaceBase, Unplaced};
 
 const RDI: u64 = 8;
 const SP: u64 = 32;
@@ -66,16 +66,16 @@ fn returned(block: &mut R2ILBlock) {
     });
 }
 
-fn offsets(fields: Option<&ParameterFields>) -> Option<Vec<(i64, u32)>> {
-    match fields? {
-        ParameterFields::Constant(accesses) => Some(
-            accesses
-                .iter()
-                .map(|access| (access.offset, access.width))
-                .collect(),
-        ),
-        ParameterFields::Refused { .. } => None,
-    }
+/// The parameter's constant-offset places, `(offset, width)`, in access order.
+fn fields(artifact: &SsaArtifact) -> Vec<(i64, u32)> {
+    let places = artifact.certificates().places.iter();
+    let fields = places.filter_map(|place| match (place.base, place.place) {
+        (PlaceBase::Parameter(0), Place::Field { offset, width }) => Some((offset, width)),
+        _ => None,
+    });
+    let mut fields = fields.collect::<Vec<_>>();
+    fields.sort();
+    fields
 }
 
 /// `-O0` spills the parameter to its home and reloads it for each field.
@@ -106,14 +106,14 @@ fn a_spilled_parameter_s_constant_offsets_are_its_fields() {
     let artifact = parameter_artifact(vec![block]);
 
     assert_eq!(
-        offsets(artifact.certificates().parameter_fields.get(&0)),
-        Some(vec![(0, 1), (2, 2), (4, 4), (8, 8)]),
+        fields(&artifact),
+        [(0, 1), (2, 2), (4, 4), (8, 8)],
         "{:?}",
-        artifact.certificates().parameter_fields
+        artifact.certificates().places
     );
 }
 
-/// A field that holds a pointer is the parameter's; what that pointer addresses is not.
+/// A field that holds a pointer is the parameter's; what that pointer addresses is the load's.
 #[test]
 fn a_followed_pointer_field_is_a_field_and_its_pointee_is_not() {
     let mut block = R2ILBlock::new(0x1000, 4);
@@ -126,13 +126,20 @@ fn a_followed_pointer_field_is_a_field_and_its_pointee_is_not() {
     returned(&mut block);
     let artifact = parameter_artifact(vec![block]);
 
+    assert_eq!(fields(&artifact), [(0, 4), (8, 8)]);
+    let through = (artifact.certificates().places.iter())
+        .find(|place| matches!(place.base, PlaceBase::Loaded(_)))
+        .map(|place| place.place);
     assert_eq!(
-        offsets(artifact.certificates().parameter_fields.get(&0)),
-        Some(vec![(0, 4), (8, 8)])
+        through,
+        Some(Place::Field {
+            offset: 4,
+            width: 4
+        })
     );
 }
 
-/// A loop that walks `p += 8` reaches its accesses through a merge of two offsets.
+/// A loop that walks `p += 8` reaches its store through a merge of two offsets: no field.
 #[test]
 fn a_walked_parameter_has_no_fields() {
     let mut entry = R2ILBlock::new(0x1000, 4);
@@ -160,23 +167,17 @@ fn a_walked_parameter_has_no_fields() {
     returned(&mut exit);
     let artifact = parameter_artifact(vec![entry, body, exit]);
 
-    assert!(
-        matches!(
-            artifact.certificates().parameter_fields.get(&0),
-            Some(ParameterFields::Refused {
-                reason: ParameterFieldRefusal::NotAffine | ParameterFieldRefusal::Indexed,
-                ..
-            })
-        ),
+    assert_eq!(
+        fields(&artifact),
+        [],
         "{:?}",
-        artifact.certificates().parameter_fields
+        artifact.certificates().places
     );
 }
 
-/// A linked load beside two plain fields of different widths is a parameter access the layout
-/// does not model: no layout, and its loaded value is not followed as the parameter.
+/// A linked load beside two plain fields is a parameter access no plain place models.
 #[test]
-fn a_linked_load_from_the_parameter_refuses_its_fields() {
+fn a_linked_load_from_the_parameter_is_unmodelled() {
     let mut block = R2ILBlock::new(0x1000, 4);
     let first = at(test_reg(RDI), 0, 0x10, &mut block);
     store(&mut block, first, 8, 1);
@@ -192,11 +193,51 @@ fn a_linked_load_from_the_parameter_refuses_its_fields() {
     returned(&mut block);
     let artifact = parameter_artifact(vec![block]);
 
-    assert!(matches!(
-        artifact.certificates().parameter_fields.get(&0),
-        Some(ParameterFields::Refused {
-            reason: ParameterFieldRefusal::Unmodelled,
-            ..
-        })
-    ));
+    assert_eq!(fields(&artifact), [(0, 8), (8, 4)]);
+    assert!(
+        (artifact.certificates().places.iter()).any(|place| place.base == PlaceBase::Parameter(0)
+            && place.place == Place::Unplaced(Unplaced::Unmodelled))
+    );
+}
+
+/// `mov rax,[rdi+0x38]; mov ecx,[rax+8]`: the second access's base is the first, at `Field{8,4}`.
+#[test]
+fn the_access_through_a_loaded_pointer_states_a_place() {
+    let mut block = R2ILBlock::new(0x1000, 4);
+    let field = at(test_reg(RDI), 0x38, 0x10, &mut block);
+    let pointer = load(&mut block, field, 8, 0x18);
+    let inner = at(pointer, 8, 0x20, &mut block);
+    load(&mut block, inner, 4, 0x28);
+    returned(&mut block);
+    let artifact = parameter_artifact(vec![block]);
+
+    let places = artifact.certificates().places.iter().collect::<Vec<_>>();
+    let [first, second] = places.as_slice() else {
+        panic!("two accesses: {places:?}");
+    };
+    assert_eq!(
+        (first.base, first.place),
+        (
+            PlaceBase::Parameter(0),
+            Place::Field {
+                offset: 0x38,
+                width: 8
+            }
+        )
+    );
+    assert_eq!(
+        (second.base, second.place),
+        (
+            PlaceBase::Loaded(first.access),
+            Place::Field {
+                offset: 8,
+                width: 4
+            }
+        )
+    );
+    let position = artifact.facts().structured.position(second.access);
+    assert_eq!(
+        position.and_then(|at| artifact.certificates().places.at(at)),
+        Some(*second)
+    );
 }

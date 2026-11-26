@@ -87,17 +87,9 @@ impl<'a> RenderInput<'a> {
             .collect()
     }
 
-    pub fn inferred_aggregates(
-        &self,
-    ) -> &'a std::collections::BTreeMap<String, r2types::AggregateDefinition> {
-        &self.facts.report().type_facts().inferred_aggregates
-    }
-
-    /// Each parameter that points to an inferred structure, with the member at each offset.
-    pub fn parameter_structures(
-        &self,
-    ) -> &'a std::collections::BTreeMap<usize, r2types::ParameterStructure> {
-        &self.facts.report().type_facts().parameter_structures
+    /// The records the parameters' accesses lay out: definitions by tag, and each parameter's.
+    pub fn records(&self) -> &'a r2types::Records {
+        &self.facts.report().type_facts().records
     }
 
     /// The types the function's declaration states, as one graph: its aggregates' layouts.

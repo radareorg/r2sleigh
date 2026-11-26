@@ -53,6 +53,7 @@ pub mod lanes;
 pub mod liveness;
 pub mod local_classes;
 pub mod member_call;
+pub mod memory_places;
 pub use member_call::{MemberCall, MemberCallRefusal, MemberCalls};
 pub(crate) mod liveout;
 pub(crate) mod machine;
@@ -180,6 +181,7 @@ pub use machine_context::{
     SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult,
     SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
 };
+pub use memory_places::{AccessPlace, MemoryPlaces, Place, PlaceBase, Unplaced};
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, NamedObligation, ObligationInventoryFailure,
     ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION, SeedReason,
@@ -210,20 +212,19 @@ pub use semantic::{
     MachineReturnControlCertificate, MemberRunPlace, MemberRunSource, MemberRunStoreCertificate,
     MemberRunStoreMember, MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey,
     MemoryPhiFact, MemorySSAFacts, MemoryUseFact, MemoryVersion, ObjectFact, ObjectId, ObjectKind,
-    ObjectModel, ObjectSpaceId, ParameterFieldAccess, ParameterFieldRefusal, ParameterFields,
-    ParameterObjectKey, PredicateFact, PredicateFacts, PredicateId, PreparedAssumptionBinding,
-    PreparedAssumptionBindingKind, PreparedFunctionCertificates, PreparedFunctionFacts,
-    ProofNodeId, RelativeMemoryAddress, ReturnCarrier, ReturnValueCertificate, SemanticId,
-    SourceBoundaryFacts, SourceCallArgumentFact, SourceCallArgumentValue, SourceCallBoundaryFact,
-    SourceFormalParameterFact, SourceReturnAddressFact, SourceReturnBoundaryFact,
-    SourceReturnStackPointerFact, StackArrayElementCertificate, StackArrayElementIndex,
-    StackArrayLayoutCertificate, StackArrayLayoutDisposition, StackArrayLayoutRefusal,
-    StackFrameRoundTripCertificate, StackGeometryCertificate, StackObjectKey, StackSlotCertificate,
-    StructuredAccessId, StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind,
-    StructuredMemoryAccessFact, StructuredRecursiveCallFact, SupervisorCall, SwitchCertificate,
-    SwitchGuardCertificate, SwitchPredicateFact, TripCount, TripGuard, TripRefusal, TripTest,
-    UnstatedImport, ValueOwner, VariadicCallsiteArgumentCountEvidence,
-    VariadicCallsiteArgumentCountRefusal, returned_bytes,
+    ObjectModel, ObjectSpaceId, ObjectTable, ParameterObjectKey, PredicateFact, PredicateFacts,
+    PredicateId, PreparedAssumptionBinding, PreparedAssumptionBindingKind,
+    PreparedFunctionCertificates, PreparedFunctionFacts, ProofNodeId, RelativeMemoryAddress,
+    ReturnCarrier, ReturnValueCertificate, SemanticId, SourceBoundaryFacts, SourceCallArgumentFact,
+    SourceCallArgumentValue, SourceCallBoundaryFact, SourceFormalParameterFact,
+    SourceReturnAddressFact, SourceReturnBoundaryFact, SourceReturnStackPointerFact,
+    StackArrayElementCertificate, StackArrayElementIndex, StackArrayLayoutCertificate,
+    StackArrayLayoutDisposition, StackArrayLayoutRefusal, StackFrameRoundTripCertificate,
+    StackGeometryCertificate, StackObjectKey, StackSlotCertificate, StructuredAccessId,
+    StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind, StructuredMemoryAccessFact,
+    StructuredRecursiveCallFact, SupervisorCall, SwitchCertificate, SwitchGuardCertificate,
+    SwitchPredicateFact, TripCount, TripGuard, TripRefusal, TripTest, UnstatedImport, ValueOwner,
+    VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal, returned_bytes,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use slot_promotion::promoted_slot_offset;

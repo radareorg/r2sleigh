@@ -256,9 +256,65 @@ pub struct ObjectFact {
     pub kind: ObjectKind,
 }
 
+/// Each object by its id. Ids are minted dense from 0, so the table is indexed by id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectTable(Vec<Option<ObjectFact>>);
+
+impl ObjectTable {
+    /// The object with this id: `O(1)`.
+    pub fn get(&self, id: &ObjectId) -> Option<&ObjectFact> {
+        self.0.get(usize::try_from(id.0).ok()?)?.as_ref()
+    }
+
+    pub fn get_mut(&mut self, id: &ObjectId) -> Option<&mut ObjectFact> {
+        self.0.get_mut(usize::try_from(id.0).ok()?)?.as_mut()
+    }
+
+    /// Sets the object with this id; the builder mints ids in order, so this appends.
+    pub fn insert(&mut self, id: ObjectId, fact: ObjectFact) {
+        let Ok(at) = usize::try_from(id.0) else {
+            return;
+        };
+        if self.0.len() <= at {
+            self.0.resize(at + 1, None);
+        }
+        self.0[at] = Some(fact);
+    }
+
+    /// One past the highest id: the count, since the builder mints ids without a gap. `O(1)`.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ObjectId, &ObjectFact)> {
+        self.values().map(|fact| (&fact.id, fact))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &ObjectId> {
+        self.values().map(|fact| &fact.id)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &ObjectFact> {
+        self.0.iter().flatten()
+    }
+}
+
+impl<'a> IntoIterator for &'a ObjectTable {
+    type Item = (&'a ObjectId, &'a ObjectFact);
+    type IntoIter = Box<dyn Iterator<Item = (&'a ObjectId, &'a ObjectFact)> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectModel {
-    pub objects: BTreeMap<ObjectId, ObjectFact>,
+    pub objects: ObjectTable,
     pub value_objects: BTreeMap<MemoryObjectKey, ObjectId>,
     pub stack_objects: BTreeMap<StackObjectKey, ObjectId>,
     /// Machine-proven entry-SP coordinates for source-coordinate stack
@@ -267,8 +323,6 @@ pub struct ObjectModel {
     /// Exact modular address width for each source-owned memory space.
     /// Alias refinement is disabled when this source fact is unavailable.
     pub address_bits_by_space: BTreeMap<ObjectSpaceId, u32>,
-    pub parameter_objects: BTreeMap<ParameterObjectKey, ObjectId>,
-    pub pointee_objects: BTreeMap<PointeeObjectKey, ObjectId>,
     pub global_objects: BTreeMap<GlobalObjectKey, ObjectId>,
     pub escaped_unknown: BTreeMap<ObjectSpaceId, ObjectId>,
     /// Addresses that reach their object at an offset the machine computes.
@@ -383,25 +437,6 @@ impl ObjectModel {
             }
         }
         None
-    }
-
-    /// How an object reads as a C access path: `arg0`, `*(arg0 + 0x38)`,
-    /// `*(*(arg0 + 0x38) + 0x0)`. Only parameters and pointees have one.
-    pub fn access_path(&self, id: ObjectId) -> Option<String> {
-        match &self.object(id)?.kind {
-            ObjectKind::Parameter { index, .. } => Some(format!("arg{index}")),
-            ObjectKind::Pointee { base, offset, .. } => {
-                let base = self.access_path(*base)?;
-                Some(if *offset == 0 {
-                    format!("*{base}")
-                } else if *offset > 0 {
-                    format!("*({base} + 0x{offset:x})")
-                } else {
-                    format!("*({base} - 0x{:x})", offset.unsigned_abs())
-                })
-            }
-            _ => None,
-        }
     }
 
     pub fn memory_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
@@ -1619,6 +1654,8 @@ pub struct StructuredDataflowFacts {
         crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
     /// Each object's accesses in id order, built with `memory_accesses` (D422).
     accesses_by_object: crate::dense::Csr<ObjectId, StructuredAccessId>,
+    /// Each instruction's first access's position in `memory_accesses`; ordinals follow it.
+    first_access: crate::dense::IdMap<InstId, u32>,
     /// Wide constant stores written out one declared member at a time.
     pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
@@ -1636,7 +1673,8 @@ pub(crate) struct StructuredParts {
 }
 
 impl StructuredDataflowFacts {
-    /// The facts with `accesses_by_object` sorted from the accesses: one counting sort, `O(A + O)`.
+    /// The facts with `accesses_by_object` sorted from the accesses, one counting sort, and each
+    /// instruction's first position: `O(A + O)`.
     pub(crate) fn new(parts: StructuredParts) -> Self {
         let StructuredParts {
             loops,
@@ -1654,15 +1692,29 @@ impl StructuredDataflowFacts {
             objects,
             (memory_accesses.iter()).map(|(id, access)| (access.object, *id)),
         );
+        let mut first_access = crate::dense::IdMap::default();
+        for (position, id) in memory_accesses.keys().enumerate() {
+            if id.ordinal == 0 {
+                first_access.insert(id.inst, u32::try_from(position).unwrap_or(u32::MAX));
+            }
+        }
         Self {
             loops,
             inductions,
             unstructured_cycle_blocks,
             memory_accesses,
             accesses_by_object,
+            first_access,
             member_run_stores,
             recursive_calls,
         }
+    }
+
+    /// Where `id` sits in `memory_accesses`, the index of its per-access columns: `O(1)`, since
+    /// an instruction's ordinals run from 0 without a gap.
+    pub fn position(&self, id: StructuredAccessId) -> Option<usize> {
+        let first = *self.first_access.get(id.inst)?;
+        usize::try_from(first.checked_add(id.ordinal)?).ok()
     }
 
     /// The ids of `object`'s accesses, ascending: `O(1)`.
@@ -1784,7 +1836,7 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) facts: Option<&'a DecompilePrepFacts>,
     pub(crate) addresses: &'a AddressProvenanceFacts,
     pub(crate) declared_slots: &'a DeclaredStackSlots,
-    pub(crate) objects: BTreeMap<ObjectId, ObjectFact>,
+    pub(crate) objects: ObjectTable,
     pub(crate) value_objects: BTreeMap<MemoryObjectKey, ObjectId>,
     pub(crate) indexed_addresses: crate::dense::IdMap<ValueId, ValueId>,
     /// How far into its object an address sits, for a member of a declared
@@ -1831,7 +1883,7 @@ impl<'a> ObjectModelBuilder<'a> {
         machine_context: Option<&'a SourceMachineContext>,
     ) -> Self {
         let escaped_unknown_id = ObjectId(0);
-        let mut objects = BTreeMap::new();
+        let mut objects = ObjectTable::default();
         objects.insert(
             escaped_unknown_id,
             ObjectFact {
@@ -2080,8 +2132,6 @@ impl<'a> ObjectModelBuilder<'a> {
             stack_objects: self.stack_objects,
             entry_stack_roots: self.entry_stack_roots,
             address_bits_by_space: self.address_bits_by_space,
-            parameter_objects: self.parameter_objects,
-            pointee_objects: self.pointee_objects,
             global_objects: self.global_objects,
             escaped_unknown: self.escaped_unknown,
         }

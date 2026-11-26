@@ -25,7 +25,7 @@ pub(super) struct Tags {
 impl Tags {
     pub(super) fn of(input: &RenderInput<'_>) -> Self {
         let callees = input.callee_type_graphs().collect::<Vec<_>>();
-        let (graph, inferred) = (input.type_graph(), input.inferred_aggregates());
+        let (graph, inferred) = (input.type_graph(), &input.records().definitions);
         Self::of_parts(graph, inferred, &callees, input.ptr_bits())
     }
 
@@ -70,7 +70,18 @@ impl Tags {
             let defined = (stated.iter())
                 .filter(|(name, _)| candidates.contains_key(*name))
                 .filter_map(|(name, definition)| {
-                    let members = spelled_members(&definition.members, &candidates, &declarable)?;
+                    let members = spelled_members(&definition.members, &candidates, &declarable)
+                        .or_else(|| {
+                            // An inferred record's member is a byte copy: a pointer to a tag the
+                            // unit cannot name is a pointer still, `void *` (D643).
+                            let inferred = inferred.contains_key(name);
+                            let members = definition.members.iter().map(|(ty, member)| {
+                                let ty = spelled_member(ty, &candidates, &declarable)
+                                    .or_else(|| inferred.then(|| void_pointer(ty)).flatten())?;
+                                Some((ty, member.clone()))
+                            });
+                            members.collect()
+                        })?;
                     Some((name.clone(), (definition.is_union, members)))
                 })
                 .collect::<BTreeMap<_, _>>();
@@ -257,6 +268,11 @@ fn spelled_member(
         })
         .or_else(|| calls::untagged_pointer(ty)),
     }
+}
+
+/// `void *` for a pointer, whatever it points at.
+fn void_pointer(ty: &CType) -> Option<CType> {
+    matches!(ty.unaliased(), CType::Pointer(_)).then(|| CType::Pointer(Box::new(CType::Void)))
 }
 
 /// Evidence for each laid-out tag the unit cannot define, a member of it being unspelled.
