@@ -62,6 +62,20 @@ def emit(data):
         stream.feed(data)
 
 
+def keystroke_delay():
+    return 0.04 + random.random() * 0.05
+
+
+# The shell line is written into the cast by hand, so no host prompt or path reaches it.
+emit("$ ")
+time.sleep(0.8)
+for ch in "r2s " + os.path.basename(args.binary):
+    emit(ch)
+    time.sleep(keystroke_delay())
+time.sleep(0.3)
+emit("\r\n")
+# r2s starts only now: a cursor-position query left unanswered past its timeout is resent, and the
+# stale reply then places every later prompt one query behind.
 pid, fd = pty.fork()
 if pid == 0:
     fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", args.rows, args.cols, 0, 0))
@@ -100,18 +114,6 @@ def settle(quiet=0.4, cap=20.0):
         time.sleep(0.05)
 
 
-def keystroke_delay():
-    return 0.04 + random.random() * 0.05
-
-
-# The shell line is written into the cast by hand, so no host prompt or path reaches it.
-emit("$ ")
-time.sleep(0.8)
-for ch in "r2s " + os.path.basename(args.binary):
-    emit(ch)
-    time.sleep(keystroke_delay())
-time.sleep(0.3)
-emit("\r\n")
 threading.Thread(target=reader, daemon=True).start()
 settle(0.8)
 time.sleep(0.8)
