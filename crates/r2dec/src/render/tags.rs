@@ -25,7 +25,7 @@ pub(super) struct Tags {
 impl Tags {
     pub(super) fn of(input: &RenderInput<'_>) -> Self {
         let callees = input.callee_type_graphs().collect::<Vec<_>>();
-        let (graph, inferred) = (input.type_graph(), input.inferred_aggregates());
+        let (graph, inferred) = (input.type_graph(), &input.records().definitions);
         Self::of_parts(graph, inferred, &callees, input.ptr_bits())
     }
 
@@ -70,7 +70,9 @@ impl Tags {
             let defined = (stated.iter())
                 .filter(|(name, _)| candidates.contains_key(*name))
                 .filter_map(|(name, definition)| {
-                    let members = spelled_members(&definition.members, &candidates, &declarable)?;
+                    let spelled = (&candidates, &declarable);
+                    let inferred = inferred.contains_key(name);
+                    let members = spelled_members(&definition.members, spelled, inferred)?;
                     Some((name.clone(), (definition.is_union, members)))
                 })
                 .collect::<BTreeMap<_, _>>();
@@ -226,14 +228,19 @@ impl Tags {
     }
 }
 
-/// Each of `members` as the definition spells it, where every one is spelled.
+/// Each of `members` as the definition spells it, where every one is spelled. An inferred record's
+/// member is a byte copy: a pointer to a tag the unit cannot name stays a pointer, `void *` (D643).
 fn spelled_members(
     members: &[(CType, String)],
-    defined: &BTreeMap<String, bool>,
-    declarable: &BTreeMap<String, bool>,
+    (defined, declarable): (&BTreeMap<String, bool>, &BTreeMap<String, bool>),
+    inferred: bool,
 ) -> Option<Vec<(CType, String)>> {
+    let spelled = |ty: &CType| {
+        spelled_member(ty, defined, declarable)
+            .or_else(|| inferred.then(|| void_pointer(ty)).flatten())
+    };
     (members.iter())
-        .map(|(ty, member)| Some((spelled_member(ty, defined, declarable)?, member.clone())))
+        .map(|(ty, member)| Some((spelled(ty)?, member.clone())))
         .collect()
 }
 
@@ -257,6 +264,11 @@ fn spelled_member(
         })
         .or_else(|| calls::untagged_pointer(ty)),
     }
+}
+
+/// `void *` for a pointer, whatever it points at.
+fn void_pointer(ty: &CType) -> Option<CType> {
+    matches!(ty.unaliased(), CType::Pointer(_)).then(|| CType::Pointer(Box::new(CType::Void)))
 }
 
 /// Evidence for each laid-out tag the unit cannot define, a member of it being unspelled.

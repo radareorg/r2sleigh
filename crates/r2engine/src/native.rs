@@ -3361,12 +3361,24 @@ impl Native<'_> {
         let named = (starts.collect::<BTreeSet<_>>().into_iter())
             .filter_map(|address| Some((address, self.program.name_at(address)?.text().to_owned())))
             .collect::<Vec<_>>();
+        let writes = self.program.loader_writes();
         let types = (named.iter())
-            .map(|(address, _)| declarations.object_at(*address).map(|object| object.ty))
+            .map(|(address, name)| match declarations.object_at(*address) {
+                Some(object) => Some(crate::declared::ObjectType::Debug(object.ty)),
+                None => crate::declared::copied_object(self.target, writes, *address, name),
+            })
             .collect::<Vec<_>>();
         let (nodes, graph) = crate::declared::object_types(self.target, &types);
-        let objects = (named.into_iter().zip(nodes))
-            .map(|((address, name), node)| SourceDataObject::new(address, name, node))
+        let objects = (named.into_iter().zip(nodes).zip(types))
+            .map(|(((address, name), node), ty)| {
+                let object = SourceDataObject::new(address, name, node);
+                match (ty, node) {
+                    (Some(crate::declared::ObjectType::Library { row, .. }), Some(_)) => {
+                        object.cited(&row.citation)
+                    }
+                    _ => object,
+                }
+            })
             .collect();
         (objects, graph)
     }

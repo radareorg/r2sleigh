@@ -2323,3 +2323,50 @@ fn a_call_through_an_unbound_slot_names_the_slot_in_its_gap() {
         "{text}"
     );
 }
+
+/// `f` reads five integer formals and a `double` in XMM0, then calls through RSI, so R9 may be handed
+/// on (a floor); `caller` loads XMM0 with 86400.0 and leaves R9 unwritten (find `0x12588`, D546).
+const MIXED_HOMES: &[u8] = &[
+    0x48, 0x01, 0xf7, // 1000 add rdi, rsi
+    0x48, 0x01, 0xd7, // 1003 add rdi, rdx
+    0x48, 0x01, 0xcf, // 1006 add rdi, rcx
+    0x4c, 0x01, 0xc7, // 1009 add rdi, r8
+    0xf2, 0x0f, 0x11, 0x07, // 100c movsd [rdi], xmm0
+    0xff, 0xd6, // 1010 call rsi
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1012 mov eax, 1
+    0xc3, // 1017 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
+    0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0xf5, 0x40, // 1020 mov rax, 86400.0
+    0x66, 0x48, 0x0f, 0x6e, 0xc0, // 102a movq xmm0, rax
+    0xbf, 0x00, 0x20, 0x00, 0x00, // 102f mov edi, 0x2000
+    0x31, 0xf6, // 1034 xor esi, esi
+    0x31, 0xd2, // 1036 xor edx, edx
+    0x31, 0xc9, // 1038 xor ecx, ecx
+    0x45, 0x31, 0xc0, // 103a xor r8d, r8d
+    0xe8, 0xbe, 0xff, 0xff, 0xff, // 103d call 0x1000
+    0xc3, // 1042 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1043 padding
+];
+
+/// Argument k is read at the callee's k-th formal home: the sixth is XMM0, never R9 (psABI 3.2.3).
+#[test]
+fn a_site_passes_each_argument_at_its_callee_formal_home() {
+    let program = Literal::of_code(
+        MIXED_HOMES,
+        &[("f", BASE, 0x18), ("caller", BASE + 0x20, 0x23)],
+    );
+    let rendered = OpenProgram::of(program)
+        .rendered(BASE + 0x20)
+        .expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(text.contains("caller(void)"), "{text}");
+    let call = (text.lines())
+        .find(|line| line.contains("= (uint64_t)f(0x2000"))
+        .unwrap_or_default();
+    assert!(call.contains("0x40f5180000000000"), "{text}");
+    assert!(
+        !call.contains("arg") && !call.contains("residual"),
+        "{text}"
+    );
+}

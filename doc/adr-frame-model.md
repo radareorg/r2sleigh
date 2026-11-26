@@ -319,6 +319,72 @@ home 115, member 108, the array 51, save 20. "Home" is a fifth fate the ruling d
 role `stack_slot_role` states, which agrees standing alone. `frame_agree.py --committed` runs in
 `scripts/quality-gate.sh` with these counts as its bounds.
 
+## D654 step 0 (round 18)
+
+Measured at 5f39d32a6 over DecBench (2,621 functions) with a probe patch that ships nothing: each
+promotion pass's refusal, the origin of each derived point that reaches a sink or an opaque access, and
+the reason each kept place stays in memory. Class A (frame sites, `classify.py` on the base dump) is
+9,437 sites in 577 functions.
+
+**One join.** 120 listed functions refuse the whole frame on at least one promotion pass; 102 of them
+have class A sites, 4,693 in all. 87 refuse on every pass (4,171 sites) and 15 on some (522). The
+trace holds 120 more refusing entries that no list names: callees built while a listed caller renders.
+The traces taken at eb327af9a (`designs/memtypes/prom`) give the same 120, 102 and 120. The two counts
+measured there are two joins: 102 is the listed functions with a frame site; 217 (`frameb.py`) is every
+traced entry, listed or a callee, that refuses and never promotes a slot (113 of them listed), and its
+3,519 sites are the `frame + K` sites alone. The gate counts the 102.
+
+**Origins.** No refusal comes from an access whose address has no points. One function refuses as
+`whole`, where a float operation consumes a frame address with one known point. 119 refuse on a
+derived point, whose offset is known. So every unplaced address has known base candidates: 120 of 120
+functions, 4,693 of 4,693 sites. By the step that derived a point (a function may have several):
+
+| Origin of the derived point | Functions | Sites |
+|---|---|---|
+| a merge of a frame address with a non-address | 115 | 4,593 |
+| a merge that moves again (the widening) | 71 | 3,661 |
+| a mask or a mix | 36 | 2,041 |
+| a place stored twice (the widening) | 12 | 1,026 |
+| subtracted from | 8 | 561 |
+
+**D654's rule moves nothing.** A probe switch makes each derived point an escape at its offset, either
+way, as D654 states; the walk is otherwise unchanged. Refused passes fall from 555 to 4, and 26 builds
+promote more places, each a register save between -40 and -8 that `pdd` already elides. The DecBench
+dump is byte-identical, 2,621 of 2,621: loads and stores move 0. An escape reaches every place up to
+the next save on either side, and at -O2 every save sits above every local, so a derived address
+reaches every local. Under the switch the 4,693 sites of the formerly refused functions stay in memory as:
+reached by an escape 3,122 (1,460 of them also rewritten), accessed at two widths 789, an opaque
+access 749, the one `whole` function 31, a save 2. D654 is not built. The largest class is the reach,
+D674's.
+
+On AArch64, switch-hello-world `_vfprintf_r` 0x16e9c (D637) refuses the whole frame on four derived
+points (-896, -872, -640, -624). Under the switch its whole-frame refusal lifts and 13 places promote,
+all saves; `[sp, 0x90]` (entry -1136) stays in memory because it is accessed at two widths (7 accesses
+in the walk: the 64-bit table address and 32-bit `str w25`), so the table read stays unresolved and its 198 loads
+and stores do not move.
+
+**Kept places.** Each class A site, by the reason its place stays in memory on the rendered pass
+(`kept` in `walk.rs`; a site through a merged local is resolved through its one definition):
+
+| Reason | Sites | Functions |
+|---|---|---|
+| the whole frame, a derived point on every pass | 4,171 | 87 |
+| a call's write area covers it before a load (`rewritten`, D369) | 1,397 | 131 |
+| rewritten, and an escape reaches it | 1,305 | 225 |
+| an escape reaches it | 1,236 | 219 |
+| accessed at two widths | 811 | 60 |
+| the whole frame on the rendered pass, another pass promoted | 325 | 5 |
+| an indexed address, an opaque access with no exact place | 57 | 14 |
+| handed to a call as a stack argument, and reached | 56 | 24 |
+| overlapped by another place (alone or with the above) | 59 | 34 |
+| a constant offset through a merged local, an opaque access | 7 | 2 |
+| a save read back | 9 | 9 |
+| the entry block runs again | 4 | 2 |
+| unexplained | 0 | 0 |
+
+Every kept place fails the lvalue licence of D655 for the reason promotion refused it: an escape run,
+a call's write area, two widths or an overlap. A place that clears all of them is promoted already.
+
 ## Consequences
 
 - Equivalence and the census change at P4.3 and P4.4, and each change is read

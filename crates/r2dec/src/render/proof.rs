@@ -80,7 +80,7 @@ fn proof_columns(
 type Clauses<'a> = (
     &'a ProofClauses,
     ((bool, bool), &'a [Disputed]),
-    usize,
+    (usize, usize, usize),
     &'a [String],
     &'a [(usize, r2types::PointerRefusal)],
 );
@@ -104,6 +104,103 @@ fn note_landing_pads(detail: &mut String, landing_pads: u32) {
             detail,
             "; {landing_pads} {noun} not rendered: exceptional flow, a store read only there may be elided"
         );
+    }
+}
+
+/// How many data object types C library rows and the source supplied, and how many were refused.
+fn note_object_types(detail: &mut String, func: &CFunction, clauses: &ProofClauses) {
+    let source_typed_objects =
+        func.extern_objects
+            .iter()
+            .filter(|object| {
+                object.type_fact.as_ref().is_some_and(|fact| {
+                    fact.provenance == r2types::DataObjectTypeProvenance::Source
+                })
+            })
+            .count();
+    let library_typed_objects = (func.extern_objects.iter())
+        .filter(|object| {
+            object.type_fact.as_ref().is_some_and(|fact| {
+                matches!(
+                    fact.provenance,
+                    r2types::DataObjectTypeProvenance::Library { .. }
+                )
+            })
+        })
+        .count();
+    let refused_object_types = clauses.refused_object_types.len();
+    if library_typed_objects > 0 {
+        let noun = if library_typed_objects == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(
+            detail,
+            "; {library_typed_objects} {noun} from C library rows the loader's copy binds"
+        );
+    }
+    if source_typed_objects > 0 {
+        let noun = if source_typed_objects == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(
+            detail,
+            "; {source_typed_objects} {noun} supplied by the source"
+        );
+    }
+    if refused_object_types > 0 {
+        let noun = if refused_object_types == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(detail, "; {refused_object_types} {noun} refused");
+    }
+}
+
+/// The structures laid out from accesses, the records refused as recursive, and the tags stated two ways.
+fn note_layouts(detail: &mut String, conflicting: &[String], laid_out: (usize, usize, usize)) {
+    // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
+    // A tag two graphs state as different kinds has no one declaration: its pointers are words.
+    for tag in conflicting {
+        let _ = write!(
+            detail,
+            "; tag `{tag}` is stated as both a struct and a union, so a pointer to it is spelled at its class"
+        );
+    }
+    let (laid_out, through_loaded, recursive) = laid_out;
+    match through_loaded {
+        0 => {}
+        1 => detail.push_str("; 1 structure laid out from a loaded pointer's accesses"),
+        n => {
+            let _ = write!(
+                detail,
+                "; {n} structures laid out from loaded pointers' accesses"
+            );
+        }
+    }
+    match recursive {
+        0 => {}
+        1 => detail.push_str("; 1 record refused: a pointer field leads back to it (Recursive)"),
+        n => {
+            let _ = write!(
+                detail,
+                "; {n} records refused: a pointer field leads back to each (Recursive)"
+            );
+        }
+    }
+    match laid_out {
+        0 => {}
+        1 => detail.push_str("; 1 structure laid out from a parameter's accesses"),
+        n => {
+            let _ = write!(
+                detail,
+                "; {n} structures laid out from parameters' accesses"
+            );
+        }
     }
 }
 
@@ -150,35 +247,7 @@ pub(crate) fn note_unproven_constructs(
         _ => detail,
     };
     note_unassigned_reads(&mut detail, clauses);
-    let source_typed_objects =
-        func.extern_objects
-            .iter()
-            .filter(|object| {
-                object.type_fact.as_ref().is_some_and(|fact| {
-                    fact.provenance == r2types::DataObjectTypeProvenance::Source
-                })
-            })
-            .count();
-    let refused_object_types = clauses.refused_object_types.len();
-    if source_typed_objects > 0 {
-        let noun = if source_typed_objects == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(
-            &mut detail,
-            "; {source_typed_objects} {noun} supplied by the source"
-        );
-    }
-    if refused_object_types > 0 {
-        let noun = if refused_object_types == 1 {
-            "data object type"
-        } else {
-            "data object types"
-        };
-        let _ = write!(&mut detail, "; {refused_object_types} {noun} refused");
-    }
+    note_object_types(&mut detail, func, clauses);
     if radare2_variadic_format_counts > 0 {
         let noun = if radare2_variadic_format_counts == 1 {
             "variadic callsite argument count"
@@ -202,6 +271,12 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
+    if let Some(index) = clauses.unclassed {
+        let _ = write!(
+            &mut detail,
+            "; the signature is refused: parameter {index}'s C class is unknown, so the parameters listed are a floor"
+        );
+    }
     note_frame_isolation(&mut detail, ledger);
     note_landing_pads(&mut detail, landing_pads);
     if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
@@ -223,24 +298,7 @@ pub(crate) fn note_unproven_constructs(
     }
     note_unproven_parameters(&mut detail, parameters);
     note_disputed(&mut detail, disputed);
-    // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
-    // A tag two graphs state as different kinds has no one declaration: its pointers are words.
-    for tag in conflicting {
-        let _ = write!(
-            &mut detail,
-            "; tag `{tag}` is stated as both a struct and a union, so a pointer to it is spelled at its class"
-        );
-    }
-    match laid_out {
-        0 => {}
-        1 => detail.push_str("; 1 structure laid out from a parameter's accesses"),
-        n => {
-            let _ = write!(
-                &mut detail,
-                "; {n} structures laid out from parameters' accesses"
-            );
-        }
-    }
+    note_layouts(&mut detail, conflicting, laid_out);
     if radare2_local_names > 0 {
         let noun = if radare2_local_names == 1 {
             "local name"
@@ -431,11 +489,17 @@ fn note_unassigned_reads(detail: &mut String, clauses: &ProofClauses) {
 pub struct ProofClauses {
     refused_object_types: Vec<String>,
     unassigned: Vec<(UnassignedCause, Vec<String>)>,
+    /// The first formal whose C class is unknown: the signature is refused there (D661).
+    unclassed: Option<u32>,
 }
 
 impl ProofClauses {
     /// The clauses of `func`, whose data objects are declared, with the reads left unassigned.
-    pub(crate) fn of(func: &CFunction, unassigned: &[UnassignedRead]) -> Self {
+    pub(crate) fn of(
+        func: &CFunction,
+        unassigned: &[UnassignedRead],
+        unclassed: Option<u32>,
+    ) -> Self {
         let refused_object_types = (func.extern_objects.iter())
             .filter(|object| object.type_fact.is_none() && object.type_refusal.is_some())
             .map(|object| object.name.clone())
@@ -452,6 +516,7 @@ impl ProofClauses {
         Self {
             refused_object_types,
             unassigned: by_cause,
+            unclassed,
         }
     }
 
@@ -497,4 +562,36 @@ fn count_body_statements(stmts: &[CStmt]) -> usize {
         }
     }
     stmts.iter().map(visit).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A formal whose C class is unknown refuses the signature: the header lists the formals before
+    /// it as a floor and never spells `(void)`, which states no parameters (C17 6.7.6.3p10, D661).
+    #[test]
+    fn an_unclassed_formal_refuses_the_signature_and_never_spells_void() {
+        let mut func = CFunction::new("f", crate::ast::CType::Void);
+        func.params_known = false;
+        let clauses = ProofClauses {
+            refused_object_types: Vec::new(),
+            unassigned: Vec::new(),
+            unclassed: Some(0),
+        };
+        let parameters = (
+            &clauses,
+            ((false, false), &[][..]),
+            (0, 0, 0),
+            &[][..],
+            &[][..],
+        );
+        note_unproven_constructs(&mut func, None, 0, 0, 0, parameters, None, None, 0);
+        let mut codegen =
+            crate::codegen::CodeGenerator::new(crate::codegen::CodeGenConfig::default());
+        let ready = crate::codegen::prepare_function_for_emission(func);
+        let code = codegen.generate_function(&ready);
+        assert!(code.contains("void f()"), "{code}");
+        assert!(code.contains("parameter 0's C class is unknown"), "{code}");
+    }
 }

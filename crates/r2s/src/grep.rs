@@ -309,6 +309,11 @@ const SHAPES: &[(&str, &str)] = &[
          line where that byte starts a longer character is refused once the command has run: \
          radare2 prints the rest of the character, which is not text",
     ),
+    (
+        "scr.color.grep",
+        "true keeps the colour: a whole kept line prints with its escapes, as the command \
+         painted it; columns print as text",
+    ),
 ];
 
 /// The forms the parser refuses, with nothing run.
@@ -450,6 +455,12 @@ const JUDGED: &[(&str, &str)] = &[
          number with a line that is not one by strcmp, so a number can sort after such a line, \
          and that comparator is not transitive; it also reads a leading 0 as octal and wraps \
          past 64 bits (grep.c:452-464)",
+    ),
+    (
+        "scr.color.grep",
+        "words, columns, orders and repeats read each line without its escapes; radare2 reads \
+         the escapes too under scr.color.grep=true (grep.c:907-910), so `~32` matches a green \
+         line there",
     ),
     (
         "a\\~?? \"~?\"~??",
@@ -1109,34 +1120,35 @@ impl Grep {
     ///
     /// `text` is what the command printed, every line ended by a newline, and
     /// so is what the grep prints: an empty line is a line, and no line is
-    /// nothing at all.
-    pub(crate) fn apply(&self, text: &str) -> Result<String, String> {
-        let lines = self.select(text)?;
+    /// nothing at all. `painted` (`scr.color.grep`) prints a whole line kept.
+    pub(crate) fn apply(&self, text: &str, painted: bool) -> Result<String, String> {
+        let lines = self.select(text, painted)?;
         let lines = self.window(lines);
         let lines = self.order(lines);
         Ok(self.spell(&lines))
     }
 
-    /// The lines every stage matches, each without its ANSI escapes. A line
-    /// left empty by them is blank.
-    fn select<'a>(&self, text: &'a str) -> Result<Vec<Cow<'a, str>>, String> {
+    /// The lines every stage matches, each read without its ANSI escapes. A
+    /// line left empty by them is blank.
+    fn select<'a>(&self, text: &'a str, painted: bool) -> Result<Vec<Line<'a>>, String> {
         if text.is_empty() {
             return Ok(Vec::new());
         }
         let text = text.strip_suffix('\n').unwrap_or(text);
         let mut kept = Vec::new();
         for line in text.split('\n') {
-            let line = without_escapes(line)?;
-            let dropped = line.is_empty() && !self.keep_blank;
-            if !dropped && self.stages.iter().all(|stage| stage.hit(&line)) {
-                kept.push(line);
+            let read = without_escapes(line)?;
+            let dropped = read.is_empty() && !self.keep_blank;
+            if !dropped && self.stages.iter().all(|stage| stage.hit(&read)) {
+                let shown = painted.then_some(line);
+                kept.push(Line { read, shown });
             }
         }
         Ok(kept)
     }
 
     /// The columns and rows kept, rows counted as [`RowBase`] says.
-    fn window<'a>(&self, lines: Vec<Cow<'a, str>>) -> Vec<Cow<'a, str>> {
+    fn window<'a>(&self, lines: Vec<Line<'a>>) -> Vec<Line<'a>> {
         if self.columns.is_empty() {
             return self.rows_of(lines);
         }
@@ -1156,14 +1168,17 @@ impl Grep {
         lines
     }
 
-    /// Each line cut to its columns; a line with none of them is dropped
-    /// (grep.c:1134).
-    fn project<'a>(&self, lines: Vec<Cow<'a, str>>) -> Vec<Cow<'a, str>> {
+    /// Each line cut to its columns, as text; a line with none of them is
+    /// dropped (grep.c:1134).
+    fn project<'a>(&self, lines: Vec<Line<'a>>) -> Vec<Line<'a>> {
         lines
             .iter()
-            .map(|line| self.columns_of(line))
-            .filter(|line| !line.is_empty())
-            .map(Cow::Owned)
+            .map(|line| self.columns_of(&line.read))
+            .filter(|columns| !columns.is_empty())
+            .map(|columns| Line {
+                read: Cow::Owned(columns),
+                shown: None,
+            })
             .collect()
     }
 
@@ -1182,19 +1197,19 @@ impl Grep {
         kept.join(" ")
     }
 
-    fn order<'a>(&self, mut lines: Vec<Cow<'a, str>>) -> Vec<Cow<'a, str>> {
+    fn order<'a>(&self, mut lines: Vec<Line<'a>>) -> Vec<Line<'a>> {
         let head = self.header.min(lines.len());
         let rest = &mut lines[head..];
         match self.order {
             Order::Keep => {}
-            Order::Ascending => rest.sort_by(|a, b| compare(a, b)),
+            Order::Ascending => rest.sort_by(|a, b| compare(&a.read, &b.read)),
             Order::Descending => {
-                rest.sort_by(|a, b| compare(a, b));
+                rest.sort_by(|a, b| compare(&a.read, &b.read));
                 rest.reverse();
             }
             Order::Reversed => rest.reverse(),
             Order::Unique => {
-                rest.sort_by(|a, b| compare(a, b));
+                rest.sort_by(|a, b| compare(&a.read, &b.read));
                 return unique(lines);
             }
         }
@@ -1202,12 +1217,15 @@ impl Grep {
     }
 
     /// The result as printed: each line ended by a newline.
-    fn spell(&self, lines: &[Cow<'_, str>]) -> String {
+    fn spell(&self, lines: &[Line<'_>]) -> String {
         match self.tally {
-            Tally::Lines => lines.iter().map(|line| format!("{line}\n")).collect(),
+            Tally::Lines => lines
+                .iter()
+                .map(|line| format!("{}\n", line.shown()))
+                .collect(),
             Tally::LineCount => format!("{}\n", lines.len()),
             Tally::ByteCount => {
-                let bytes: usize = lines.iter().map(|line| line.len() + 1).sum();
+                let bytes: usize = lines.iter().map(|line| line.shown().len() + 1).sum();
                 format!("{bytes}\n")
             }
         }
@@ -1263,12 +1281,25 @@ fn escape_length(sequence: &[u8]) -> usize {
 
 /// Each line once, where it first appears (radare2 hashes the lines,
 /// grep.c:1024).
-fn unique(lines: Vec<Cow<'_, str>>) -> Vec<Cow<'_, str>> {
+fn unique(lines: Vec<Line<'_>>) -> Vec<Line<'_>> {
     let mut seen = BTreeSet::new();
     lines
         .into_iter()
-        .filter(|line| seen.insert(line.clone()))
+        .filter(|line| seen.insert(line.read.clone()))
         .collect()
+}
+
+/// A kept line: the text the grep reads, and under `scr.color.grep` the
+/// painted line it prints.
+struct Line<'a> {
+    read: Cow<'a, str>,
+    shown: Option<&'a str>,
+}
+
+impl Line<'_> {
+    fn shown(&self) -> &str {
+        self.shown.unwrap_or(&self.read)
+    }
 }
 
 /// A total order: lines that are decimal integers after leading blanks, as
@@ -1482,6 +1513,7 @@ mod tests {
         ("~:a~:b", &[":0..5~:1..3"]),
         // Read from each line of the output, whatever the grep.
         ("ESC", &[]),
+        ("scr.color.grep", &[":3..8", "32"]),
         (
             "\\X",
             &[

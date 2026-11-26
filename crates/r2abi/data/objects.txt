@@ -1,0 +1,13 @@
+# The type a C library's header declares a data object at. A program binds one only where its
+# loader copies that object here (`R_*_COPY`) under the same symbol, at the type's size (D653).
+#
+# library | name | type | header line that declares it
+
+# ISO C17 7.21.1p3: stdin, stdout and stderr are expressions of type `FILE *`.
+glibc | stdin | FILE * | glibc 2.39 <stdio.h>, libio/stdio.h:149
+glibc | stdout | FILE * | glibc 2.39 <stdio.h>, libio/stdio.h:150
+glibc | stderr | FILE * | glibc 2.39 <stdio.h>, libio/stdio.h:151
+
+# POSIX.1-2017 getopt: `extern char *optarg; extern int optind;`.
+glibc | optarg | char * | glibc 2.39 <getopt.h>, posix/bits/getopt_core.h:36
+glibc | optind | int | glibc 2.39 <getopt.h>, posix/bits/getopt_core.h:50

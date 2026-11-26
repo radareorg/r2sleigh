@@ -93,7 +93,9 @@ fn copied_into(program: Literal, word: u64) -> Literal {
         .loader_written(LoaderWrite {
             place: word,
             width: 8,
-            kind: WriteKind::Copy,
+            kind: WriteKind::Copy {
+                symbol: Some("__stack_chk_guard".into()),
+            },
             encoding: r2engine::program::Encoding::Word,
         })
 }

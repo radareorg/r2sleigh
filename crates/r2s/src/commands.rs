@@ -24,8 +24,8 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
         Some(Suffix::Filter(grep)) => Some(grep),
         None => None,
     };
-    // A grep reads the text, and an escape in it would split what it matches.
-    session.grepped = grep.is_some();
+    // A grep reads a pipe's plain text, unless `scr.color.grep` keeps the terminal's.
+    session.grepped = grep.is_some() && !session.color_grep;
     let output = match &statement.at {
         Some(address) => elsewhere(session, address, &statement.command),
         None => dispatch(session, &statement.command),
@@ -33,7 +33,7 @@ pub fn run(session: &mut Session, statement: &Statement) -> Result<String, Strin
     session.grepped = false;
     let output = output.map_err(|error| cut_seek(statement, error))?;
     Ok(match grep {
-        Some(grep) => grep.apply(&output)?,
+        Some(grep) => grep.apply(&output, session.color_grep)?,
         None => output,
     })
 }
@@ -706,7 +706,7 @@ fn stated_info(session: &Session) -> r2engine::InfoJson {
             nx: posture.nx,
             pic: elf.then_some(posture.load == r2image::LoadBase::Slid),
             relro: posture.relro.map(|relro| relro.spelled()),
-            statically_linked: elf.then_some(posture.statically_linked),
+            statically_linked: posture.statically_linked,
         },
     }
 }

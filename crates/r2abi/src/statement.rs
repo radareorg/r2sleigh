@@ -80,8 +80,9 @@ pub struct Posture {
     pub relro: Option<Relro>,
     /// The dynamic linker `PT_INTERP` names (empty where the header holds no readable path).
     pub interpreter: Option<String>,
-    /// No `PT_INTERP` and no `PT_DYNAMIC`: nothing relocates this image but its own start-up.
-    pub statically_linked: bool,
+    /// `Some(true)`: no `PT_INTERP`, and no `PT_DYNAMIC` or no `DT_NEEDED` with `DF_1_PIE`; `Some(false)`:
+    /// `PT_INTERP`, `DT_NEEDED` or `DT_SONAME`; otherwise unstated. Read only by `i`.
+    pub statically_linked: Option<bool>,
 }
 
 /// Where the loader places an image, as its header states it (gABI chapter 5, "Base Address").
@@ -861,9 +862,9 @@ pub enum WriteKind {
     /// A word the psABI reserves for the dynamic loader's link map or lazy
     /// resolver (x86-64 psABI 5.2, AAELF64 GOT[1..2]): never an address of this image.
     Reserved,
-    /// Another image's object copied here (`R_*_COPY`): its relocated bytes, which name this image
-    /// only through definitions it exports, never a function only this image names.
-    Copy,
+    /// Another image's object copied here (`R_*_COPY`), naming this image only through its exports;
+    /// `symbol` is the object's where its symbol states a size, the write's width (D653).
+    Copy { symbol: Option<String> },
     /// Written, with no value the container states: a whole table a psABI
     /// reserves, a signed pointer, or a format this reader does not decode.
     #[default]

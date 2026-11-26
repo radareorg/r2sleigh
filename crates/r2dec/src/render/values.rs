@@ -64,6 +64,8 @@ pub(super) struct Values<'a> {
     frame_formals: Vec<(u32, SymbolId, MachineType, bool)>,
     symbols: Rc<RefCell<SymbolTable>>,
     params: Vec<CParam>,
+    /// The first formal whose C class is unknown: the header lists those before it, a floor.
+    unclassed: Option<u32>,
     locals: RefCell<Vec<CLocal>>,
     /// By instruction index: whether the text discharged it, which the ledger reads.
     rendered: RefCell<Vec<bool>>,
@@ -833,6 +835,7 @@ impl<'a> Values<'a> {
             frame_formals: Vec::new(),
             symbols,
             params: Vec::new(),
+            unclassed: None,
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
@@ -863,17 +866,17 @@ impl<'a> Values<'a> {
             projection,
             roots,
         };
-        let parameters = parameters(input, artifact);
-        values.own.params = parameters
-            .as_ref()
-            .map(|parameters| parameters.iter().map(|(_, _, class)| *class).collect());
+        let (parameters, unclassed) = parameters(input, artifact);
+        values.own.params =
+            (unclassed.is_none()).then(|| parameters.iter().map(|(_, _, class)| *class).collect());
+        values.unclassed = unclassed;
         values.declare(input, tags, parameters);
         values.prototypes = values.decide_prototypes();
         Some(values)
     }
 
-    /// Each cell a parameter that points to its inferred structure addresses, as that member. All
-    /// or nothing per parameter: one access with no member keeps the byte spelling for every one.
+    /// Each cell a parameter that points to its inferred record addresses, as the member or span
+    /// the record states at the access's offset; an access it refuses keeps its byte spelling.
     fn members_of(
         &self,
         input: &RenderInput<'_>,
@@ -885,8 +888,9 @@ impl<'a> Values<'a> {
         if !self.little_endian {
             return members;
         }
-        let fields = &self.artifact.certificates().parameter_fields;
         let through = self.accesses_by_parameter(&pointing);
+        let records = input.records();
+        let mut inferred = BTreeMap::new();
         for (slot, tag, base, stated) in pointing {
             if let Some(cells) = stated
                 .then(|| self.projected_members(slot, &base, through.get(slot)?))
@@ -895,39 +899,75 @@ impl<'a> Values<'a> {
                 self.place(&mut members, cells);
                 continue;
             }
-            let Some(structure) = input.parameter_structures().get(&slot) else {
+            let Some(record) = (records.parameters.get(&slot)).filter(|record| record.tag == tag)
+            else {
                 continue;
             };
-            let (Some(definition), Ok(key)) = (
-                (structure.tag == tag)
-                    .then(|| input.inferred_aggregates().get(&tag))
-                    .flatten(),
-                u32::try_from(slot),
-            ) else {
-                continue;
-            };
-            let Some(r2ssa::ParameterFields::Constant(accesses)) = fields.get(&key) else {
-                continue;
-            };
-            let cells = accesses.iter().map(|access| {
-                let (_, name) = definition
-                    .members
-                    .get(*structure.fields.get(&access.offset)?)?;
-                let cell = self.roots.access(access.access)?.canonical;
-                let member = CExpr::PtrMember {
-                    base: Box::new(base.clone()),
-                    member: name.clone(),
-                };
-                Some((cell, MemberCell::At(CExpr::addr_of(member))))
-            });
-            if let Some(cells) = cells.collect::<Option<Vec<_>>>() {
-                self.place(&mut members, cells);
+            if let (Some(definition), Ok(slot)) =
+                (records.definitions.get(&tag), u32::try_from(slot))
+            {
+                inferred.insert(slot, (record, definition, base));
             }
+        }
+        // One pass over the places: each access through a pointing parameter or a loaded pointer
+        // whose record the unit defines, `O(A log M)`.
+        let places = self.artifact.certificates().places.iter();
+        let cells = places.filter_map(|place| {
+            let r2ssa::Place::Field { offset, width } = place.place else {
+                return None;
+            };
+            let named =
+                |record: &r2types::ParameterRecord| member_name(records, record, offset, width);
+            let cell = self.roots.access(place.access)?.canonical;
+            match place.base {
+                r2ssa::PlaceBase::Parameter(slot) => {
+                    let (record, _, base) = inferred.get(&slot)?;
+                    let member = CExpr::PtrMember {
+                        base: Box::new(base.clone()),
+                        member: named(record)?,
+                    };
+                    Some((cell, MemberCell::At(CExpr::addr_of(member))))
+                }
+                r2ssa::PlaceBase::Loaded(load) => {
+                    let record =
+                        (records.loaded(load)).filter(|record| tags.defines(&record.tag, false))?;
+                    Some((cell, self.through_loaded(load, record, named(record)?)?))
+                }
+                _ => None,
+            }
+        });
+        let cells = cells.collect::<Vec<_>>();
+        if !cells.is_empty() {
+            self.place(&mut members, cells);
         }
         if let Some(cells) = self.member_rooted(tags) {
             self.place(&mut members, cells);
         }
         members
+    }
+
+    /// A member through a loaded pointer: the variable holding the pointer, cast to its record.
+    fn through_loaded(
+        &self,
+        load: r2ssa::StructuredAccessId,
+        record: &r2types::ParameterRecord,
+        member: String,
+    ) -> Option<MemberCell> {
+        let result = self
+            .artifact
+            .facts()
+            .structured
+            .memory_accesses
+            .get(&load)?
+            .value?;
+        let word = self.roots.access(load)?.canonical;
+        let pointer = CType::Pointer(Box::new(CType::Struct(record.tag.clone())));
+        Some(MemberCell::Through {
+            pointer,
+            member,
+            result,
+            word,
+        })
     }
 
     /// Each cell a projection roots at a loaded pointer member, as a member of the struct that
@@ -1059,10 +1099,10 @@ impl<'a> Values<'a> {
         &mut self,
         input: &RenderInput<'_>,
         tags: &super::tags::Tags,
-        parameters: Option<Vec<(u32, r2ssa::FormalHome, MachineType)>>,
+        parameters: Vec<(u32, r2ssa::FormalHome, MachineType)>,
     ) {
         let mut pointing = Vec::new();
-        for (index, home, ty) in parameters.into_iter().flatten() {
+        for (index, home, ty) in parameters {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
             let stated = input.declared_parameter(index as usize, ty.width_bits());
             let declared = self.parameter_type(input, tags, (index, &ty), stated.as_ref());
@@ -1220,6 +1260,11 @@ impl<'a> Values<'a> {
 
     pub(super) fn params(&self) -> Vec<CParam> {
         self.params.clone()
+    }
+
+    /// The first formal whose C class is unknown, where one is: `params` lists those before it.
+    pub(super) const fn unclassed(&self) -> Option<u32> {
+        self.unclassed
     }
 
     pub(super) fn locals(&self) -> Vec<CLocal> {
@@ -2954,43 +2999,40 @@ fn spells_an_identifier(name: &str) -> bool {
 }
 
 /// The parameters in ABI order at the class C passes them in (a declared float a float, else an
-/// integer of its width); `None` where any is unknown (doc/adr-decompiler-rewrite.md).
+/// integer of its width), up to the first whose class is unknown, which it names (C17 6.7.6.3p10).
 fn parameters(
     input: &RenderInput<'_>,
     artifact: &SsaArtifact,
-) -> Option<Vec<(u32, r2ssa::FormalHome, MachineType)>> {
-    artifact
-        .facts()
-        .boundaries
-        .parameters
-        .values()
-        .map(|parameter| {
-            let width_bits = parameter.bytes() * 8;
-            let declared = input
-                .parameter_declaration(parameter.index as usize, width_bits)
-                .map(|declared| class_of(&declared, width_bits));
-            // A register's class is the convention's; a stack slot carries any, so its declaration
-            // decides and the machine word is the class only where none is declared.
-            let register = parameter.register();
-            let class = match (declared, register) {
-                (Some(None), _) => return None,
-                (Some(Some(declared)), Some((abi_storage, _))) => agreed(
-                    Some(declared),
-                    located_class(artifact, abi_storage, width_bits),
-                )?,
-                (Some(Some(declared)), None) => declared,
-                (None, Some((abi_storage, _))) => located_class(artifact, abi_storage, width_bits)?,
-                (None, None) => {
-                    class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits)?
-                }
-            };
-            // A parameter is declared at its value's own width: a lane of it is read by name.
-            if class.width_bits() != width_bits {
-                return None;
-            }
-            Some((parameter.index, parameter.home, class))
-        })
-        .collect()
+) -> (Vec<(u32, r2ssa::FormalHome, MachineType)>, Option<u32>) {
+    let classed = |parameter: &r2ssa::SourceFormalParameterFact| {
+        let width_bits = parameter.bytes() * 8;
+        let declared = input
+            .parameter_declaration(parameter.index as usize, width_bits)
+            .map(|declared| class_of(&declared, width_bits));
+        // A register's class is the convention's; a stack slot carries any, so its declaration
+        // decides and the machine word is the class only where none is declared.
+        let register = parameter.register();
+        let class = match (declared, register) {
+            (Some(None), _) => return None,
+            (Some(Some(declared)), Some((abi_storage, _))) => agreed(
+                Some(declared),
+                located_class(artifact, abi_storage, width_bits),
+            )?,
+            (Some(Some(declared)), None) => declared,
+            (None, Some((abi_storage, _))) => located_class(artifact, abi_storage, width_bits)?,
+            (None, None) => class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits)?,
+        };
+        // A parameter is declared at its value's own width: a lane of it is read by name.
+        (class.width_bits() == width_bits).then_some((parameter.index, parameter.home, class))
+    };
+    let mut listed = Vec::new();
+    for parameter in artifact.facts().boundaries.parameters.values() {
+        match classed(parameter) {
+            Some(formal) => listed.push(formal),
+            None => return (listed, Some(parameter.index)),
+        }
+    }
+    (listed, None)
 }
 
 /// Why a live instruction's statement is a gap: the marker's kind, which says what is missing.
@@ -3171,6 +3213,26 @@ fn joined(stated: impl IntoIterator<Item = CExternDecl>) -> BTreeMap<String, Opt
         }
     }
     decided
+}
+
+/// The member `record` names at `(offset, width)`, unless the record refused that span.
+fn member_name(
+    records: &r2types::Records,
+    record: &r2types::ParameterRecord,
+    offset: i64,
+    width: u32,
+) -> Option<String> {
+    let refused = |(at, bytes, _): &(i64, u32, r2types::SpanRefusal)| (*at, *bytes);
+    if (record
+        .refused
+        .binary_search_by_key(&(offset, width), refused))
+    .is_ok()
+    {
+        return None;
+    }
+    let definition = records.definitions.get(&record.tag)?;
+    let (_, name) = definition.members.get(*record.fields.get(&offset)?)?;
+    Some(name.clone())
 }
 
 #[cfg(test)]

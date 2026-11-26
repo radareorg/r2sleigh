@@ -100,14 +100,15 @@ impl Role {
             Self::Keyword => ["35", "38;5;170", "38;2;215;95;215"],
             Self::String => ["93", "38;5;222", "38;2;255;215;135"],
             Self::Comment => ["90", "38;5;248", "38;2;168;168;168"],
-            Self::ProofRefused => ["41;97", "48;5;88;38;5;231", "48;2;135;0;0;38;2;255;255;255"],
+            Self::ProofRefused => ["41;30", "48;5;88;38;5;231", "48;2;135;0;0;38;2;255;255;255"],
             Self::ProofReason => ["39", "38;5;210", "38;2;255;135;135"],
             Self::ProofUnknown => ["43;30", "48;5;214;38;5;16", "48;2;230;159;0;38;2;0;0;0"],
             Self::ProofBound => ["94", "38;5;74", "38;2;86;180;233"],
             Self::ProofPremise => ["95", "38;5;227", "38;2;240;228;66"],
             Self::ProofDeclared => ["95", "38;5;175", "38;2;204;121;167"],
             Self::ProofRead => ["94", "38;5;36", "38;2;43;197;154"],
-            Self::ProofAssumed => ["95", "38;5;173", "38;2;215;135;95"],
+            // `_` is the one mark drawn on the cell's bottom edge: bold keeps it from fading.
+            Self::ProofAssumed => ["1;95", "1;38;5;173", "1;38;2;215;135;95"],
             Self::FlowLoop => ["35", "38;5;140", "38;2;175;135;215"],
             Self::Rail => ["90", "38;5;240", "38;2;88;88;88"],
         })
@@ -393,12 +394,64 @@ mod tests {
         }
     }
 
-    /// The visual mode reads the same table: a refusal is white on red, a reason the default.
+    /// Black, red, yellow and bright white of 16 terminal palettes: agg 1.x's 12 themes, xterm,
+    /// VGA, iTerm2 and svg-term-cli 2.1 (doc/adr-display.md, "Colour roles").
+    const PALETTES: [[u32; 4]; 16] = [
+        [0x000000, 0xdd3c69, 0xddaf3c, 0xffffff],
+        [0x21222c, 0xff5555, 0xf1fa8c, 0xffffff],
+        [0x0e1116, 0xf97583, 0xfabb72, 0xb9bbbf],
+        [0x0e1116, 0xf97583, 0xfabb72, 0xb9bbbf],
+        [0x16161d, 0xc34043, 0xc0a36e, 0xdcd7ba],
+        [0x0d0c0c, 0xc4746e, 0xc4b28a, 0xc5c9c5],
+        [0x1f1f28, 0xc84053, 0x77713f, 0x43436c],
+        [0x272822, 0xf92672, 0xf4bf75, 0xf9f8f5],
+        [0x3b4252, 0xbf616a, 0xebcb8b, 0xeceff4],
+        [0x073642, 0xdc322f, 0xb58900, 0xfdf6e3],
+        [0x073642, 0xdc322f, 0xb58900, 0xfdf6e3],
+        [0x282828, 0xcc241d, 0xd79921, 0xfbf1c7],
+        [0x000000, 0xcd0000, 0xcdcd00, 0xffffff],
+        [0x000000, 0xaa0000, 0xaa5500, 0xffffff],
+        [0x000000, 0xc91b00, 0xc7c400, 0xffffff],
+        [0x000000, 0xe88388, 0xdbab79, 0xffffff],
+    ];
+
+    /// A 16-colour cell's glyph is the black or bright white whose worst ratio over
+    /// [`PALETTES`] is higher: the terminal's theme picks the cell's red or yellow.
+    #[test]
+    fn a_sixteen_colour_cell_takes_the_glyph_that_reads_on_most_themes() {
+        let rgb = |colour: u32| colour.to_be_bytes()[1..].to_vec();
+        let worst = |cell: usize, glyph: usize| {
+            (PALETTES.iter())
+                .map(|palette| contrast(&rgb(palette[cell]), &rgb(palette[glyph])))
+                .fold(f64::INFINITY, f64::min)
+        };
+        for (role, cell) in [(Role::ProofRefused, 1), (Role::ProofUnknown, 2)] {
+            let params = role.sgr(Depth::Ansi16).expect("painted");
+            let (black, white) = (worst(cell, 0), worst(cell, 3));
+            let want = if black >= white { "30" } else { "97" };
+            assert_eq!(
+                params.rsplit(';').next(),
+                Some(want),
+                "{role:?} {params}: {black:.2} {white:.2}"
+            );
+        }
+    }
+
+    /// `_` sits on the cell's bottom edge, a stroke thick: it is bold at every depth.
+    #[test]
+    fn the_assumed_mark_is_bold() {
+        for depth in [Depth::Ansi16, Depth::Ansi256, Depth::Truecolor] {
+            let params = Role::ProofAssumed.sgr(depth).expect("painted");
+            assert!(parsed(params).2.contains(&1), "{depth:?} {params}");
+        }
+    }
+
+    /// The visual mode reads the same table: a refusal is black on red, a reason the default.
     #[test]
     fn the_visual_mode_style_is_the_depth_one_entry() {
         assert_eq!(
             Role::ProofRefused.style(),
-            Style::new().bg(Color::Red).fg(Color::White)
+            Style::new().bg(Color::Red).fg(Color::Black)
         );
         assert_eq!(
             Role::Residual.style(),

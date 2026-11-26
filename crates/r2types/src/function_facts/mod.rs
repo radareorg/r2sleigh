@@ -1041,9 +1041,13 @@ impl SourceOwnedFunctionFacts {
             }
         });
         let certified = certified.map(|ty| (ty, Confidence::of(Basis::Solved)));
+        let class = (self.source.machine_context().function_interface())
+            .and_then(|interface| interface.parameters().get(slot))
+            .map(r2source::SourceAbiParameterSpec::class);
         signed
             .into_iter()
             .chain(certified)
+            .map(|(ty, confidence)| crate::parameter_types::at_slot_class(ty, confidence, class))
             .find_map(|(ty, confidence)| {
                 admissible_declaration_type(ty, width_bits, ptr_bits)
                     .map(|ty| Fact::new(ty, confidence))
@@ -1133,18 +1137,43 @@ impl SourceOwnedFunctionFacts {
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
         enriched.apply_exact_source_signature(source, solved);
-        enriched.types.inferred_aggregates = (solved.aggregates.values())
-            .map(|aggregate| (aggregate.tag.clone(), aggregate.definition.clone()))
-            .collect();
-        enriched.types.parameter_structures = (solved.aggregates.iter())
-            .map(|(slot, aggregate)| {
-                let structure = crate::ParameterStructure {
-                    tag: aggregate.tag.clone(),
-                    fields: aggregate.fields.clone(),
-                };
-                (*slot, structure)
-            })
-            .collect();
+        let stated = |record: &crate::records::InferredRecord| crate::ParameterRecord {
+            tag: record.tag.clone(),
+            fields: record.fields.clone(),
+            spans: record.spans.clone(),
+            refused: record.refused.clone(),
+        };
+        // A tag names one definition: a second is a namer bug, refused so no member reads through
+        // another record's layout.
+        let mut definitions = BTreeMap::new();
+        let mut clashed = BTreeSet::new();
+        for record in solved.classes.iter().flatten() {
+            if (definitions.insert(record.tag.clone(), record.definition.clone())).is_some() {
+                clashed.insert(record.tag.clone());
+            }
+        }
+        debug_assert!(clashed.is_empty(), "record tags named twice: {clashed:?}");
+        for tag in clashed {
+            r2il::refusal_evidence!(
+                "record",
+                "{:#x} {tag}: DuplicateTag",
+                source.function().entry
+            );
+            definitions.remove(&tag);
+        }
+        enriched.types.records = crate::Records {
+            definitions,
+            parameters: (solved.records.iter())
+                .map(|(slot, record)| (*slot, stated(record)))
+                .collect(),
+            classes: (solved.classes.iter())
+                .map(|record| record.as_ref().map(stated))
+                .collect(),
+            loaded: solved.evidence.loaded_records().to_vec(),
+            recursive: (solved.evidence.records().iter())
+                .filter(|class| class.recursive)
+                .count(),
+        };
         enriched.apply_return_type_fact(solved.returns.clone());
         // The types are final here; the projection the seal holds is built from them once.
         enriched.canonicalize_type_facts();
@@ -1300,8 +1329,10 @@ pub(crate) struct SolvedFunction {
         IdMap<r2ssa::ValueId, BTreeSet<crate::signedness::ScalarSignednessEvidence>>,
     pub(crate) evidence: crate::EvidenceTypes,
     pub(crate) returns: ReturnTypeFact,
-    /// Each parameter whose accesses lay out a structure (doc/adr-aggregates.md).
-    pub(crate) aggregates: BTreeMap<usize, crate::aggregates::InferredAggregate>,
+    /// Each parameter whose class's accesses lay out a record (doc/adr-memory-places.md).
+    pub(crate) records: BTreeMap<usize, crate::records::InferredRecord>,
+    /// Every record class's layout, by class index; `None` where refused.
+    pub(crate) classes: Vec<Option<crate::records::InferredRecord>>,
 }
 
 impl SolvedFunction {
@@ -1321,12 +1352,16 @@ impl SolvedFunction {
             crate::evidence::solve_evidence_types(source, signatures, &signedness, ptr_bits);
         let returns =
             ReturnTypeFact::decide(source, signatures, &evidence).signed_by(source, &signedness);
-        let aggregates = crate::aggregates::parameter_aggregates(source, &evidence);
+        let crate::records::ClassRecords {
+            parameters: records,
+            classes,
+        } = crate::records::class_records(source, &evidence);
         Self {
             signedness,
             evidence,
             returns,
-            aggregates,
+            records,
+            classes,
         }
     }
 }
@@ -2171,7 +2206,7 @@ impl FunctionFacts {
         source: &r2ssa::SsaArtifact,
         solved: &SolvedFunction,
     ) -> bool {
-        let (aggregates, evidence) = (&solved.aggregates, &solved.evidence);
+        let (records, evidence) = (&solved.records, &solved.evidence);
         let context = source.machine_context();
         let Some(interface) = context.function_interface() else {
             return false;
@@ -2185,7 +2220,7 @@ impl FunctionFacts {
         let widths = (interface.parameters().iter()).any(|spec| !spec.basis().states_type());
         let certified_pointers = widths.then(|| {
             let signs = &solved.signedness;
-            crate::signature_infer::certified_parameter_pointers(source, aggregates, signs)
+            crate::signature_infer::certified_parameter_pointers(source, records, signs)
         });
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {

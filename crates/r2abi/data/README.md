@@ -230,6 +230,14 @@ and `struct __dirstream` (`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`)
 `struct __sFILE` (`stdio.h`) and `struct DIR` (`dirent.h`). libSystem's `DIR` is a typedef of an
 anonymous struct, so it has no row and the name stays an opaque typedef.
 
+## Objects
+
+`objects.txt` states the type a C library's header declares a data object at
+(`stderr`, `optarg`), one row per library and name, each citing the header line. A row is read
+only into its own library's tables, and a program binds it only where its loader copies that
+object (`R_*_COPY`) under the same symbol at the type's size: the name alone proves nothing
+(ROADMAP D653). A library with no row keeps the object untyped.
+
 ## Effects
 
 A cited row may state `func.<name>.effects=`, what the function does through its parameters,

@@ -251,16 +251,11 @@ fn ordinal_dylib(
 /// identification bytes and the type, machine and version fields.
 const ELF_ENTRY_FIELD: u64 = 0x18;
 
-/// Every function an initialiser or terminator array names, as the container states the array.
-///
-/// Found by the section's stated type -- ELF's `SHT_INIT_ARRAY`,
-/// `SHT_FINI_ARRAY` and `SHT_PREINIT_ARRAY`, Mach-O's
-/// `S_MOD_INIT_FUNC_POINTERS` and `S_MOD_TERM_FUNC_POINTERS` -- never by its
-/// name, and each slot read as the loader leaves it: a rebased pointer is the
-/// address the container states it writes there, which a PIE linked without
-/// applying its relocations does not hold in the file at all.
+/// Every function an initialiser array names, by section type or `DT_*_ARRAY` tag (never by name),
+/// each slot read as the loader leaves it (ROADMAP D662). `O(n log n)` in slots.
 fn initialisers(
     sections: &[Section],
+    dynamic: Vec<loader::DynamicArray>,
     writes: &[LoaderWrite],
     data: &[u8],
     arch: &Arch,
@@ -268,8 +263,7 @@ fn initialisers(
     const S_MOD_INIT_FUNC_POINTERS: u32 = 0x9;
     const S_MOD_TERM_FUNC_POINTERS: u32 = 0xa;
     let pointer = u64::from(arch.bits / 8);
-    let mut found = Vec::new();
-    for section in sections {
+    let sectioned = sections.iter().filter_map(|section| {
         let kind = match section.stated {
             SectionStatement::Elf { sh_type: 14, .. } => EntryKind::Init,
             SectionStatement::Elf { sh_type: 15, .. } => EntryKind::Fini,
@@ -280,39 +274,54 @@ fn initialisers(
             SectionStatement::MachO { flags } if flags & 0xff == S_MOD_TERM_FUNC_POINTERS => {
                 EntryKind::Fini
             }
-            _ => continue,
+            _ => return None,
         };
-        let slots = section.file_size.min(section.vsize) / pointer;
-        for slot in 0..slots {
-            let place = section.vaddr + slot * pointer;
-            let offset = section.file_offset + slot * pointer;
-            let raw = match r2abi::statement::write_at(writes, place) {
-                Some(write) if write.place == place && write.width == pointer => write.value(),
-                // Written with a value the container does not state, or only in part.
-                Some(_) => None,
-                None => usize::try_from(offset)
-                    .ok()
-                    .and_then(|at| data.get(at..at.checked_add(pointer as usize)?))
-                    .map(|bytes| read_pointer(bytes, arch.endian)),
-            };
-            let Some(raw) = raw else {
-                continue;
-            };
-            let vaddr = code_address(arch, raw);
-            // Zero is an empty slot, and all ones the terminator an old `.ctors` ends with.
-            if vaddr == 0 || raw == u64::MAX >> (64 - arch.bits) {
-                continue;
-            }
-            found.push(Entry {
-                vaddr,
-                kind,
-                thumb: is_arm32(arch) && raw & 1 == 1,
-                stated_at: Some(StatedAt {
-                    offset,
-                    vaddr: Some(place),
-                }),
-            });
+        Some(loader::DynamicArray {
+            kind,
+            vaddr: section.vaddr,
+            offset: section.file_offset,
+            size: section.file_size.min(section.vsize),
+        })
+    });
+    let mut slots = (dynamic.into_iter().chain(sectioned))
+        .flat_map(|array| {
+            (0..array.size / pointer).map(move |slot| {
+                let at = slot * pointer;
+                (array.vaddr + at, array.offset + at, array.kind)
+            })
+        })
+        .collect::<Vec<_>>();
+    // A slot the dynamic table and a section both state is one entry, the loader's (stable sort).
+    slots.sort_by_key(|(place, ..)| *place);
+    slots.dedup_by_key(|(place, ..)| *place);
+    let mut found = Vec::new();
+    for (place, offset, kind) in slots {
+        let raw = match r2abi::statement::write_at(writes, place) {
+            Some(write) if write.place == place && write.width == pointer => write.value(),
+            // Written with a value the container does not state, or only in part.
+            Some(_) => None,
+            None => usize::try_from(offset)
+                .ok()
+                .and_then(|at| data.get(at..at.checked_add(pointer as usize)?))
+                .map(|bytes| read_pointer(bytes, arch.endian)),
+        };
+        let Some(raw) = raw else {
+            continue;
+        };
+        let vaddr = code_address(arch, raw);
+        // Zero is an empty slot, and all ones the terminator an old `.ctors` ends with.
+        if vaddr == 0 || raw == u64::MAX >> (64 - arch.bits) {
+            continue;
         }
+        found.push(Entry {
+            vaddr,
+            kind,
+            thumb: is_arm32(arch) && raw & 1 == 1,
+            stated_at: Some(StatedAt {
+                offset,
+                vaddr: Some(place),
+            }),
+        });
     }
     found
 }
@@ -1130,7 +1139,14 @@ impl Image {
                 });
             }
         }
-        entries.extend(initialisers(&sections, &loader_writes, &data[..], &arch));
+        let dynamic = loader::dynamic_arrays(&file);
+        entries.extend(initialisers(
+            &sections,
+            dynamic,
+            &loader_writes,
+            &data[..],
+            &arch,
+        ));
         for (kind, raw, stated) in loader::hooks(&file) {
             let vaddr = code_address(&arch, raw);
             if vaddr != 0 && executable(vaddr) {

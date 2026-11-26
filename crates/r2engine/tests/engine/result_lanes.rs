@@ -1113,3 +1113,31 @@ fn a_function_with_no_closed_lane_zero_way_in_keeps_the_bits_above_a_narrow_call
         assert!(!text.contains("integer result register"), "{case}: {text}");
     }
 }
+
+/// AArch64 `scratch` writes v0 and leaves x0 (`fmov d0, #1.0; ret`); `top` calls it and reads
+/// neither lane. hashes and review clang-O2 under equivalence left `equal` this way (D660).
+const A64_UNREAD_LANES: &[u8] = &[
+    0x00, 0x10, 0x6e, 0x1e, // 1000 fmov d0, #1.0
+    0xc0, 0x03, 0x5f, 0xd6, // 1004 ret
+    0x1f, 0x20, 0x03, 0xd5, // 1008 nop
+    0x1f, 0x20, 0x03, 0xd5, // 100c nop
+    0xfd, 0x7b, 0xbf, 0xa9, // 1010 stp x29, x30, [sp, -0x10]!
+    0xfd, 0x03, 0x00, 0x91, // 1014 mov x29, sp
+    0xfa, 0xff, 0xff, 0x97, // 1018 bl 0x1000
+    0x00, 0x00, 0x80, 0xd2, // 101c mov x0, 0
+    0xfd, 0x7b, 0xc1, 0xa8, // 1020 ldp x29, x30, [sp], 0x10
+    0xc0, 0x03, 0x5f, 0xd6, // 1024 ret
+];
+
+/// A call reading neither lane of a callee that hands x0 back and writes v0 is written, whatever
+/// the callee's result is.
+#[test]
+fn an_aarch64_call_reading_no_lane_of_a_written_float_callee_is_rendered() {
+    let functions = &[("scratch", BASE, 0x08), ("top", BASE + 0x10, 0x18)];
+    let mut open = OpenProgram::of(Literal::of_code(A64_UNREAD_LANES, functions).in_aarch64());
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(!text.contains("CallNotRendered"), "{text}");
+    assert!(text.contains("scratch()"), "{text}");
+}

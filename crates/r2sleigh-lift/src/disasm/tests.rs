@@ -395,6 +395,66 @@ fn aarch64_listing_spells_the_preferred_alias_at_each_precondition_boundary() {
     }
 }
 
+/// A logical immediate whose `imms` fills its element is UNDEFINED (Arm ARM `DecodeBitMasks`, `immediate` TRUE).
+#[cfg(feature = "arm")]
+#[test]
+fn aarch64_logical_immediate_filling_its_element_decodes_to_nothing() {
+    let disassembler = Disassembler::from_trusted_profile(TrustedSleighProfile::Aarch64Le)
+        .expect("trusted AArch64 specification");
+    // sf:opc:100100:N:immr:imms:Rn:Rd; the all ones imms per element: 32 011111, 16 101111, 8 110111, 4 111011, 2 111101, 64 N=1 111111.
+    let logical = |sf: u32, opc: u32, n: u32, imms: u32, rn: u32, rd: u32| {
+        (sf << 31) | (opc << 29) | (0x24 << 23) | (n << 22) | (imms << 10) | (rn << 5) | rd
+    };
+    let mut undefined = vec![0x3200_7fe0, 0xb240_ffe0, 0x1200_7c00];
+    for (sf, n, imms) in [
+        (0, 0, 0x1f),
+        (0, 0, 0x2f),
+        (0, 0, 0x37),
+        (0, 0, 0x3b),
+        (0, 0, 0x3d),
+        (1, 1, 0x3f),
+        (1, 0, 0x1f),
+        (1, 0, 0x2f),
+        (1, 0, 0x37),
+        (1, 0, 0x3b),
+        (1, 0, 0x3d),
+    ] {
+        // and, orr, eor, ands; orr from the zero register (the mov alias) and ands into it (tst).
+        for opc in 0..4 {
+            undefined.push(logical(sf, opc, n, imms, 1, 0));
+        }
+        undefined.push(logical(sf, 1, n, imms, 31, 0));
+        undefined.push(logical(sf, 3, n, imms, 1, 31));
+    }
+    for word in undefined {
+        let bytes = padded_instruction(u32::to_le_bytes(word));
+        let decoded = disassembler.decode(&bytes, 0x1000, None);
+        assert!(
+            decoded.is_err(),
+            "{word:#010x} decoded as {:?}",
+            decoded.map(|d| d.syntax.text())
+        );
+        assert!(
+            disassembler.lift(&bytes, 0x1000).is_err(),
+            "{word:#010x} lifted"
+        );
+    }
+    for (word, expected) in [
+        (0x3200_03e0, "orr w0, wzr, 0x1"),
+        (0x3200_f3e0, "mov w0, 0x55555555"),
+        (0x5301_7c00, "lsr w0, w0, 0x1"),
+        (0x9340_7c00, "sxtw x0, w0"),
+        (0xb240_fbe0, "orr x0, xzr, 0x7fffffffffffffff"),
+    ] {
+        let bytes = padded_instruction(u32::to_le_bytes(word));
+        let decoded = disassembler
+            .decode(&bytes, 0x1000, None)
+            .unwrap_or_else(|error| panic!("{word:#010x}: {error}"));
+        assert_eq!(decoded.syntax.text(), expected, "{word:#010x}");
+        assert!(decoded.lifted.is_ok(), "{word:#010x}");
+    }
+}
+
 #[cfg(feature = "x86")]
 #[test]
 fn x86_byte_register_writes_do_not_invent_full_carrier_zero_extensions() {
