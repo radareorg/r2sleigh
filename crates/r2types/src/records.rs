@@ -59,11 +59,8 @@ pub(crate) fn class_records(source: &r2ssa::SsaArtifact, evidence: &EvidenceType
         .default_address_bits();
     let mut parameters = BTreeMap::new();
     let mut classes = Vec::new();
-    for class in evidence.records() {
-        let tag = match class.name {
-            crate::evidence::RecordName::Parameter(slot) => format!("fcn_{entry:x}_arg{slot}"),
-            crate::evidence::RecordName::At(at) => format!("fcn_{entry:x}_at_{at:x}"),
-        };
+    let tags = tags(entry, evidence.records().iter().map(|class| class.name));
+    for (class, tag) in evidence.records().iter().zip(tags) {
         if class.recursive {
             r2il::refusal_evidence!("record", "{entry:#x} {tag}: Recursive");
             classes.push(None);
@@ -114,6 +111,30 @@ pub(crate) fn class_records(source: &r2ssa::SsaArtifact, evidence: &EvidenceType
         parameters,
         classes,
     }
+}
+
+/// One tag per record class: `fcn_<entry>_arg<slot>`, or `fcn_<entry>_at_<address>` with `_<k>` for
+/// the k-th later class an access of the same instruction names, so no two classes share a tag.
+fn tags(entry: u64, names: impl Iterator<Item = crate::evidence::RecordName>) -> Vec<String> {
+    let names = names.collect::<Vec<_>>();
+    let mut at = BTreeMap::<u64, Vec<usize>>::new();
+    for name in &names {
+        if let crate::evidence::RecordName::At(address, position) = *name {
+            at.entry(address).or_default().push(position);
+        }
+    }
+    at.values_mut()
+        .for_each(|positions| positions.sort_unstable());
+    let spell = |name: crate::evidence::RecordName| match name {
+        crate::evidence::RecordName::Parameter(slot) => format!("fcn_{entry:x}_arg{slot}"),
+        crate::evidence::RecordName::At(address, position) => {
+            match at[&address].binary_search(&position).unwrap_or(0) {
+                0 => format!("fcn_{entry:x}_at_{address:x}"),
+                k => format!("fcn_{entry:x}_at_{address:x}_{k}"),
+            }
+        }
+    };
+    names.into_iter().map(spell).collect()
 }
 
 type Laid = (
@@ -275,6 +296,24 @@ fn byte() -> CTypeLike {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two classes rooted at accesses of one instruction (`movsb` through two loaded pointers) get
+    /// two tags, so neither definition overwrites the other (Codex on #424).
+    #[test]
+    fn classes_rooted_at_one_instruction_get_distinct_tags() {
+        use crate::evidence::RecordName::{At, Parameter};
+        let names = [Parameter(0), At(0x1010, 7), At(0x1010, 3), At(0x1020, 9)];
+        let tags = tags(0x1000, names.into_iter());
+        assert_eq!(
+            tags,
+            [
+                "fcn_1000_arg0",
+                "fcn_1000_at_1010_1",
+                "fcn_1000_at_1010",
+                "fcn_1000_at_1020"
+            ]
+        );
+    }
 
     fn int(bits: u32) -> CTypeLike {
         CTypeLike::Int {

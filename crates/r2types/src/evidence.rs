@@ -57,11 +57,12 @@ pub struct EvidenceTypes {
     loaded_records: Vec<(r2ssa::StructuredAccessId, usize)>,
 }
 
-/// What names a record class: its lowest parameter slot, else its lowest accessing instruction.
+/// What names a record class: its lowest parameter slot, else its lowest access, as its
+/// instruction's address and its position in the access order (one instruction may root two).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RecordName {
     Parameter(usize),
-    At(u64),
+    At(u64, usize),
 }
 
 /// One record class: its accesses `(offset, width, value)` by offset then width, and whether its
@@ -1079,7 +1080,7 @@ impl<'a> EvidenceBuilder<'a> {
                 .graph()
                 .instruction_for_inst(place.access.inst)
                 .unwrap_or(0);
-            roots.push((class, node, RecordName::At(address)));
+            roots.push((class, node, RecordName::At(address, at)));
             loads.push((load, class));
         }
         // One record per class, named by its lowest parameter slot, else its lowest instruction.
