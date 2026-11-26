@@ -130,6 +130,20 @@ fn containing_entry(session: &mut Session, address: u64) -> Result<u64, String> 
     Ok(if holds { below } else { address })
 }
 
+/// Each line of `answer.code`'s instructions, ascending.
+fn line_addresses(answer: &r2engine::RenderedFunctionJson) -> Vec<Vec<u64>> {
+    let mut addresses = vec![Vec::new(); answer.code.lines().count()];
+    for line in &answer.lines {
+        let slot = (line.line.checked_sub(1)).and_then(|at| addresses.get_mut(at));
+        if let Some(slot) = slot {
+            slot.extend(line.addrs.iter().copied());
+            slot.sort_unstable();
+            slot.dedup();
+        }
+    }
+    addresses
+}
+
 /// The shell and the line reader a command typed in the visual mode runs with.
 pub struct Visual<'a> {
     pub session: &'a mut Session,
@@ -216,38 +230,29 @@ impl Host for Visual<'_> {
         // that body rather than one starting where the cursor is.
         let entry = containing_entry(self.session, address)?;
         let rendering = self.session.program.rendered(entry)?;
-        let name = self.session.program.names().function(entry, false);
-        let answer = rendering.answer(&name, entry);
-        // What each part of the unit is, as the renderer wrote it, cut at its
-        // lines: the code is the emission's unit.
-        let roles = match &rendering.response.output {
+        // A function shows the definition `pdd` prints; the unit's prelude is for a compiler.
+        let (code, roles, addresses) = match &rendering.response.output {
             r2engine::EngineRendering::Function(rendered) => {
-                let unit = rendered.emission().unit_roles();
-                r2s_tui::theme::by_line(&answer.code, &crate::listing::c_roles(&unit))
+                let emission = rendered.emission();
+                let roles = crate::listing::c_roles(emission.roles());
+                let roles = r2s_tui::theme::by_line(emission.definition(), &roles);
+                let addresses = emission.definition_addresses();
+                (emission.definition().to_owned(), roles, addresses)
             }
-            r2engine::EngineRendering::Listing(_) => Vec::new(),
+            r2engine::EngineRendering::Listing(_) => {
+                let name = self.session.program.names().function(entry, false);
+                let answer = rendering.answer(&name, entry);
+                let addresses = line_addresses(&answer);
+                (answer.code, Vec::new(), addresses)
+            }
         };
-        let mut addresses = vec![Vec::new(); answer.code.lines().count()];
-        for line in &answer.lines {
-            if let Some(slot) = line
-                .line
-                .checked_sub(1)
-                .and_then(|at| addresses.get_mut(at))
-            {
-                slot.extend(line.addrs.iter().copied());
-                slot.sort_unstable();
-                slot.dedup();
-            }
-        }
-        Ok(answer
-            .code
+        Ok(code
             .lines()
-            .zip(addresses)
             .enumerate()
-            .map(|(row, (text, addresses))| DecompiledLine {
+            .map(|(row, text)| DecompiledLine {
                 text: text.to_owned(),
                 roles: self.painted(roles.get(row).cloned().unwrap_or_default()),
-                addresses,
+                addresses: addresses.get(row).cloned().unwrap_or_default(),
             })
             .collect())
     }
@@ -410,6 +415,25 @@ mod tests {
         assert_eq!(containing_entry(&mut session, 0x121b), Ok(0x120a));
         assert_eq!(containing_entry(&mut session, 0x1246), Ok(0x120a));
         assert_eq!(containing_entry(&mut session, 0x1), Ok(0x1));
+    }
+
+    /// The pane shows the definition `pdd` prints, with no prelude above it.
+    #[test]
+    fn the_decompiler_pane_shows_what_pdd_prints() {
+        let mut session = fixture();
+        session.color = 0;
+        let mut host = Visual {
+            session: &mut session,
+        };
+        let pane = host.decompile(0x1549).expect("main decompiles");
+        let printed = host.run("pdd @ 0x1549").expect("pdd prints");
+        let shown = pane
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(shown, printed.trim_end().lines().collect::<Vec<_>>());
+        assert!(!pane.iter().any(|line| line.text.contains("#include")));
+        assert!(pane.iter().any(|line| line.addresses.contains(&0x1549)));
     }
 
     #[test]

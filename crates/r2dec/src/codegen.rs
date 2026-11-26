@@ -295,20 +295,27 @@ impl Emission {
         Self { clauses, ..self }
     }
 
-    /// Each line of the definition's lowest instruction, where it accounts for any: `O(lines)`.
-    pub fn lowest_addresses(&self) -> Vec<Option<u64>> {
+    /// Each line of the definition's instructions, ascending, past the unit's prelude: `O(lines)`.
+    pub fn definition_addresses(&self) -> Vec<Vec<u64>> {
         let prelude = self.unit[..self.unit.len() - self.definition.len()]
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count();
-        let mut lowest = vec![None; self.depths.len()];
+        let mut addresses = vec![Vec::new(); self.depths.len()];
         for line in &self.lines {
             let at = line.line.checked_sub(prelude + 1);
-            if let Some(slot) = at.and_then(|at| lowest.get_mut(at)) {
-                *slot = line.addrs.first().copied();
+            if let Some(slot) = at.and_then(|at| addresses.get_mut(at)) {
+                slot.clone_from(&line.addrs);
             }
         }
-        lowest
+        addresses
+    }
+
+    /// Each line of the definition's lowest instruction, where it accounts for any: `O(lines)`.
+    pub fn lowest_addresses(&self) -> Vec<Option<u64>> {
+        (self.definition_addresses().iter())
+            .map(|addresses| addresses.first().copied())
+            .collect()
     }
 
     /// What each span of [`Emission::definition`] is.
