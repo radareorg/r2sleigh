@@ -69,9 +69,6 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     let mut decided = EditPlan::new();
     let mut passing = Vec::new();
     let mut inserted = IdSet::default();
-    let removed_edges = (checks.iter())
-        .map(|check| (check.block, check.fail))
-        .collect::<BTreeSet<_>>();
     for check in &checks {
         let op = if check.pass_is_target {
             SSAOp::Branch {
@@ -153,7 +150,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         let addresses = inserted_addresses(func, &inserted, &[]);
         inserted.extend(addresses.iter());
     }
-    func.record_compiler_inserted(inserted, removed, removed_edges);
+    func.record_compiler_inserted(inserted, removed);
     func.record_passing_differences(passing);
     func.record_checked_differences(checks.iter().filter_map(|check| check.difference));
     // Every decided check removed its failure edge, which holds only of a UB-free source.

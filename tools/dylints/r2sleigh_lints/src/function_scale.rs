@@ -331,7 +331,7 @@ const STANDING_BLOCK_KEYS: &[(&str, usize)] = &[
     ("r2ssa::integrity::validate_ssa_function", 3),
     ("r2ssa::natural_loops::NaturalLoop::body", 1),
     ("r2ssa::natural_loops::NaturalLoops::compute", 1),
-    ("r2ssa::optimize::apply_sccp_results", 3),
+    ("r2ssa::optimize::apply_sccp_results", 2),
     ("r2ssa::optimize::fuse_compare_chains_in_function", 1),
     ("r2ssa::phi::LiveIn::position", 1),
     ("r2ssa::phi::PhiPlacement::phis", 1),

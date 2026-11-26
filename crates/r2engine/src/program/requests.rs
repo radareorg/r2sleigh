@@ -146,6 +146,15 @@ fn shape_of(
     }
 }
 
+/// The shape of a prepared function's walked blocks, its read dispatches and its pads.
+fn proved_shape(prepared: &Prepared, pads: Option<&crate::body::Pads>) -> Shape {
+    let blocks = (prepared.outline().blocks.iter()).map(|block| {
+        let successors = block.successors.clone();
+        (block.addr, u64::from(block.size), successors)
+    });
+    shape_of(blocks, prepared.dispatches(), pads)
+}
+
 /// The edges of one block. A direct successor beside a fall-through is a
 /// conditional branch; either alone is a jump or a fall. A block ending in a
 /// dispatch whose table was read goes to its arms, which are its cases.
@@ -176,6 +185,82 @@ fn edges_of(
         }
     }
     edges
+}
+
+/// `edges` with each of `more` it does not hold yet, in order.
+fn add_new(edges: &mut Vec<GraphEdge>, more: impl Iterator<Item = GraphEdge>) {
+    for edge in more {
+        if !edges.contains(&edge) {
+            edges.push(edge);
+        }
+    }
+}
+
+/// One walked block: its start, its size, the items placed in it and its typed edges.
+type WalkedBlock<T> = (u64, u64, Vec<T>, Vec<GraphEdge>);
+
+impl Shape {
+    /// Each walked block in address order with the items, sorted by `address`, whose address it
+    /// holds, each placed once, and its typed edges: what `afb`, `agf` and `afi` count. `O(B log B + I)`.
+    fn placed<T>(
+        &self,
+        items: impl IntoIterator<Item = T>,
+        address: impl Fn(&T) -> u64,
+    ) -> Vec<WalkedBlock<T>> {
+        let starts = (self.blocks.iter())
+            .map(|(start, _, _)| *start)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut walked = self.blocks.iter().collect::<Vec<_>>();
+        walked.sort_by_key(|(start, _, _)| *start);
+        let mut items = items.into_iter().peekable();
+        let mut placed = Vec::with_capacity(walked.len());
+        for &(start, size, ref successors) in walked {
+            while items.next_if(|item| address(item) < start).is_some() {}
+            let mut held = Vec::new();
+            while let Some(item) = items.next_if(|item| address(item) < start + size) {
+                held.push(item);
+            }
+            let dispatch =
+                (held.last()).is_some_and(|item| self.dispatches.contains(&address(item)));
+            let mut edges = edges_of(successors, dispatch, |target| starts.contains(&target));
+            let calls = self.unwinds.partition_point(|(call, _)| *call < start)
+                ..self
+                    .unwinds
+                    .partition_point(|(call, _)| *call < start + size);
+            let pads = self.unwinds[calls].iter().map(|&(_, target)| GraphEdge {
+                target,
+                kind: EdgeKind::Unwind,
+            });
+            add_new(
+                &mut edges,
+                pads.filter(|edge| starts.contains(&edge.target)),
+            );
+            placed.push((start, size, held, edges));
+        }
+        placed
+    }
+
+    /// The walked blocks as `afi` counts them, from the instructions the analysis owes and the
+    /// pads' own, so `afi` and `afb` count one graph. `O(B log B + I log I)`.
+    fn info_blocks(
+        &self,
+        artifact: &r2ssa::SsaArtifact,
+        pads: Option<&crate::body::Pads>,
+    ) -> Vec<super::info::Block> {
+        let spans =
+            (artifact.obligations().native_spans().values()).map(|span| span.instruction_addr());
+        let pads = (pads.into_iter()).flat_map(|pads| &pads.blocks);
+        let runs = pads.flat_map(|block| block.lifted.instructions.iter().map(|run| run.addr));
+        let starts = spans.chain(runs).collect::<std::collections::BTreeSet<_>>();
+        (self.placed(starts, |start| *start).into_iter())
+            .map(|(addr, size, held, edges)| super::info::Block {
+                addr,
+                size,
+                instructions: held.len(),
+                successors: edges.len(),
+            })
+            .collect()
+    }
 }
 
 /// Each block's jump or taken branch as a [`FlowEdge`]: from the block's last listed line to the
@@ -548,11 +633,11 @@ impl<S: Source + 'static> OpenProgram<S> {
             .zip(self.target(entry).ok())
             // A pad walk that panics leaves the description without pads, as a listing's does.
             .and_then(|(walk, target)| isolated(|| walk.pads(target.disasm, &view)).ok());
+        let shape = proved_shape(&prepared, pads.as_ref());
+        let blocks = shape.info_blocks(artifact, pads.as_ref());
         let read = |sealed: &SealedFunctionAnalysis| {
-            let mut info =
-                super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn);
-            (pads.as_ref()).inspect(|pads| info.hold_pads(pads));
-            info
+            let facts = sealed.facts();
+            super::info::FunctionInfo::read(entry, artifact, facts, noreturn, blocks.clone())
         };
         // The frame's locals are the frame model's, whichever pipeline renders (ADR frame-model).
         self.read_sealed(entry, &prepared, read)?
@@ -631,48 +716,16 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// One function's graph, within a request already started.
     fn graph_of(&self, entry: u64) -> Result<FunctionGraph, String> {
         let (listing, shape) = self.listed_body(entry)?;
-        let starts = shape
-            .blocks
-            .iter()
-            .map(|(address, _, _)| *address)
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut lines = listing.lines.value.into_iter().peekable();
-        let mut blocks = Vec::with_capacity(shape.blocks.len());
         // Both are in address order, so each line is placed once.
-        let Shape {
-            blocks: mut walked,
-            dispatches,
-            unwinds,
-        } = shape;
-        walked.sort_by_key(|(address, _, _)| *address);
-        for (address, size, successors) in walked {
-            while lines.next_if(|line| line.address < address).is_some() {}
-            let mut held = Vec::new();
-            while let Some(line) = lines.next_if(|line| line.address < address + size) {
-                held.push(line);
-            }
-            let dispatch = held
-                .last()
-                .is_some_and(|line| dispatches.contains(&line.address));
-            let mut edges = edges_of(&successors, dispatch, |target| starts.contains(&target));
-            let calls = unwinds.partition_point(|(call, _)| *call < address)
-                ..unwinds.partition_point(|(call, _)| *call < address + size);
-            let pads = unwinds[calls].iter().map(|&(_, target)| GraphEdge {
-                target,
-                kind: EdgeKind::Unwind,
-            });
-            for edge in pads.filter(|edge| starts.contains(&edge.target)) {
-                if !edges.contains(&edge) {
-                    edges.push(edge);
-                }
-            }
-            blocks.push(GraphBlock {
+        let placed = shape.placed(listing.lines.value, |line| line.address);
+        let blocks = (placed.into_iter())
+            .map(|(address, size, lines, edges)| GraphBlock {
                 address,
                 size,
-                lines: held,
+                lines,
                 edges,
-            });
-        }
+            })
+            .collect();
         Ok(FunctionGraph {
             entry,
             blocks,
@@ -707,14 +760,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             // A defect reading what the analysis proved is an analysis defect like any other.
             Ok(prepared) => match isolated(|| self.proved_listing(&target, entry, &prepared)) {
                 Ok(Err(reason)) => reason,
-                Ok(Ok((listing, pads))) => {
-                    let blocks = (prepared.outline().blocks.iter()).map(|block| {
-                        let successors = block.successors.clone();
-                        (block.addr, u64::from(block.size), successors)
-                    });
-                    let shape = shape_of(blocks, prepared.dispatches(), Some(&pads));
-                    return Ok((listing, shape));
-                }
+                Ok(Ok(listed)) => return Ok(listed),
                 Err(panicked) => NativeRefusal::from(panicked),
             },
             Err(reason) => reason,
@@ -735,7 +781,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         target: &crate::native::NativeTarget<'_>,
         entry: u64,
         prepared: &Prepared,
-    ) -> Result<(FunctionListing, crate::body::Pads), NativeRefusal> {
+    ) -> Result<(FunctionListing, Shape), NativeRefusal> {
         let key = (entry, self.view().thumb_at(entry));
         let walking = (self.db.get::<super::analysis::Walked>(&key))
             .map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
@@ -755,14 +801,13 @@ impl<S: Source + 'static> OpenProgram<S> {
             .and_then(|sealed| sealed.facts().return_type());
         // The header reads the frame answer `afi` reads, off the seal the `ret` notes read.
         let noreturn = self.view().exit(entry, key.1);
+        let shape = proved_shape(prepared, Some(&pads));
         // Isolated on its own: a defect reading the header drops the header, never the lines.
         let info = sealed.as_ref().and_then(|sealed| {
             let artifact = prepared.artifact().artifact();
             let read = || {
-                let facts = sealed.facts();
-                let mut info = super::info::FunctionInfo::read(entry, artifact, facts, noreturn);
-                info.hold_pads(&pads);
-                info
+                let blocks = shape.info_blocks(artifact, Some(&pads));
+                super::info::FunctionInfo::read(entry, artifact, sealed.facts(), noreturn, blocks)
             };
             isolated(read).ok()
         });
@@ -781,7 +826,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             },
             gaps: Vec::new(),
         };
-        Ok((listing, pads))
+        Ok((listing, shape))
     }
 
     /// The listing of the body of a function whose analysis was refused: the walk `Walked` holds,
