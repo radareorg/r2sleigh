@@ -569,7 +569,13 @@ mod tests {
             unassigned: Vec::new(),
             unclassed: Some(0),
         };
-        let parameters = (&clauses, ((false, false), &[][..]), 0, &[][..], &[][..]);
+        let parameters = (
+            &clauses,
+            ((false, false), &[][..]),
+            (0, 0, 0),
+            &[][..],
+            &[][..],
+        );
         note_unproven_constructs(&mut func, None, 0, 0, 0, parameters, None, None, 0);
         let mut codegen =
             crate::codegen::CodeGenerator::new(crate::codegen::CodeGenConfig::default());
