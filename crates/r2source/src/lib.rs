@@ -419,6 +419,8 @@ pub struct SourceDataObject {
     address: u64,
     name: Box<str>,
     type_id: Option<u32>,
+    /// The library row that states the type, where debug information does not (D653).
+    citation: Option<Box<str>>,
 }
 
 impl SourceDataObject {
@@ -427,7 +429,18 @@ impl SourceDataObject {
             address,
             name: name.into(),
             type_id,
+            citation: None,
         }
+    }
+
+    /// The object typed by the C library row `citation` names, not by debug information.
+    pub fn cited(mut self, citation: &str) -> Self {
+        self.citation = Some(citation.into());
+        self
+    }
+
+    pub fn citation(&self) -> Option<&str> {
+        self.citation.as_deref()
     }
 
     pub const fn address(&self) -> u64 {

@@ -450,3 +450,28 @@ Agreement means:
 - The census moves once, at the switch, and is read by hand there.
 - r2dec stops being where a missing upstream fact is hidden: every residual
   D renders names the owner that did not state the fact.
+
+## D659 step 0: the 1,390 gap residuals
+
+Measured at 5f39d32a6 over DecBench (2,621 functions) with a local trace in `render::values`
+(`gap` and `effect_gap`, not committed) joined to the call gap at the same instruction. Every one of
+the 1,001 `ValueNotComputed` and 389 `EffectNotRendered` sites is a `CallDefine`: a register the call
+defines, where the call itself is a `CallNotRendered` gap. `ValueNotComputed` is a defined register
+the body reads later (named); `EffectNotRendered` is one it does not name. 0 sites are unclassified,
+and 0 sit beside a rendered call. r2dec states no fact here: each site closes when its call's owner
+states the boundary, and the call's own gap closes with it.
+
+| Call refusal | `ValueNotComputed` | `EffectNotRendered` | Sites | Owner of the missing fact | Witness (`pd`) |
+|---|---|---|---|---|---|
+| `MayHandOn` | 509 | 128 | 637 | r2ssa `boundaries.rs` (argument slot may hand on what the caller was passed) | bzip2 O2 `0x42c8 call 0x3ef0` |
+| `ImportUnstated(Undeclared)` | 180 | 42 | 222 | r2abi rows (the import has no cited row) | diff O2 `0x7df1 call sym.imp.re_search` |
+| `CountFromRegisters` | 152 | 46 | 198 | r2ssa call boundary, P7 (indirect call reads registers) | bzip2 O2 `0x6089 call qword [rbp + 0x38]` |
+| `VariadicCount` (5 kinds) | 35 | 142 | 177 | r2ssa, D464 | gzip O2 `0x3c8e call 0xf830` |
+| `Floor` | 91 | 29 | 120 | r2engine arity floors | find O2 `0x12cce call 0xd490` |
+| `CountRegisterSet` | 18 | 2 | 20 | r2ssa call boundary | bzip2 O2 `0x7ebb call 0x7700` |
+| `SlotSkipped` | 16 | 0 | 16 | r2ssa call boundary | gzip O2 `0x9cba call 0xd7d0` |
+| Total | 1,001 | 389 | 1,390 | | |
+
+`VariadicCount` splits as `MissingFormatParameter` 137, `FormatArgumentNotLiteral` 26,
+`FloatingVariadicArgument` 10, `FlagNotConstant` 4. Proposed rows: D666 (`MayHandOn`), D667
+(undeclared imports), D668 (indirect calls), D669 (arity floors); `VariadicCount` stays with D464.

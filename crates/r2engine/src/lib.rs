@@ -916,7 +916,8 @@ fn trusted_parsed_context(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::Parse
     let image = trusted.source().image();
     let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_source(
         image.data_types(),
-        (image.data_symbols().iter()).map(|object| (object.address(), object.type_id())),
+        (image.data_symbols().iter())
+            .map(|object| (object.address(), object.type_id(), object.citation())),
     );
     r2types::ParsedExternalContext {
         current_signature: signature.clone(),

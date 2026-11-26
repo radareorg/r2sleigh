@@ -32,6 +32,8 @@ pub(crate) struct Interned<'a> {
     /// Which declared record each aggregate name stands for: a consumer finds
     /// a layout by its name, so one name has one layout.
     names: BTreeMap<String, TypeId>,
+    /// Record names an earlier graph laid out ([`Interned::then`]): a later record of one is its tag.
+    held: BTreeSet<String>,
     /// The node each typedef or scalar name stands at, and the structure it names.
     named: BTreeMap<String, (u32, u32)>,
     /// Names bound to two structures: each names neither, so `finish` drops its alias (D487).
@@ -54,6 +56,7 @@ impl<'a> Interned<'a> {
             leaves: BTreeMap::new(),
             tags: BTreeMap::new(),
             names: BTreeMap::new(),
+            held: BTreeSet::new(),
             named: BTreeMap::new(),
             contested: BTreeSet::new(),
             aliased: BTreeSet::new(),
@@ -96,6 +99,34 @@ impl<'a> Interned<'a> {
         let id = self.node(ty)?;
         let sized = self.parts.types[id as usize].size_bits() > 0;
         sized.then_some(id)
+    }
+
+    /// The same graph, continued from the declarations of `graph`: its nodes keep their places, a
+    /// name keeps its first layout, and `graph`'s ids are read afresh. O(names).
+    pub(crate) fn then<'b>(self, graph: &'b TypeGraph) -> Interned<'b> {
+        let mut held = self.held;
+        held.extend(self.names.into_keys());
+        Interned {
+            graph,
+            model: self.model,
+            parts: self.parts,
+            nodes: BTreeMap::new(),
+            leaves: self.leaves,
+            tags: self.tags,
+            names: BTreeMap::new(),
+            held,
+            named: self.named,
+            contested: self.contested,
+            aliased: self.aliased,
+            copies: self.copies,
+            records: self.records,
+        }
+    }
+
+    /// The node of a type `bytes` wide under this model, or nothing.
+    pub(crate) fn sized(&mut self, ty: TypeId, bytes: u64) -> Option<u32> {
+        let id = self.object(ty)?;
+        (self.size(id) == bytes * 8).then_some(id)
     }
 
     /// Every node interned so far, as a graph.
@@ -427,7 +458,8 @@ impl Interned<'_> {
         };
         // A consumer finds a layout by its name, so a second record of one
         // name is that tag and no layout.
-        let own_name = self.names.get(&tag).is_none_or(|own| *own == id);
+        let own_name =
+            !self.held.contains(&tag) && self.names.get(&tag).is_none_or(|own| *own == id);
         if own_name && self.layout(slot, &tag, record).is_some() {
             self.names.insert(tag, id);
             return slot;

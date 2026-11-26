@@ -159,7 +159,28 @@ pub(crate) fn note_unproven_constructs(
                 })
             })
             .count();
+    let library_typed_objects = (func.extern_objects.iter())
+        .filter(|object| {
+            object.type_fact.as_ref().is_some_and(|fact| {
+                matches!(
+                    fact.provenance,
+                    r2types::DataObjectTypeProvenance::Library { .. }
+                )
+            })
+        })
+        .count();
     let refused_object_types = clauses.refused_object_types.len();
+    if library_typed_objects > 0 {
+        let noun = if library_typed_objects == 1 {
+            "data object type"
+        } else {
+            "data object types"
+        };
+        let _ = write!(
+            &mut detail,
+            "; {library_typed_objects} {noun} from C library rows the loader's copy binds"
+        );
+    }
     if source_typed_objects > 0 {
         let noun = if source_typed_objects == 1 {
             "data object type"

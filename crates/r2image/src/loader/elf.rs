@@ -216,7 +216,11 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             Applies::Resolver => addend().map_or(WriteKind::Unknown, WriteKind::Resolver),
             Applies::ThreadLocal => WriteKind::NotAnAddress,
             // A field of an instruction or a word less its place, which a dynamic table states only for text relocations.
-            Applies::Copy => WriteKind::Copy,
+            Applies::Copy => WriteKind::Copy {
+                symbol: (record.symbol.as_ref())
+                    .filter(|symbol| symbol.size > 0)
+                    .map(|symbol| symbol.name.to_string()),
+            },
             Applies::Unknown
             | Applies::PcRelative
             | Applies::PltRelative

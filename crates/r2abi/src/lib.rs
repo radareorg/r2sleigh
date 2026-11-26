@@ -30,7 +30,7 @@ pub use declarations::{DataObject, Declarations};
 pub use effects::{Effect, Effects, Extent};
 pub use library::{
     CLibrary, Dll, FlagBits, FlagTest, FormatKind, Halt, Handle, Kernel, LibraryId, LibraryRow,
-    LibraryRows, PrototypeId, RowResult, Tail,
+    LibraryRows, ObjectRow, PrototypeId, RowResult, Tail,
 };
 pub use loader::{LoaderCall, ResultRead, loader_call};
 pub use mangled::Passing;

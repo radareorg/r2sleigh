@@ -8,13 +8,13 @@ use crate::CTypeLike;
 ///
 /// This is deliberately not machine evidence. A renderer may trust it because
 /// the source marked the analysis fact, but its proof line must say so.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum DataObjectTypeProvenance {
     /// The capture's own statement of the object's type: the binary's debug
     /// information, read at the object's address.
     Source,
+    /// The C library's header row `citation`, bound where the loader copies the object (D653).
+    Library { citation: Box<str> },
 }
 
 /// One accepted type, keyed outside this value by the object's address.
@@ -46,12 +46,17 @@ pub struct ProgramDataObjectTypeFacts {
 impl ProgramDataObjectTypeFacts {
     /// Each data symbol's type id in the image graph, kept where that graph lays it out (D345).
     /// O(objects x type depth).
-    pub fn from_source(
+    pub fn from_source<'a>(
         graph: Option<&SourceTypeGraph>,
-        observations: impl IntoIterator<Item = (u64, Option<u32>)>,
+        observations: impl IntoIterator<Item = (u64, Option<u32>, Option<&'a str>)>,
     ) -> Self {
         let mut facts = Self::default();
-        for (address, type_id) in observations {
+        for (address, type_id, citation) in observations {
+            let provenance = citation.map_or(DataObjectTypeProvenance::Source, |citation| {
+                DataObjectTypeProvenance::Library {
+                    citation: citation.into(),
+                }
+            });
             let typed = graph.zip(type_id);
             let ty = typed.and_then(|(graph, id)| crate::source_type_like(graph, id));
             match (typed, ty) {
@@ -59,7 +64,7 @@ impl ProgramDataObjectTypeFacts {
                     facts.observe_refused(address, DataObjectTypeRefusal::MissingSourceType)
                 }
                 (Some((graph, id)), Some(ty)) if placeable(graph, id, false) => {
-                    facts.observe_accepted(address, ty);
+                    facts.observe_accepted(address, ty, provenance);
                 }
                 (Some(_), ty) => facts.observe_refused(
                     address,
@@ -90,11 +95,16 @@ impl ProgramDataObjectTypeFacts {
             }
         }
         for (&address, fact) in &other.accepted {
-            self.observe_accepted(address, fact.ty.clone());
+            self.observe_accepted(address, fact.ty.clone(), fact.provenance.clone());
         }
     }
 
-    fn observe_accepted(&mut self, address: u64, ty: CTypeLike) {
+    fn observe_accepted(
+        &mut self,
+        address: u64,
+        ty: CTypeLike,
+        provenance: DataObjectTypeProvenance,
+    ) {
         match self.accepted.get(&address) {
             Some(existing) if existing.ty == ty => {}
             Some(existing) => {
@@ -116,13 +126,8 @@ impl ProgramDataObjectTypeFacts {
             ) => {}
             None => {
                 self.refused.remove(&address);
-                self.accepted.insert(
-                    address,
-                    DataObjectTypeFact {
-                        ty,
-                        provenance: DataObjectTypeProvenance::Source,
-                    },
-                );
+                self.accepted
+                    .insert(address, DataObjectTypeFact { ty, provenance });
             }
         }
     }
@@ -232,7 +237,7 @@ mod tests {
     }
 
     fn facts(id: Option<u32>) -> ProgramDataObjectTypeFacts {
-        ProgramDataObjectTypeFacts::from_source(Some(&graph()), [(0x7000, id)])
+        ProgramDataObjectTypeFacts::from_source(Some(&graph()), [(0x7000, id, None)])
     }
 
     #[test]
@@ -243,7 +248,7 @@ mod tests {
             Some(&CTypeLike::i32())
         );
         assert_eq!(
-            facts.get(0x7000).map(|fact| fact.provenance),
+            facts.get(0x7000).map(|fact| fact.provenance.clone()),
             Some(DataObjectTypeProvenance::Source)
         );
     }
