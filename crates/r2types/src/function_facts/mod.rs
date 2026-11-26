@@ -1041,9 +1041,13 @@ impl SourceOwnedFunctionFacts {
             }
         });
         let certified = certified.map(|ty| (ty, Confidence::of(Basis::Solved)));
+        let class = (self.source.machine_context().function_interface())
+            .and_then(|interface| interface.parameters().get(slot))
+            .map(r2source::SourceAbiParameterSpec::class);
         signed
             .into_iter()
             .chain(certified)
+            .map(|(ty, confidence)| crate::parameter_types::at_slot_class(ty, confidence, class))
             .find_map(|(ty, confidence)| {
                 admissible_declaration_type(ty, width_bits, ptr_bits)
                     .map(|ty| Fact::new(ty, confidence))

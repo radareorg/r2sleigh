@@ -975,7 +975,7 @@ pub(crate) fn convention_call_boundary(
     live_out: &crate::liveout::FunctionLiveOut,
     block_addr: u64,
     op_index: usize,
-    arity: Option<crate::SourceArity>,
+    stated: Option<&crate::machine_context::CalleeStatement>,
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     written_anywhere: &mut BTreeMap<CanonicalStorageId, bool>,
     arrival_merges: &crate::dense::IdSet<ValueId>,
@@ -1000,9 +1000,15 @@ pub(crate) fn convention_call_boundary(
         block_addr,
         op_index,
     };
+    let arity = stated.map(|statement| statement.arity);
+    let homes = stated.and_then(|statement| statement.homes.as_deref());
     if let Some(crate::SourceArity::Exact(count)) = arity {
-        let (arguments, arguments_proven) =
-            stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
+        let (arguments, arguments_proven) = match homes {
+            Some(homes) if homes.len() == count => {
+                stated_call_arguments(at, machine_context, homes, entry_values, stack_pointer)
+            }
+            _ => (Vec::new(), false),
+        };
         return Ok(ConventionCallBoundary {
             convention: convention.id,
             arguments,
@@ -1013,6 +1019,18 @@ pub(crate) fn convention_call_boundary(
         });
     }
     let at_least = arity.map_or(0, crate::SourceArity::floor);
+    // The slots a call fills: the callee's homes below its floor, then the integer slots past them.
+    let integer = convention.arguments(r2source::convention::SlotClass::Integer);
+    let slots = call_slots(integer, homes, at_least).map_err(|index| {
+        r2il::refusal_evidence!(
+            "call-argument",
+            "callsite ({block_addr:#x}, {op_index}) reads no slot at formal {index}'s home {:?}",
+            homes.and_then(|homes| homes.get(index))
+        );
+        CallBoundaryRefusal::DeclaredArgumentUnreached {
+            index: position(index),
+        }
+    })?;
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
     let result_slot = |slot: CanonicalStorageId| {
         (machine_context.function_interface().into_iter())
@@ -1036,12 +1054,7 @@ pub(crate) fn convention_call_boundary(
     // argument too. Arguments fill in order, so an untouched slot that is no parameter of this
     // function, which nothing could pass, proves the count ends below it.
     let written_later = |position: usize| {
-        for slot in convention
-            .arguments(r2source::convention::SlotClass::Integer)
-            .iter()
-            .skip(position + 1)
-            .copied()
-        {
+        for slot in slots.iter().skip(position + 1).copied() {
             match reaching_abi_value_in_block_with_policy(
                 function,
                 prep,
@@ -1088,11 +1101,7 @@ pub(crate) fn convention_call_boundary(
     };
     let mut arguments = Vec::new();
     let mut unproven = None;
-    for (position, slot) in convention
-        .arguments(r2source::convention::SlotClass::Integer)
-        .iter()
-        .enumerate()
-    {
+    for (position, slot) in slots.iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {
             break;
         };
@@ -1163,6 +1172,14 @@ pub(crate) fn convention_call_boundary(
                     unproven = Some(CallBoundaryRefusal::SlotSkipped { slot: index });
                     break;
                 }
+                // A home below the floor the callee reads and no walk reaches: never dropped.
+                if position < at_least {
+                    r2il::refusal_evidence!(
+                        "call-argument",
+                        "callsite ({block_addr:#x}, {op_index}) reaches no value in formal {position}'s home {slot:?}"
+                    );
+                    unproven = Some(CallBoundaryRefusal::DeclaredArgumentUnreached { index });
+                }
                 break;
             }
         };
@@ -1186,10 +1203,7 @@ pub(crate) fn convention_call_boundary(
     // stack. A slot this function stored into before the call is one the call
     // reads, which is the same evidence the register scan takes, and the first
     // slot with no store ends the count exactly as an untouched register does.
-    if arguments.len()
-        == convention
-            .arguments(r2source::convention::SlotClass::Integer)
-            .len()
+    if arguments.len() == slots.len()
         && let Some(placement) = convention.stack_arguments()
     {
         // Where the area is depends on where the stack pointer stands. Without
@@ -1269,79 +1283,104 @@ fn position(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
-/// The `count` arguments a callee's body states it takes, as they reach the call, register slots
-/// first, then the argument area; and whether each was found. O(count) reaching walks.
+/// The slots a call fills: the callee's homes below `at_least`, then integer slots past them
+/// (psABI 3.2.3); a stack home only once every slot is filled, else `Err(first unread formal)`.
+fn call_slots(
+    integer: &[CanonicalStorageId],
+    homes: Option<&[r2source::SourceParameterLocation]>,
+    at_least: usize,
+) -> Result<Vec<CanonicalStorageId>, usize> {
+    let Some(homes) = homes else {
+        return Ok(integer.to_vec());
+    };
+    let below = homes.get(..at_least).ok_or(homes.len())?;
+    let stated = (below.iter().map_while(|home| home.register())).collect::<Vec<_>>();
+    let past = (stated.iter())
+        .filter_map(|home| integer.iter().position(|slot| slot == home))
+        .max()
+        .map_or(0, |last| last + 1);
+    let stacked = below.len() > stated.len();
+    let misplaced = below[stated.len()..]
+        .iter()
+        .any(|home| home.register().is_some());
+    if misplaced || (stacked && integer.len() > past) {
+        return Err(stated.len());
+    }
+    Ok(stated
+        .into_iter()
+        .chain(integer.iter().skip(past).copied())
+        .collect())
+}
+
+/// The arguments a callee's body states it takes, each read at its formal home as it reaches the
+/// call; and whether each was found. O(homes) reaching walks.
 fn stated_call_arguments(
     at: CallPosition<'_>,
     machine_context: &SourceMachineContext,
-    count: usize,
+    homes: &[r2source::SourceParameterLocation],
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> (Vec<SourceCallArgumentFact>, bool) {
-    let Some(convention) = machine_context.convention() else {
-        return (Vec::new(), false);
-    };
-    let registers = convention.arguments(r2source::convention::SlotClass::Integer);
-    let mut arguments = Vec::with_capacity(count);
-    for (position, slot) in registers.iter().take(count).enumerate() {
-        // The callee reads the slot whatever merges into it.
-        let reaching = reaching_abi_value_in_block_with_policy(
-            at.function,
-            at.prep,
-            at.graph,
-            machine_context,
-            at.block_addr,
-            at.op_index,
-            *slot,
-            true,
-        );
-        let value = match reaching {
-            Some(ReachingAbiState::Value(value)) => SourceCallArgumentValue::Value(value),
-            Some(ReachingAbiState::PreservedEntry) => {
-                entry_values.get(slot).copied().flatten().map_or(
-                    SourceCallArgumentValue::PreservedEntry,
-                    SourceCallArgumentValue::Value,
-                )
-            }
-            None => return (arguments, false),
-        };
-        let (value, lane_of) = super::shared::narrowed_argument(&at, value, *slot);
+    let mut arguments = Vec::with_capacity(homes.len());
+    for (position, home) in homes.iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {
             return (arguments, false);
         };
-        arguments.push(SourceCallArgumentFact {
-            slot: CallBoundarySlot::Register {
-                index,
-                storage: *slot,
-            },
-            value,
-            lane_of,
-        });
-    }
-    let stacked = count.saturating_sub(registers.len());
-    if stacked == 0 {
-        return (arguments, true);
-    }
-    let Some(placement) = convention.stack_arguments() else {
-        return (arguments, false);
-    };
-    let spent = r2source::SourceReturnMechanism::spent(machine_context.return_mechanism());
-    for position in 0..stacked {
-        let Some(argument) = (placement.offset_of(position))
-            .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
-        else {
-            return (arguments, false);
-        };
-        let Some((value, entry_offset)) =
-            reaching_stack_argument_before_call(at, argument, stack_pointer.as_deref_mut())
-        else {
-            return (arguments, false);
-        };
-        arguments.push(SourceCallArgumentFact {
-            slot: CallBoundarySlot::Stack(entry_offset),
-            value: SourceCallArgumentValue::Value(value),
-            lane_of: None,
-        });
+        match *home {
+            r2source::SourceParameterLocation::Register(slot) => {
+                // The callee reads the slot whatever merges into it.
+                let reaching = reaching_abi_value_in_block_with_policy(
+                    at.function,
+                    at.prep,
+                    at.graph,
+                    machine_context,
+                    at.block_addr,
+                    at.op_index,
+                    slot,
+                    true,
+                );
+                let value = match reaching {
+                    Some(ReachingAbiState::Value(value)) => SourceCallArgumentValue::Value(value),
+                    Some(ReachingAbiState::PreservedEntry) => {
+                        entry_values.get(&slot).copied().flatten().map_or(
+                            SourceCallArgumentValue::PreservedEntry,
+                            SourceCallArgumentValue::Value,
+                        )
+                    }
+                    None => return (arguments, false),
+                };
+                let (value, lane_of) = super::shared::narrowed_argument(&at, value, slot);
+                arguments.push(SourceCallArgumentFact {
+                    slot: CallBoundarySlot::Register {
+                        index,
+                        storage: slot,
+                    },
+                    value,
+                    lane_of,
+                });
+            }
+            r2source::SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => {
+                let argument = StackArgument {
+                    offset,
+                    callee_offset,
+                    size_bytes,
+                };
+                let Some((value, entry_offset)) =
+                    reaching_stack_argument_before_call(at, argument, stack_pointer.as_deref_mut())
+                else {
+                    return (arguments, false);
+                };
+                arguments.push(SourceCallArgumentFact {
+                    slot: CallBoundarySlot::Stack(entry_offset),
+                    value: SourceCallArgumentValue::Value(value),
+                    lane_of: None,
+                });
+            }
+        }
     }
     (arguments, true)
 }
@@ -1836,7 +1875,7 @@ pub(crate) fn collect_source_boundary_facts(
                 live_out,
                 block_addr,
                 op_index,
-                stated.map(|statement| statement.arity),
+                stated,
                 &entry_values,
                 &mut written_anywhere,
                 &arrival_merges,
@@ -3099,6 +3138,29 @@ mod tests {
     use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 
     use super::*;
+
+    /// A floor callee's `double` sixth formal is read at XMM0, and R9 comes after it (D546).
+    #[test]
+    fn a_floor_call_fills_its_homes_then_the_integer_slots_past_them() {
+        let register = |offset| CanonicalStorageId::from_varnode(&Varnode::register(offset, 8));
+        let integer = [0x38, 0x30, 0x10, 0x08, 0x80, 0x88].map(register);
+        let xmm0 = register(0x1200);
+        let mut homes = integer[..5]
+            .iter()
+            .map(|slot| r2source::SourceParameterLocation::Register(*slot))
+            .collect::<Vec<_>>();
+        homes.push(r2source::SourceParameterLocation::Register(xmm0));
+        let slots = call_slots(&integer, Some(&homes), 6).expect("every home is a register");
+        assert_eq!(slots[5], xmm0);
+        assert_eq!(slots[6..], integer[5..]);
+        // A stack home while R9 is unfilled is no slot the argument area scan reaches.
+        homes[5] = r2source::SourceParameterLocation::Stack {
+            offset: 0,
+            size_bytes: 8,
+            callee_offset: 8,
+        };
+        assert_eq!(call_slots(&integer, Some(&homes), 6), Err(5));
+    }
 
     /// The guard's read reaches the count register through six lanes and zero-extensions, past
     /// any fixed depth, and the zero written over it is still the protector's scrub.

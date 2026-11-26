@@ -223,6 +223,12 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
+    if let Some(index) = clauses.unclassed {
+        let _ = write!(
+            &mut detail,
+            "; the signature is refused: parameter {index}'s C class is unknown, so the parameters listed are a floor"
+        );
+    }
     note_frame_isolation(&mut detail, ledger);
     note_landing_pads(&mut detail, landing_pads);
     if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
@@ -452,11 +458,17 @@ fn note_unassigned_reads(detail: &mut String, clauses: &ProofClauses) {
 pub struct ProofClauses {
     refused_object_types: Vec<String>,
     unassigned: Vec<(UnassignedCause, Vec<String>)>,
+    /// The first formal whose C class is unknown: the signature is refused there (D661).
+    unclassed: Option<u32>,
 }
 
 impl ProofClauses {
     /// The clauses of `func`, whose data objects are declared, with the reads left unassigned.
-    pub(crate) fn of(func: &CFunction, unassigned: &[UnassignedRead]) -> Self {
+    pub(crate) fn of(
+        func: &CFunction,
+        unassigned: &[UnassignedRead],
+        unclassed: Option<u32>,
+    ) -> Self {
         let refused_object_types = (func.extern_objects.iter())
             .filter(|object| object.type_fact.is_none() && object.type_refusal.is_some())
             .map(|object| object.name.clone())
@@ -473,6 +485,7 @@ impl ProofClauses {
         Self {
             refused_object_types,
             unassigned: by_cause,
+            unclassed,
         }
     }
 
@@ -518,4 +531,30 @@ fn count_body_statements(stmts: &[CStmt]) -> usize {
         }
     }
     stmts.iter().map(visit).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A formal whose C class is unknown refuses the signature: the header lists the formals before
+    /// it as a floor and never spells `(void)`, which states no parameters (C17 6.7.6.3p10, D661).
+    #[test]
+    fn an_unclassed_formal_refuses_the_signature_and_never_spells_void() {
+        let mut func = CFunction::new("f", crate::ast::CType::Void);
+        func.params_known = false;
+        let clauses = ProofClauses {
+            refused_object_types: Vec::new(),
+            unassigned: Vec::new(),
+            unclassed: Some(0),
+        };
+        let parameters = (&clauses, ((false, false), &[][..]), 0, &[][..], &[][..]);
+        note_unproven_constructs(&mut func, None, 0, 0, 0, parameters, None, None, 0);
+        let mut codegen =
+            crate::codegen::CodeGenerator::new(crate::codegen::CodeGenConfig::default());
+        let ready = crate::codegen::prepare_function_for_emission(func);
+        let code = codegen.generate_function(&ready);
+        assert!(code.contains("void f()"), "{code}");
+        assert!(code.contains("parameter 0's C class is unknown"), "{code}");
+    }
 }
