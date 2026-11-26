@@ -91,19 +91,30 @@ and backgrounds, which `theme.rs` uses for no foreground.
 
 | Token | Meaning | 16 | 256 | Truecolor dark / light | No colour |
 |---|---|---|---|---|---|
-| `proof.refused` | refusal cell | `41;97` | `48;5;88;38;5;231` | bg #870000 / #B23A00, fg white | `!` |
+| `proof.refused` | refusal cell | `41;30` | `48;5;88;38;5;231` | bg #870000 / #B23A00, fg white | `!` |
 | `proof.reason` | the refusal's reason | `39` | `38;5;210` | #FF8787 / #A23B00 | text after `!` |
 | `proof.unknown` | unanswered cell | `43;30` | `48;5;214;38;5;16` | bg #E69F00, fg black | `?` |
 | `proof.bound` | Bounded | `94` | `38;5;74` | #56B4E9 / #0072B2 | `~` |
 | `proof.premise` | under a premise | `95` | `38;5;227` | #F0E442 / #7A6A00 | `*` |
 | `proof.declared` | Declared | `95` | `38;5;175` | #CC79A7 / #8E3A6E | `^` |
 | `proof.read` | Read | `94` | `38;5;36` | #2BC59A / #00785A | `.` |
-| `proof.assumed` | Assumed | `95` | `38;5;173` | #D7875F / #8A4B2A | `_` |
+| `proof.assumed` | Assumed | `1;95` | `1;38;5;173` | bold #D7875F / #8A4B2A | `_` |
 
 A refusal or unknown is a background cell, never confused with `Return` (31)
 or `Trap` and `Residual` (1;91). With 16 colours the glyph separates roles
 that share a hue. No grade uses dim or italic. Each truecolor foreground
 reaches 4.5:1 on its background.
+
+With 16 colours the terminal's theme picks the cell's red and yellow (D688).
+The glyph is black or bright white, whichever has the higher worst ratio over
+16 palettes (agg's 12 themes, xterm, VGA, iTerm2, svg-term-cli): black on red
+is 2.46:1 at worst (nord), bright white 1.38:1 (github-dark's `#f97583`).
+`_` is bold at every depth: it is the one mark on the cell's bottom edge.
+
+A grep reads plain text by default, as radare2's `scr.color.grep=false` does.
+`e scr.color.grep=true` keeps the statement's terminal layout: colour, rails
+and the cut. Words, columns and orders still read each line without its
+escapes; a whole kept line prints painted, a column prints as text.
 
 ### Column grid (D565, D566)
 

@@ -112,6 +112,15 @@ pub(crate) const KEYS: &[Key] = &[
         },
     },
     Key {
+        name: "scr.color.grep",
+        summary: "enable colors when using ~grep",
+        get: |session| session.color_grep.to_string(),
+        set: |session, value| {
+            session.color_grep = boolean("scr.color.grep", value)?;
+            Ok(())
+        },
+    },
+    Key {
         name: "scr.utf8",
         summary: "show UTF-8 characters instead of ANSI",
         get: |session| session.utf8.to_string(),

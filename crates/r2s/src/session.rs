@@ -18,9 +18,12 @@ pub struct Session {
     /// How listings are painted, `scr.color`: 0 none, 1 sixteen colours, 2 256, 3 truecolor;
     /// 1 for a terminal unless `NO_COLOR` says otherwise.
     pub color: u8,
-    /// Whether a grep reads the output of the statement running, which an
-    /// escape would split. Set for one statement, never a setting.
+    /// Whether a grep reads the output of the statement running as a pipe's plain text. Set for
+    /// one statement, never a setting.
     pub grepped: bool,
+    /// Whether a grep keeps the terminal's layout and colour: `scr.color.grep`, false as in
+    /// radare2.
+    pub color_grep: bool,
     /// Whether a listing shows each instruction's bytes: `asm.bytes`.
     pub bytes: bool,
     /// Whether a C++ name is shown demangled: `asm.demangle`.
@@ -61,6 +64,7 @@ impl Session {
         Ok(Self {
             color: 0,
             grepped: false,
+            color_grep: false,
             bytes: true,
             demangle: true,
             proof: false,

@@ -78,7 +78,7 @@ fn a_refusal_cell_and_its_reason_are_painted() {
     let (listing, ok) = piped(relocated(), "e scr.color=1; pdf @ sym.f");
     assert!(ok);
     let call = line_at(&listing, "0x08000040");
-    let refused = " ; \x1b[41;97m!\x1b[0m \x1b[39margs of sym.imp.ext: \
+    let refused = " ; \x1b[41;30m!\x1b[0m \x1b[39margs of sym.imp.ext: \
                    the import has no declaration to state its arguments\x1b[0m";
     assert!(call.ends_with(refused), "{call:?}");
     let (listing, _) = piped(relocated(), "e scr.color=2; pdf @ sym.f");
@@ -106,14 +106,14 @@ fn ao_notes_and_the_pd_legend_paint_their_mark_cells() {
     let said = "args of sym.imp.ext: the import has no declaration to state its arguments";
     let (out, ok) = piped(relocated(), "e scr.color=1; ao @ 0x08000040");
     assert!(ok);
-    let painted = format!("\n  \x1b[41;97m!\x1b[0m \x1b[39m{said}\x1b[0m\n");
+    let painted = format!("\n  \x1b[41;30m!\x1b[0m \x1b[39m{said}\x1b[0m\n");
     assert!(out.contains(&painted), "{out:?}");
     let (out, _) = piped(relocated(), "ao @ 0x08000040");
     assert!(out.contains(&format!("\n  ! {said}\n")), "{out:?}");
     let (legend, ok) = piped(relocated(), "e scr.color=1; pd?");
     assert!(ok);
     assert!(
-        legend.contains("\n\x1b[41;97m!\x1b[0m  refused; the reason follows"),
+        legend.contains("\n\x1b[41;30m!\x1b[0m  refused; the reason follows"),
         "{legend:?}"
     );
     assert!(legend.contains("\n(space)  holds"), "{legend:?}");
@@ -122,4 +122,40 @@ fn ao_notes_and_the_pd_legend_paint_their_mark_cells() {
         legend.contains("\n!  refused; the reason follows"),
         "{legend:?}"
     );
+}
+
+/// `scr.color.grep=true` keeps `pdd`'s colour and rails through a row range, as radare2 keeps
+/// colour under it; false, its default, greps the plain text.
+#[test]
+fn scr_color_grep_keeps_the_painted_rows() {
+    let keys = "e scr.color=1; e asm.rails=true";
+    let (whole, ok) = piped(hashes(), &format!("{keys}; pdd @ sym.fnv1a32"));
+    assert!(
+        ok && whole.contains('\x1b') && whole.contains('│'),
+        "{whole:?}"
+    );
+    let rows: String = whole
+        .lines()
+        .skip(3)
+        .take(5)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let script = format!("{keys}; e scr.color.grep=true; pdd @ sym.fnv1a32~:3..8");
+    assert_eq!(piped(hashes(), &script).0, rows);
+    let (plain, _) = piped(hashes(), "pdd @ sym.fnv1a32");
+    let rows: String = plain
+        .lines()
+        .skip(3)
+        .take(5)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_eq!(
+        piped(hashes(), &format!("{keys}; pdd @ sym.fnv1a32~:3..8")).0,
+        rows
+    );
+    let (red, _) = piped(
+        hashes(),
+        "e scr.color.grep=true; ?e a\\e[31mred\\e[0m~red; e scr.color.grep",
+    );
+    assert_eq!(red, "a\x1b[31mred\x1b[0m\ntrue\n");
 }
