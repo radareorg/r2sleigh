@@ -127,7 +127,7 @@ Usage: a[...]  the a commands
 | afb [addr]  a function's basic blocks
 | afv [addr]  a function's arguments and variables
 | agf [addr]  a function's control-flow graph
-| ax [addr]   references from an address
+| ax          list references
 | axt [addr]  references to an address
 EOF
 RUN

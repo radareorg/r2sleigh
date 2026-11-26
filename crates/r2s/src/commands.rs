@@ -396,9 +396,9 @@ pub(crate) const VERBS: &[Verb] = &[
     ),
     verb!(
         ["ax"],
-        Address,
+        None,
         Public,
-        "references from an address",
+        "list references",
         Some(cross_references)
     ),
     verb!(
