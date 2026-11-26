@@ -1114,34 +1114,30 @@ fn a_function_with_no_closed_lane_zero_way_in_keeps_the_bits_above_a_narrow_call
     }
 }
 
-/// AArch64 `fmov d0, x0; ret` and its x86-64 twin `movq xmm0, rdi; ret`; `fsub d0, d0, d0; ret`.
-const A64_FMOV: &[u8] = &[0x00, 0x00, 0x67, 0x9e, 0xc0, 0x03, 0x5f, 0xd6];
-const X86_MOVQ: &[u8] = &[0x66, 0x48, 0x0f, 0x6e, 0xc7, 0xc3];
-const A64_FSUB: &[u8] = &[0x00, 0x38, 0x60, 0x1e, 0xc0, 0x03, 0x5f, 0xd6];
+/// AArch64 `scratch` writes v0 and leaves x0 (`fmov d0, #1.0; ret`); `top` calls it and reads
+/// neither lane. hashes and review clang-O2 under equivalence left `equal` this way (D660).
+const A64_UNREAD_LANES: &[u8] = &[
+    0x00, 0x10, 0x6e, 0x1e, // 1000 fmov d0, #1.0
+    0xc0, 0x03, 0x5f, 0xd6, // 1004 ret
+    0x1f, 0x20, 0x03, 0xd5, // 1008 nop
+    0x1f, 0x20, 0x03, 0xd5, // 100c nop
+    0xfd, 0x7b, 0xbf, 0xa9, // 1010 stp x29, x30, [sp, -0x10]!
+    0xfd, 0x03, 0x00, 0x91, // 1014 mov x29, sp
+    0xfa, 0xff, 0xff, 0x97, // 1018 bl 0x1000
+    0x00, 0x00, 0x80, 0xd2, // 101c mov x0, 0
+    0xfd, 0x7b, 0xc1, 0xa8, // 1020 ldp x29, x30, [sp], 0x10
+    0xc0, 0x03, 0x5f, 0xd6, // 1024 ret
+];
 
-fn described(program: Literal) -> r2engine::program::info::FunctionInfo {
-    (OpenProgram::of(program).function_info(BASE)).expect("it is described")
-}
-
-/// V0 is a result lane as X0 is (AAPCS64 6.9; `AARCH64.cspec` lists it first among its outputs):
-/// what reaches it at a return is read, so the formal behind it stays, as XMM0's does (D660).
+/// A call reading neither lane of a callee that hands x0 back and writes v0 is written, whatever
+/// the callee's result is.
 #[test]
-fn an_aarch64_float_result_lane_is_read_at_a_return_as_xmm0_is() {
-    let code = |bytes: &'static [u8]| Literal::of_code(bytes, &[("f", BASE, bytes.len() as u64)]);
-    let twin = described(code(X86_MOVQ));
-    let fmov = described(code(A64_FMOV).in_aarch64());
-    let fsub = described(code(A64_FSUB).in_aarch64());
-    let homes = |info: &r2engine::program::info::FunctionInfo| {
-        (info.arguments.iter())
-            .map(|argument| argument.storage)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(homes(&twin).len(), 1, "{twin:?}");
-    assert_eq!(homes(&fmov).len(), 1, "{fmov:?}");
-    assert_eq!(homes(&fsub).len(), 1, "{fsub:?}");
-    assert_ne!(
-        fmov.unproven.and_then(|unproven| unproven.cause),
-        Some(r2types::UnprovenCause::EntryInput),
-        "{fmov:?}"
-    );
+fn an_aarch64_call_reading_no_lane_of_a_written_float_callee_is_rendered() {
+    let functions = &[("scratch", BASE, 0x08), ("top", BASE + 0x10, 0x18)];
+    let mut open = OpenProgram::of(Literal::of_code(A64_UNREAD_LANES, functions).in_aarch64());
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(!text.contains("CallNotRendered"), "{text}");
+    assert!(text.contains("scratch()"), "{text}");
 }

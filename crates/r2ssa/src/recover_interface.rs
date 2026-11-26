@@ -2100,23 +2100,8 @@ fn recover_interface_inner(
                         float_unwritten: false,
                     });
                 }
-                // An argument handed back beside a written float: the callers' reads choose, and what
-                // feeds either lane is observed (AAPCS64 6.9); a resolved integer lane stays observed.
+                // An argument handed back beside a written float: the callers' reads choose.
                 None if handed_back => {
-                    let resolved = candidate_live_out.unresolved_blocks().next().is_none();
-                    candidate_live_out = match resolved {
-                        true => crate::liveout::FunctionLiveOut::compute(
-                            func,
-                            graph,
-                            &[candidate, float],
-                        ),
-                        false => float_live_out,
-                    };
-                    if result_register_written(func, graph, float, Some(&facts), (true, false))
-                        .is_some()
-                    {
-                        result_causes.insert(SourceResultCause::Written);
-                    }
                     result_carriers = Some(r2source::SourceResultCarriers {
                         integer: candidate,
                         float: Some(float),
