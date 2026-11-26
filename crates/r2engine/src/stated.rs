@@ -147,10 +147,8 @@ impl Code {
     }
 }
 
-/// The `bytes` read at `at` once the loader is done (audit W5).
-///
-/// A written word or field holds the value its encoding states; one with no value stated keeps the
-/// file's link-time bytes or is unstated. `O(log W + k)` for `k` writes.
+/// The `bytes` at `at` once the loader is done: each write holds what its encoding states, else the
+/// file's bytes or an unstated range (audit W5). `O(log W + k)` for `k` writes.
 pub fn code(
     writes: &[crate::program::LoaderWrite],
     at: u64,
