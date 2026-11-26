@@ -225,6 +225,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             | Applies::PcRelative
             | Applies::PltRelative
             | Applies::GotRelative
+            | Applies::GotEntry
             | Applies::Field => WriteKind::Unknown,
             Applies::Symbol | Applies::SymbolPlusAddend => {
                 let offset = match record.applies {
@@ -769,18 +770,23 @@ enum Bound {
 struct Linkage {
     /// Each import's stub and the name of the first record naming it.
     stubs: BTreeMap<(usize, u32), (u64, String)>,
-    /// Each symbol's slot and the name of the first record naming it.
-    slots: BTreeMap<Bound, (u64, String)>,
+    /// Each slot by the symbol and the addend it holds, and the name of the first record naming it.
+    slots: BTreeMap<(Bound, i64), (u64, String)>,
 }
 
 impl Linkage {
     fn of(binds: &[Bind], linkage: u64, pointer: u64) -> Self {
         let mut stubs: BTreeMap<(usize, u32), (u64, String)> = BTreeMap::new();
-        let mut slots: BTreeMap<Bound, (u64, String)> = BTreeMap::new();
+        let mut slots: BTreeMap<(Bound, i64), (u64, String)> = BTreeMap::new();
         for bind in binds.iter().filter(|bind| bind.loaded) {
             match (bind.record.applies, bind.bound) {
-                (Applies::GotRelative, bound) => {
-                    slots.entry(bound).or_insert_with(|| (0, bind.name()));
+                (Applies::GotRelative | Applies::GotEntry, bound) => {
+                    let Some(held) = Linkage::held(bind) else {
+                        continue;
+                    };
+                    slots
+                        .entry((bound, held))
+                        .or_insert_with(|| (0, bind.name()));
                 }
                 (
                     Applies::PcRelative | Applies::PltRelative | Applies::Field,
@@ -809,26 +815,35 @@ impl Linkage {
         self.stubs.values().map(stub).collect()
     }
 
-    /// What the static linker writes into each slot: the symbol's address.
-    fn slot_writes(&self, pointer: u64) -> Vec<LoaderWrite> {
-        let slot = |(bound, (place, name)): (&Bound, &(u64, String))| {
-            let kind = match *bound {
+    /// The addend a slot holds: none for x86's slot plus addend, the record's for AArch64's GDAT(S+A).
+    fn held(bind: &Bind) -> Option<i64> {
+        match bind.record.applies {
+            Applies::GotEntry => bind.addend,
+            _ => Some(0),
+        }
+    }
+
+    /// What the static linker writes into each slot: the symbol's address plus the addend it holds.
+    fn slot_writes(&self, pointer: u64, mask: u64) -> Vec<LoaderWrite> {
+        let slot = |(&(bound, held), (place, name)): (&(Bound, i64), &(u64, String))| {
+            let address = |address: u64| address.wrapping_add(held as u64) & mask;
+            let kind = match bound {
                 Bound::At {
-                    address,
+                    address: at,
                     weak: false,
-                } => WriteKind::Absolute(address),
+                } => WriteKind::Absolute(address(at)),
                 Bound::At {
-                    address,
+                    address: at,
                     weak: true,
                 } => WriteKind::Preemptible {
                     symbol: name.clone(),
-                    default: address,
+                    default: address(at),
                 },
-                Bound::Import(..) => WriteKind::Import {
+                Bound::Import(..) if held == 0 => WriteKind::Import {
                     symbol: name.clone(),
                     library: None,
                 },
-                Bound::Unplaced => WriteKind::Unknown,
+                Bound::Import(..) | Bound::Unplaced => WriteKind::Unknown,
             };
             LoaderWrite {
                 place: *place,
@@ -849,9 +864,12 @@ impl Linkage {
         };
         let kind = match (record.applies, bind.bound) {
             (Applies::ThreadLocal, _) => WriteKind::NotAnAddress,
-            (Applies::GotRelative, bound) => (self.slots.get(&bound))
+            (Applies::GotRelative, bound) => (self.slots.get(&(bound, 0)))
                 .and_then(|(slot, _)| plus(*slot))
                 .map_or(WriteKind::Unknown, WriteKind::Absolute),
+            (Applies::GotEntry, bound) => (Linkage::held(bind))
+                .and_then(|held| self.slots.get(&(bound, held)))
+                .map_or(WriteKind::Unknown, |(slot, _)| WriteKind::Absolute(*slot)),
             (Applies::Symbol | Applies::SymbolPlusAddend, Bound::Import(..))
                 if bind.addend == Some(0) =>
             {
@@ -931,7 +949,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             _ => u64::MAX,
         };
         let linkage = Linkage::of(&binds, linkage, self.pointer);
-        let mut writes = linkage.slot_writes(self.pointer);
+        let mut writes = linkage.slot_writes(self.pointer, mask);
         let mut targets = Vec::new();
         let mut relocations = Vec::with_capacity(binds.len());
         for bind in binds {
@@ -1411,9 +1429,9 @@ fn aarch64(ntype: elf::RelocationType, pointer: u64) -> Option<(Applies, u64, En
         elf::R_AARCH64_MOVW_UABS_G2_NC => (A::Field, 4, movw(2, false)),
         elf::R_AARCH64_MOVW_UABS_G3 => (A::Field, 4, movw(3, true)),
         // The slot's page and offset; the GOT-page-relative LO15 stays unread.
-        elf::R_AARCH64_ADR_GOT_PAGE => (A::GotRelative, 4, Field(F::Page21 { checked: true })),
-        elf::R_AARCH64_LD64_GOT_LO12_NC => (A::GotRelative, 4, Field(F::Lo12 { shift: 3 })),
-        elf::R_AARCH64_LD64_GOTPAGE_LO15 => (A::GotRelative, 4, Typed),
+        elf::R_AARCH64_ADR_GOT_PAGE => (A::GotEntry, 4, Field(F::Page21 { checked: true })),
+        elf::R_AARCH64_LD64_GOT_LO12_NC => (A::GotEntry, 4, Field(F::Lo12 { shift: 3 })),
+        elf::R_AARCH64_LD64_GOTPAGE_LO15 => (A::GotEntry, 4, Typed),
         elf::R_AARCH64_COPY => (A::Copy, 8, Word),
         // AArch64 adds the addend to both, which ELF gABI leaves to the psABI.
         elf::R_AARCH64_GLOB_DAT | elf::R_AARCH64_JUMP_SLOT => (A::SymbolPlusAddend, 8, Word),

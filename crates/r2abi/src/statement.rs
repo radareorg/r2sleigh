@@ -725,8 +725,10 @@ pub enum Applies {
     PcRelative,
     /// The symbol's linkage entry plus the addend, less the place; a static link of a defined symbol makes it the symbol (`R_X86_64_PLT32`).
     PltRelative,
-    /// A global offset table slot for the symbol, which the static linker creates (`R_X86_64_GOTPCREL`).
+    /// A global offset table slot for the symbol, which the static linker creates, plus the addend (`R_X86_64_GOTPCREL`).
     GotRelative,
+    /// The global offset table slot the static linker creates for the symbol plus the addend: GDAT(S+A) (`R_AARCH64_ADR_GOT_PAGE`).
+    GotEntry,
     /// The symbol plus the addend, or less the place, in an instruction's immediate (`R_AARCH64_CALL26`, `R_ARM_MOVW_ABS_NC`).
     Field,
     /// The address a resolver function returns; the addend is the resolver.

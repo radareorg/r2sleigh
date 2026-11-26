@@ -54,11 +54,27 @@ radare2 = "6.2.4"
 
 [[judged]]
 command = "pd"
+binaries = ["aarch64-got-etrel.o", "aarch64-got-etrel-addend.o", "aarch64-common-got.o"]
+r2 = 'ldr x\d+, \[x\d+\]$'
+r2s = 'ldr x\d+, \[x\d+, 0x8\]$'
+verdict = "deliberate"
+reason = "R_AARCH64_LD64_GOT_LO12_NC is G(GDAT(S+A)) & 0xff8 (AAELF64): GDAT(S+A) is the GOT entry holding S+A. An object states no GOT; r2image's Linkage adds one slot per symbol and addend from the page after .bss (0x8001000), as a static link does, and the second slot is at +8. radare2 6.2.4 at its default bin.relocs.apply=false lists the file's zero field; with it true, it patches toward its own .got.r2 slot past the file (0x8000158) and with A=0 reads gundef's slot for :got:gundef+8, which AAELF64 gives an entry of its own (upstream candidate)"
+
+[[judged]]
+command = "pd"
+binaries = "aarch64-*.o"
+r2 = '\badrp x\d+, '
+r2s = '\badrp x\d+, 0x[0-9a-f]+$'
+verdict = "deliberate"
+reason = "r2s writes the page each AArch64 object's ADR_PREL_PG_HI21 or ADR_GOT_PAGE states into the field (r2abi InstructionField::Page21), toward the symbol or the slot r2image's Linkage places; radare2 at its default bin.relocs.apply=false lists the file's field, the object's own page, named after the header or the common symbol it lists at the base"
+
+[[judged]]
+command = "pd"
 binaries = ["arm-*.o", "aarch64-*.o"]
-r2 = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) '
-r2s = '\b(blx?|b(eq|ne)?\.w|adrp x\d+,|ldr x\d+,) 0x[0-9a-f]+$'
+r2 = '\b(blx?|b(eq|ne)?\.w|ldr x\d+,) '
+r2s = '\b(blx?|b(eq|ne)?\.w|ldr x\d+,) 0x[0-9a-f]+$'
 verdict = "unfilled"
-reason = "an ARM or AArch64 object's instruction field (R_ARM_THM_CALL, THM_JUMP19 and JUMP24, BE32 too; R_AARCH64_ADR_GOT_PAGE, LD_PREL_LO19) is stated typed but no encoder writes it, so r2s decodes the file's field: a branch to itself or by its addend (beq.w 0x810003e), an adrp to its own page; owner r2image (ROADMAP I: ARM and AArch64 instruction-field encoders). radare2 also lists the file's field, naming the relocation or the address (bl sym.f is the unrelocated self-target; adrp obj.cbuf names the page after the common symbol it lists at the base)"
+reason = "an ARM object's instruction field (R_ARM_THM_CALL, THM_JUMP19 and JUMP24, BE32 too) or an AArch64 GOT literal load (R_AARCH64_GOT_LD_PREL19, which r2image has no row for) is stated typed and no encoder writes it, so r2s decodes the file's field: a branch to itself or by its addend (beq.w 0x810003e), a load from its own place; owner r2image (ROADMAP I: ARM instruction-field encoders). radare2 also lists the file's field, naming the relocation or the address (bl sym.f is the unrelocated self-target)"
 
 [[judged]]
 command = "is"
