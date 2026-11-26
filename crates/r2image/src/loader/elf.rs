@@ -779,11 +779,8 @@ impl Linkage {
         let mut stubs: BTreeMap<(usize, u32), (u64, String)> = BTreeMap::new();
         let mut slots: BTreeMap<(Bound, i64), (u64, String)> = BTreeMap::new();
         for bind in binds.iter().filter(|bind| bind.loaded) {
-            match (bind.record.applies, bind.bound) {
-                (Applies::GotRelative | Applies::GotEntry, bound) => {
-                    let Some(held) = Linkage::held(bind) else {
-                        continue;
-                    };
+            match (bind.record.applies, bind.bound, Linkage::held(bind)) {
+                (Applies::GotRelative | Applies::GotEntry, bound, Some(held)) => {
                     slots
                         .entry((bound, held))
                         .or_insert_with(|| (0, bind.name()));
@@ -791,6 +788,7 @@ impl Linkage {
                 (
                     Applies::PcRelative | Applies::PltRelative | Applies::Field,
                     Bound::Import(table, index),
+                    _,
                 ) => {
                     stubs
                         .entry((table, index))
