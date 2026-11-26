@@ -212,7 +212,7 @@ impl Indexing {
                     Some(value) => value,
                     None => continue,
                 },
-                (Encoding::FromPlace | Encoding::Typed, _) => {
+                (Encoding::FromPlace | Encoding::Field(_) | Encoding::Typed, _) => {
                     let code = write.target().filter(|target| holds_code(*target));
                     coverage.unstated.extend(code.map(|_| write.place));
                     continue;

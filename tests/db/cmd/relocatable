@@ -77,3 +77,25 @@ EXPECT=<<EOF
             0x08000040      3412           xor al, 0x12
 EOF
 RUN
+
+# An AArch64 object's adrp, add :lo12: and bl immediates decode as their relocations state them, so
+# each walk runs to the end of its function as radare2's does: main 9 blocks, count 15.
+NAME=relocatable aarch64 object functions
+FILE=tests/fixtures/wc_clang_aarch64_O1g.o
+CMDS=aa; afl
+EXPECT=<<EOF
+0x08000040    9    204 sym.main
+0x0800010c   15    180 sym.count
+EOF
+RUN
+
+# count's .bss address forms from adrp and add :lo12: as radare2 applies them: 0x08001af0.
+NAME=relocatable aarch64 object listing
+FILE=tests/fixtures/wc_clang_aarch64_O1g.o
+CMDS=pd 3 @ 0x08000114
+EXPECT=<<EOF
+            0x08000114      ea031faa       mov x10, xzr
+            0x08000118      090000b0       adrp x9, 0x8001000
+            0x0800011c      29c12b91       add x9, x9, 0xaf0
+EOF
+RUN
