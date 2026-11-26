@@ -132,6 +132,15 @@ with their Q, D and S views. None carries a value between instructions: once
 a dead write to one is dropped, no instruction of 20,000 random words per
 language reads one on entry (`crates/r2sleigh-lift/tests/scratch_registers.rs`).
 
+Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull request and a
+Ghidra issue owed; master `3fb3eec6a0` still decodes them): AArch64's logical immediates
+(`and`, `ands`, `eor`, `orr`, `tst` and the `mov` alias, 12 constructors) read `LogicalWMask32`
+and `LogicalWMask64`, which exclude the `imms` that fills its element, UNDEFINED by the Arm ARM's
+`DecodeBitMasks` with `immediate` TRUE (`e07f0032`, `e0ff40b2` and `007c0012` decoded as
+`orr w0, wzr, 0xffffffff`, `orr x0, xzr, -0x1` and `and w0, w0, 0xffffffff`). BFM, SBFM and UBFM
+keep `DecodeWMask32` and `DecodeWMask64`, where all ones is legal (`lsr w0, w0, #1` is UBFM with
+`imms` 31; `crates/r2sleigh-lift/src/disasm/tests.rs`, ROADMAP D664).
+
 Carried in this tree, not yet in the fork (sleigh-config pull request owed):
 every AArch64 LSE read-modify-write (`ld<op>`, `st<op>`, `swp` at each size) and
 every `cas` and `casp` brackets its load and store with `AtomicBegin()` and

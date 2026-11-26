@@ -1154,7 +1154,8 @@ fn narrow(
                 CompareKind::LessEqual => CompareKind::Less,
                 CompareKind::Equal => CompareKind::NotEqual,
                 CompareKind::NotEqual => CompareKind::Equal,
-                kind => kind,
+                CompareKind::SignedLess => CompareKind::SignedLessEqual,
+                CompareKind::SignedLessEqual => CompareKind::SignedLess,
             },
             !mirrored,
         ),
@@ -1182,14 +1183,21 @@ fn narrow(
         Some(limit) => range.meet(&StridedInterval::interval(width, limit, ceiling)),
         None => StridedInterval::bottom(width),
     };
-    // Only what the unsigned comparisons prove is taken: a signed one says
-    // nothing about an unsigned range without knowing the sign.
+    // At or above a non-negative bound a signed value's top bit is clear (`js` not taken: Intel SDM
+    // Vol. 1 3.4.3.1), so it is unsigned in [bound, 2^(N-1) - 1]; any other signed test proves nothing.
+    let largest = ceiling / 2;
+    let at_least = |least: Option<u64>| match least.filter(|_| high <= largest) {
+        Some(least) => range.meet(&StridedInterval::interval(width, least, largest)),
+        None => range,
+    };
     match (kind, mirrored) {
         (CompareKind::Equal, _) => range.meet(&bound),
         (CompareKind::Less, false) => below(high.checked_sub(1)),
         (CompareKind::LessEqual, false) => below(Some(high)),
         (CompareKind::Less, true) => above(low.checked_add(1)),
         (CompareKind::LessEqual, true) => above(Some(low)),
+        (CompareKind::SignedLess, true) => at_least(low.checked_add(1)),
+        (CompareKind::SignedLessEqual, true) => at_least(Some(low)),
         _ => range,
     }
 }
@@ -2571,5 +2579,102 @@ mod tests {
         let blocks = [entry_block, head_block, body_block, SSABlock::new(exit, 16)];
         let (ranges, graph) = solve_over(&blocks, cfg);
         assert_eq!(range_of(&ranges, &graph, &x).bounds(), Some((0, 7)));
+    }
+
+    /// A signed test of a loaded byte against a constant, taken to `taken` and falling to `fell`:
+    /// the zero extension each side writes of the byte.
+    fn signed_guard(
+        compare: fn(SSAVar, SSAVar) -> crate::op::SSAOp<SSAVar>,
+    ) -> [StridedInterval; 2] {
+        let (entry, taken, fell) = (0x1000, 0x1010, 0x1020);
+        let byte = var("dil", 1, 1);
+        let guard = var("guard", 1, 1);
+        let mut head = SSABlock::new(entry, 16);
+        head.push(crate::op::SSAOp::Load {
+            dst: byte.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: var("rdi", 0, 8),
+        });
+        head.push(compare(guard.clone(), byte.clone()));
+        head.push(crate::op::SSAOp::CBranch {
+            target: constant(taken, 8),
+            cond: guard,
+        });
+        let side = |addr: u64, name: &str| {
+            let mut block = SSABlock::new(addr, 16);
+            block.push(crate::op::SSAOp::IntZExt {
+                dst: var(name, 1, 4),
+                src: byte.clone(),
+            });
+            block
+        };
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: taken,
+                        false_target: fell,
+                    },
+                ),
+                (taken, BlockTerminator::Return),
+                (fell, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, side(taken, "taken"), side(fell, "fell")];
+        let function = SSAFunction::from_exact_test_blocks(&blocks, cfg);
+        let prep = function.prep_facts_for_test();
+        let graph = SsaGraph::from_function(&function);
+        let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
+        let ranges = solve_value_ranges(
+            &graph,
+            crate::semantic::BuildFacts::bare(&function),
+            Some(&prep),
+            &predicates,
+        );
+        ["taken", "fell"].map(|name| range_of(&ranges, &graph, &var(name, 1, 4)))
+    }
+
+    /// `js` not taken (`!(x s< 0)`), `x s> 5` and `3 s<= x` leave the byte's top bit clear; a
+    /// signed test below a bound, or at or above a negative one, proves no unsigned range (D648).
+    #[test]
+    fn a_signed_test_at_or_above_a_non_negative_bound_clears_the_top_bit() {
+        let all = Some((0, 255));
+        let below_zero = |guard, x| crate::op::SSAOp::IntSLess {
+            dst: guard,
+            a: x,
+            b: constant(0, 1),
+        };
+        let [taken, fell] = signed_guard(below_zero);
+        assert_eq!((taken.bounds(), fell.bounds()), (all, Some((0, 127))));
+        let above_five = |guard, x| crate::op::SSAOp::IntSLess {
+            dst: guard,
+            a: constant(5, 1),
+            b: x,
+        };
+        let [taken, fell] = signed_guard(above_five);
+        assert_eq!((taken.bounds(), fell.bounds()), (Some((6, 127)), all));
+        let at_most_nine = |guard, x| crate::op::SSAOp::IntSLessEqual {
+            dst: guard,
+            a: x,
+            b: constant(9, 1),
+        };
+        let [taken, fell] = signed_guard(at_most_nine);
+        assert_eq!((taken.bounds(), fell.bounds()), (all, Some((10, 127))));
+        let from_three = |guard, x| crate::op::SSAOp::IntSLessEqual {
+            dst: guard,
+            a: constant(3, 1),
+            b: x,
+        };
+        let [taken, fell] = signed_guard(from_three);
+        assert_eq!((taken.bounds(), fell.bounds()), (Some((3, 127)), all));
+        let below_minus_sixteen = |guard, x| crate::op::SSAOp::IntSLess {
+            dst: guard,
+            a: x,
+            b: constant(0xf0, 1),
+        };
+        let [taken, fell] = signed_guard(below_minus_sixteen);
+        assert_eq!((taken.bounds(), fell.bounds()), (all, all));
     }
 }

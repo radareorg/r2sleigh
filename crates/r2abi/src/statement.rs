@@ -80,8 +80,9 @@ pub struct Posture {
     pub relro: Option<Relro>,
     /// The dynamic linker `PT_INTERP` names (empty where the header holds no readable path).
     pub interpreter: Option<String>,
-    /// No `PT_INTERP` and no `PT_DYNAMIC`: nothing relocates this image but its own start-up.
-    pub statically_linked: bool,
+    /// `Some(true)`: no `PT_INTERP`, and no `PT_DYNAMIC` or no `DT_NEEDED` with `DF_1_PIE`; `Some(false)`:
+    /// `PT_INTERP`, `DT_NEEDED` or `DT_SONAME`; otherwise unstated. Read only by `i`.
+    pub statically_linked: Option<bool>,
 }
 
 /// Where the loader places an image, as its header states it (gABI chapter 5, "Base Address").

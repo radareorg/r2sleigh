@@ -73,7 +73,7 @@
 0pack pdd @ 0x0062ecf0 | analysed.reused | 1
 0pack pdd @ 0x0062ecf0 | call_boundaries.computed | 255
 0pack pdd @ 0x0062ecf0 | call_boundaries.recomputed | 0
-0pack pdd @ 0x0062ecf0 | call_boundaries.reused | 11359
+0pack pdd @ 0x0062ecf0 | call_boundaries.reused | 11369
 0pack pdd @ 0x0062ecf0 | callee_reads.computed | 47
 0pack pdd @ 0x0062ecf0 | callee_reads.recomputed | 0
 0pack pdd @ 0x0062ecf0 | callee_reads.reused | 144
@@ -99,7 +99,7 @@
 0pack pdd @ 0x0062ecf0 | site_fates_never_joined | 0
 0pack pdd @ 0x0062ecf0 | site_fates_relifted | 0
 0pack pdd @ 0x0062ecf0 | table_seals | 547
-0pack pdd @ 0x0062ecf0 | walked.computed | 3393
+0pack pdd @ 0x0062ecf0 | walked.computed | 3397
 0pack pdd @ 0x0062ecf0 | walked.recomputed | 0
 0pack pdd @ 0x0062ecf0 | walked.reused | 6
 bash aa; pdd @ 0x2e630 | analysed.computed | 1
