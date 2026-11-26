@@ -151,3 +151,30 @@ fn a_record_its_pointer_field_leads_back_to_is_refused() {
     assert!(!text.contains("->f_"), "{text}");
     assert!(text.contains("(Recursive)"), "{text}");
 }
+
+/// `s = p->f_8; d = p->f_10; movsb; s->f_4, d->f_8 read`: two loaded records whose first access is
+/// one instruction, each with its own layout.
+const ONE_FIRST_ACCESS: &[u8] = &[
+    0x48, 0x89, 0xf8, // 1000 mov rax, rdi
+    0x48, 0x8b, 0x70, 0x08, // 1003 mov rsi, [rax + 8]
+    0x48, 0x8b, 0x78, 0x10, // 1007 mov rdi, [rax + 0x10]
+    0x49, 0x89, 0xf0, // 100b mov r8, rsi
+    0x49, 0x89, 0xf9, // 100e mov r9, rdi
+    0xa4, // 1011 movsb
+    0x41, 0x8b, 0x40, 0x04, // 1012 mov eax, [r8 + 4]
+    0x49, 0x03, 0x41, 0x08, // 1016 add rax, [r9 + 8]
+    0xc3, // 101a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 101b padding
+];
+
+/// Two loaded records first accessed by one instruction get two tags, and each keeps its layout.
+#[test]
+fn two_records_first_accessed_by_one_instruction_keep_their_own_layouts() {
+    let text = rendered(ONE_FIRST_ACCESS, 0x1b);
+    assert!(text.contains("struct fcn_1000_at_1011 {"), "{text}");
+    assert!(text.contains("struct fcn_1000_at_1011_1 {"), "{text}");
+    assert!(text.contains("tmp_1003_8_1)->f_4"), "{text}");
+    assert!(text.contains("tmp_1007_8_1)->f_8"), "{text}");
+    assert!(!text.contains("tmp_1003_8_1)->f_8"), "{text}");
+}

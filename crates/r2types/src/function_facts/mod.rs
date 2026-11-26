@@ -1143,10 +1143,26 @@ impl SourceOwnedFunctionFacts {
             spans: record.spans.clone(),
             refused: record.refused.clone(),
         };
+        // A tag names one definition: a second is a namer bug, refused so no member reads through
+        // another record's layout.
+        let mut definitions = BTreeMap::new();
+        let mut clashed = BTreeSet::new();
+        for record in solved.classes.iter().flatten() {
+            if (definitions.insert(record.tag.clone(), record.definition.clone())).is_some() {
+                clashed.insert(record.tag.clone());
+            }
+        }
+        debug_assert!(clashed.is_empty(), "record tags named twice: {clashed:?}");
+        for tag in clashed {
+            r2il::refusal_evidence!(
+                "record",
+                "{:#x} {tag}: DuplicateTag",
+                source.function().entry
+            );
+            definitions.remove(&tag);
+        }
         enriched.types.records = crate::Records {
-            definitions: (solved.classes.iter().flatten())
-                .map(|record| (record.tag.clone(), record.definition.clone()))
-                .collect(),
+            definitions,
             parameters: (solved.records.iter())
                 .map(|(slot, record)| (*slot, stated(record)))
                 .collect(),
