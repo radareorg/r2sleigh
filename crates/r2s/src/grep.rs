@@ -12,8 +12,7 @@
 //! No character the grammar gives a meaning is matched as text: it is read as
 //! grammar or the grep is refused.
 //!
-//! Each line is read as radare2 reads it, without its ANSI escapes, and under
-//! `scr.color.grep=true` a whole kept line is printed with them. The one
+//! Each line is read as radare2 reads it, without its ANSI escapes. The one
 //! line radare2 would print broken, where an escape takes the first byte of a
 //! longer character with it, is refused when the grep meets it, after the
 //! command ran.
@@ -1121,8 +1120,7 @@ impl Grep {
     ///
     /// `text` is what the command printed, every line ended by a newline, and
     /// so is what the grep prints: an empty line is a line, and no line is
-    /// nothing at all. Under `painted` (`scr.color.grep`) a kept whole line is
-    /// printed with its escapes and still read without them.
+    /// nothing at all. `painted` (`scr.color.grep`) prints a whole line kept.
     pub(crate) fn apply(&self, text: &str, painted: bool) -> Result<String, String> {
         let lines = self.select(text, painted)?;
         let lines = self.window(lines);
