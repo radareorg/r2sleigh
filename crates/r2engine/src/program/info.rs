@@ -129,12 +129,13 @@ impl Argument {
 }
 
 impl FunctionInfo {
-    /// Read one prepared function and the type analysis sealed from it.
+    /// Read one prepared function and the type analysis sealed from it, over the walk's blocks.
     pub(crate) fn read(
         entry: u64,
         artifact: &r2ssa::SsaArtifact,
         sealed: &SourceOwnedFunctionFacts,
         noreturn: Option<r2source::Never>,
+        blocks: Vec<Block>,
     ) -> Self {
         let facts = sealed.report();
         let certificates = artifact.certificates();
@@ -146,7 +147,7 @@ impl FunctionInfo {
         let (locals, frame) = locals(artifact, sealed, &entities);
         Self {
             entry,
-            blocks: blocks(artifact),
+            blocks,
             calls: certificates
                 .callsites
                 .values()
@@ -180,41 +181,6 @@ impl FunctionInfo {
             frame,
             noreturn,
             refused: None,
-        }
-    }
-
-    /// The same function with its landing pads' blocks and each call's unwind edge, as `afb` lists
-    /// them (D570); the analysis reads neither. O((b + p) log b).
-    pub(crate) fn hold_pads(&mut self, pads: &crate::body::Pads) {
-        let starts = (self.blocks.iter().map(|block| block.addr))
-            .chain(pads.blocks.iter().map(|block| block.lifted.addr))
-            .collect::<BTreeSet<_>>();
-        // An edge to no block's start is none `afb` lists: a pad rejoining inside a normal block (D598).
-        self.blocks.extend(pads.blocks.iter().map(|block| {
-            Block {
-                addr: block.lifted.addr,
-                size: u64::from(block.lifted.size),
-                instructions: block.lifted.instructions.iter().count(),
-                successors: (block.successors.iter())
-                    .filter(|(_, target)| starts.contains(target))
-                    .count(),
-            }
-        }));
-        self.blocks.sort_unstable_by_key(|block| block.addr);
-        for &(call, pad) in &pads.unwinds {
-            if self
-                .blocks
-                .binary_search_by_key(&pad, |block| block.addr)
-                .is_err()
-            {
-                continue;
-            }
-            let at = self.blocks.partition_point(|block| block.addr <= call);
-            if let Some(block) = at.checked_sub(1).map(|at| &mut self.blocks[at])
-                && call < block.addr + block.size
-            {
-                block.successors += 1;
-            }
         }
     }
 
@@ -305,39 +271,6 @@ impl FunctionInfo {
     pub fn direct_calls(&self) -> usize {
         self.calls.iter().flatten().count()
     }
-}
-
-/// Every block with bytes, the blocks a decided check or branch removed among them, and the instructions
-/// whose spans start inside it.
-fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
-    let function = artifact.function();
-    let starts = artifact
-        .obligations()
-        .native_spans()
-        .values()
-        .map(|span| span.instruction_addr())
-        .collect::<BTreeSet<_>>();
-    let removed = (function.compiler_removed_edges().iter())
-        .chain(function.decided_dead_edges())
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let block = |addr: u64, size: u32| {
-        let edges = removed.range((addr, 0)..=(addr, u64::MAX)).count();
-        Block {
-            addr,
-            size: u64::from(size),
-            instructions: starts.range(addr..addr + u64::from(size)).count(),
-            successors: function.successors(addr).len() + edges,
-        }
-    };
-    let graph = (artifact.graph().blocks.iter()).map(|held| (held.addr, held.size));
-    let gone = (function.compiler_inserted_blocks().iter()).chain(function.decided_dead_blocks());
-    let mut blocks = (graph.chain(gone.map(|(addr, size)| (*addr, *size))))
-        .filter(|(_, size)| *size > 0)
-        .map(|(addr, size)| block(addr, size))
-        .collect::<Vec<_>>();
-    blocks.sort_unstable_by_key(|block| block.addr);
-    blocks
 }
 
 /// Every formal parameter of the one list `pdd` declares (r2ssa's formal facts), named by the one

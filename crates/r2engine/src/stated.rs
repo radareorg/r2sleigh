@@ -147,14 +147,8 @@ impl Code {
     }
 }
 
-/// The `bytes` read at `at` once the loader is done (audit W5).
-///
-/// A word the loader writes with a stated address holds that address; a
-/// field holding its target less its place holds that difference; a word it
-/// writes with no value stated (a base relocation, a reserved table word) is
-/// the file's, which holds its link-time value. An import's word, a
-/// PC-relative field with no target, and an instruction immediate are
-/// unstated. `O(log W + k)` for the `k` writes over the window.
+/// The `bytes` at `at` once the loader is done: each write holds what its encoding states, else the
+/// file's bytes or an unstated range (audit W5). `O(log W + k)` for `k` writes.
 pub fn code(
     writes: &[crate::program::LoaderWrite],
     at: u64,
@@ -166,23 +160,33 @@ pub fn code(
     let first = writes.partition_point(|write| write.end() <= at);
     let mut unstated = Vec::new();
     for write in writes[first..].iter().take_while(|write| write.place < end) {
-        let held = match (write.encoding, &write.kind) {
+        let inside = write.place >= at && write.end() <= end;
+        let from = write.place.wrapping_sub(at) as usize;
+        let encoded = match (write.encoding, &write.kind) {
             (Encoding::Word, WriteKind::Unknown | WriteKind::Reserved | WriteKind::Copy { .. }) => {
                 continue;
             }
-            (Encoding::Word, _) => write.target(),
+            (Encoding::Word, _) => {
+                (write.target()).and_then(|value| encode(value, write.width, endian))
+            }
             (Encoding::FromPlace, _) => write
                 .target()
                 .map(|target| target.wrapping_sub(write.place))
-                .filter(|field| fits(*field, write.width)),
-            (Encoding::Typed, _) => None,
+                .filter(|field| fits(*field, write.width))
+                .and_then(|value| encode(value, write.width, endian)),
+            // An AArch64 instruction is little-endian whatever the data's order.
+            (Encoding::Field(field), _) if inside => {
+                let word = bytes[from..from + write.width as usize].try_into().ok();
+                (word.map(u32::from_le_bytes).zip(write.target()))
+                    .and_then(|(insn, target)| field.patch(insn, write.place, target))
+                    .map(|insn| insn.to_le_bytes().to_vec())
+            }
+            (Encoding::Field(_) | Encoding::Typed, _) => None,
         };
-        let encoded = held.and_then(|value| encode(value, write.width, endian));
-        let (Some(encoded), true) = (encoded, write.place >= at && write.end() <= end) else {
+        let (Some(encoded), true) = (encoded, inside) else {
             unstated.push(write.place..write.end());
             continue;
         };
-        let from = (write.place - at) as usize;
         bytes[from..from + encoded.len()].copy_from_slice(&encoded);
     }
     Code { bytes, unstated }
@@ -251,5 +255,76 @@ mod tests {
             code.unstated(&(0x1c..0x1d)),
             "0x1000 - 0x1c does not fit a byte"
         );
+    }
+
+    /// wc.o's `adrp x9; add x9, x9, :lo12:` against `.bss` at 0x08001bd0 reads as radare2 applies it
+    /// (`090000b0 29412f91`), and `bl` takes its word distance; a branch out of reach stays unstated.
+    #[test]
+    fn an_aarch64_immediate_holds_its_target_as_its_relocation_type_encodes_it() {
+        use r2abi::statement::InstructionField as F;
+        let (bss, place) = (WriteKind::Absolute(0x0800_1bd0), 0x0800_0118);
+        let writes = [
+            write(
+                place,
+                4,
+                bss.clone(),
+                Encoding::Field(F::Page21 { checked: true }),
+            ),
+            write(place + 4, 4, bss, Encoding::Field(F::Lo12 { shift: 0 })),
+            write(
+                place + 8,
+                4,
+                WriteKind::Absolute(place - 0x400),
+                Encoding::Field(F::Branch26),
+            ),
+            write(
+                place + 12,
+                4,
+                WriteKind::Absolute(place + (1 << 28)),
+                Encoding::Field(F::Branch26),
+            ),
+        ];
+        let words: [u32; 4] = [0x9000_0009, 0x9100_0129, 0x9400_0000, 0x9400_0000];
+        let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        // Big-endian data leaves the instruction words little-endian.
+        let code = code(&writes, place, bytes, r2il::Endianness::Big);
+        let held = (code.bytes.chunks(4))
+            .map(|word| u32::from_le_bytes(word.try_into().expect("a word")))
+            .collect::<Vec<_>>();
+        assert_eq!(held, [0xb000_0009, 0x912f_4129, 0x97ff_fefe, 0x9400_0000]);
+        assert!(!code.unstated(&(place..place + 12)));
+        assert!(
+            code.unstated(&(place + 12..place + 16)),
+            "bl reaches 128 MiB"
+        );
+    }
+
+    #[test]
+    fn an_aarch64_field_refuses_a_value_it_cannot_hold() {
+        use r2abi::statement::InstructionField as F;
+        // ldr x0, [x1, :lo12:] of a target 4 bytes past a doubleword.
+        assert_eq!(F::Lo12 { shift: 3 }.patch(0xf940_0020, 0, 0x1004), None);
+        assert_eq!(
+            F::Lo12 { shift: 3 }.patch(0xf940_0020, 0, 0x1008),
+            Some(0xf940_0420)
+        );
+        // movz x0, #:abs_g0: of a value past 16 bits; the _NC type keeps the low half.
+        let movz = 0xd280_0000;
+        let wide = F::MovW {
+            group: 0,
+            checked: true,
+        };
+        assert_eq!(wide.patch(movz, 0, 0x1_2345), None);
+        let narrow = F::MovW {
+            group: 0,
+            checked: false,
+        };
+        assert_eq!(narrow.patch(movz, 0, 0x1_2345), Some(movz | 0x2345 << 5));
+        // b.eq one word back, and a misaligned branch.
+        assert_eq!(
+            F::Branch19.patch(0x5400_0000, 0x1004, 0x1000),
+            Some(0x54ff_ffe0)
+        );
+        assert_eq!(F::Branch19.patch(0x5400_0000, 0x1004, 0x1002), None);
     }
 }

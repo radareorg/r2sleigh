@@ -44,6 +44,7 @@ mod pointee_widths;
 mod ranges;
 mod references;
 mod rendered;
+mod replay;
 mod result_lanes;
 mod result_note;
 mod result_reads;

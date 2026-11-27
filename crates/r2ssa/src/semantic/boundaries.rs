@@ -3241,7 +3241,7 @@ mod tests {
             .expect("the guard's read");
         let mut inserted = crate::dense::IdSet::default();
         inserted.insert(load);
-        function.record_compiler_inserted(inserted, BTreeMap::new(), BTreeSet::new());
+        function.record_compiler_inserted(inserted, BTreeMap::new());
         let sealed = crate::function::Lifted::new(function)
             .validate()
             .expect("it validates")

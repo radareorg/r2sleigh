@@ -3513,16 +3513,10 @@ pub struct SSAFunction {
     compiler_inserted: crate::dense::IdSet<crate::arena::OpId>,
     /// The failure blocks a decided compiler-inserted check removed, by address and byte size; their instructions stay owed.
     compiler_inserted_blocks: BTreeMap<u64, u32>,
-    /// The edges those checks removed, (from, to): the source's successors the graph no longer holds.
-    compiler_removed_edges: BTreeSet<(u64, u64)>,
     /// Each decided canary check's `reload - guard` and the block its passing edge alone enters.
     passing_differences: Vec<(crate::value_table::VarId, u64)>,
     /// Every decided canary check's difference, sorted: a write no C expression defines.
     checked_differences: Vec<crate::value_table::VarId>,
-    /// The blocks SCCP dropped as unreachable after deciding a branch, by address and byte size; they owe no obligation.
-    decided_dead_blocks: BTreeMap<u64, u32>,
-    /// The edges SCCP dropped with them, (from, to).
-    decided_dead_edges: BTreeSet<(u64, u64)>,
     /// The premises a rewrite of this function relied on, whatever later became of what it rewrote.
     premises: BTreeSet<r2source::Premise>,
     /// What its own result's closed-world decision takes for granted: the result's, not the body's (D592).
@@ -3988,11 +3982,8 @@ impl Clone for SSAFunction {
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
-            compiler_removed_edges: self.compiler_removed_edges.clone(),
             passing_differences: self.passing_differences.clone(),
             checked_differences: self.checked_differences.clone(),
-            decided_dead_blocks: self.decided_dead_blocks.clone(),
-            decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
             result_premises: self.result_premises.clone(),
             callee_premises: Arc::clone(&self.callee_premises),
@@ -4744,11 +4735,9 @@ impl SSAFunction {
         &mut self,
         ops: crate::dense::IdSet<crate::arena::OpId>,
         blocks: BTreeMap<u64, u32>,
-        edges: BTreeSet<(u64, u64)>,
     ) {
         self.compiler_inserted.extend(ops.iter());
         self.compiler_inserted_blocks.extend(blocks);
-        self.compiler_removed_edges.extend(edges);
     }
 
     pub(crate) fn record_passing_differences(
@@ -4837,30 +4826,6 @@ impl SSAFunction {
     /// The failure blocks a decided compiler-inserted check removed.
     pub fn compiler_inserted_blocks(&self) -> &BTreeMap<u64, u32> {
         &self.compiler_inserted_blocks
-    }
-
-    /// The blocks a decided branch left unreachable, which the function's bytes still hold.
-    pub fn decided_dead_blocks(&self) -> &BTreeMap<u64, u32> {
-        &self.decided_dead_blocks
-    }
-
-    /// The edges a decided branch dropped, (from, to), in address order.
-    pub fn decided_dead_edges(&self) -> &BTreeSet<(u64, u64)> {
-        &self.decided_dead_edges
-    }
-
-    pub(crate) fn record_decided_dead(
-        &mut self,
-        blocks: BTreeMap<u64, u32>,
-        edges: BTreeSet<(u64, u64)>,
-    ) {
-        self.decided_dead_blocks.extend(blocks);
-        self.decided_dead_edges.extend(edges);
-    }
-
-    /// The edges a decided check removed, (from, to), in address order.
-    pub fn compiler_removed_edges(&self) -> &BTreeSet<(u64, u64)> {
-        &self.compiler_removed_edges
     }
 
     /// Set the function name.

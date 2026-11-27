@@ -278,7 +278,7 @@ pub(crate) fn decide(
     }
     let addresses = crate::stack_protector::inserted_addresses(func, &inserted, &[]);
     inserted.extend(addresses.iter());
-    func.record_compiler_inserted(inserted, Default::default(), Default::default());
+    func.record_compiler_inserted(inserted, Default::default());
     func.record_premise(r2source::Premise::UbFreeSource);
 }
 

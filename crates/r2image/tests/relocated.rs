@@ -194,3 +194,22 @@ fn frames_start_where_their_relocations_resolve_and_an_unresolved_one_is_refused
         "the return address at the entry stack pointer"
     );
 }
+
+/// An AArch64 GOT read of `S + A` goes through the slot GDAT(S+A), which holds `S + A`, and no addend moves the field off it.
+#[test]
+fn an_aarch64_got_read_of_a_symbol_plus_an_addend_has_its_own_slot() {
+    let bytes = include_bytes!("data/aarch64_got_addend.elf").to_vec();
+    let image = r2image::Image::parse(bytes).expect("an aarch64 relocatable fixture");
+    let gdef = BASE + 0x5c;
+    let slot = |field: u64| match written(&image, field).0 {
+        WriteKind::Absolute(slot) => slot,
+        other => panic!("the field at {field:#x} states {other:?}"),
+    };
+    let (plus, plain, import) = (slot(TEXT + 0x04), slot(TEXT + 0x0c), slot(TEXT + 0x14));
+    assert_eq!(slot(TEXT), plus, "the page and the offset name one slot");
+    assert_eq!(written(&image, plus).0, WriteKind::Absolute(gdef + 8));
+    assert_eq!(written(&image, plain).0, WriteKind::Absolute(gdef));
+    // An import plus an addend has no value the object states, and it is no import's slot.
+    assert_eq!(written(&image, import).0, WriteKind::Unknown);
+    assert!(image.container().import_slots().next().is_none());
+}

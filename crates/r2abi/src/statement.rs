@@ -725,8 +725,10 @@ pub enum Applies {
     PcRelative,
     /// The symbol's linkage entry plus the addend, less the place; a static link of a defined symbol makes it the symbol (`R_X86_64_PLT32`).
     PltRelative,
-    /// A global offset table slot for the symbol, which the static linker creates (`R_X86_64_GOTPCREL`).
+    /// A global offset table slot for the symbol, which the static linker creates, plus the addend (`R_X86_64_GOTPCREL`).
     GotRelative,
+    /// The global offset table slot the static linker creates for the symbol plus the addend: GDAT(S+A) (`R_AARCH64_ADR_GOT_PAGE`).
+    GotEntry,
     /// The symbol plus the addend, or less the place, in an instruction's immediate (`R_AARCH64_CALL26`, `R_ARM_MOVW_ABS_NC`).
     Field,
     /// The address a resolver function returns; the addend is the resolver.
@@ -788,8 +790,101 @@ pub enum Encoding {
     Word,
     /// The bytes are the value less the write's place: a PC-relative field.
     FromPlace,
+    /// An AArch64 instruction's immediate, which [`InstructionField::patch`] writes.
+    Field(InstructionField),
     /// As the psABI states for the record's type: an instruction's immediate, or a type this reader does not decode.
     Typed,
+}
+
+/// The immediate of a little-endian AArch64 instruction word a relocation fills, as the AArch64
+/// ELF psABI's static relocation table states it (ELF for the Arm 64-bit Architecture, 5.7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionField {
+    /// `b`, `bl`: imm26 = (target - place) >> 2.
+    Branch26,
+    /// `b.cond`, `cbz`, `ldr` literal: imm19 at bit 5 = (target - place) >> 2.
+    Branch19,
+    /// `tbz`, `tbnz`: imm14 at bit 5 = (target - place) >> 2.
+    Branch14,
+    /// `adr`: immlo:immhi = target - place.
+    Adr21,
+    /// `adrp`: immlo:immhi = (Page(target) - Page(place)) >> 12; the `_NC` type is unchecked.
+    Page21 { checked: bool },
+    /// `add`, `ldr`, `str`: imm12 at bit 10 = target's low 12 bits >> `shift`, the access's scale.
+    Lo12 { shift: u8 },
+    /// `movz`, `movk`: imm16 at bit 5 = target >> 16 * `group`; the `_NC` types are unchecked.
+    MovW { group: u8, checked: bool },
+}
+
+impl InstructionField {
+    /// `insn` with this field holding `target` as written at `place`, or `None` where the value
+    /// does not fit the field or breaks its alignment. `O(1)`.
+    pub const fn patch(self, insn: u32, place: u64, target: u64) -> Option<u32> {
+        let delta = target.wrapping_sub(place) as i64;
+        let (value, mask) = match self {
+            Self::Branch26 => match scaled(delta, 26) {
+                Some(imm) => (imm, 0x03ff_ffff),
+                None => return None,
+            },
+            Self::Branch19 => match scaled(delta, 19) {
+                Some(imm) => (imm << 5, 0x00ff_ffe0),
+                None => return None,
+            },
+            Self::Branch14 => match scaled(delta, 14) {
+                Some(imm) => (imm << 5, 0x0007_ffe0),
+                None => return None,
+            },
+            Self::Adr21 => match signed(delta, 21) {
+                Some(imm) => (adr(imm), 0x60ff_ffe0),
+                None => return None,
+            },
+            Self::Page21 { checked } => {
+                let pages = ((target & !0xfff).wrapping_sub(place & !0xfff) as i64) >> 12;
+                match (signed(pages, 21), checked) {
+                    (Some(imm), _) => (adr(imm), 0x60ff_ffe0),
+                    (None, false) => (adr(pages as u32), 0x60ff_ffe0),
+                    (None, true) => return None,
+                }
+            }
+            Self::Lo12 { shift } => {
+                let low = target & 0xfff;
+                if low & ((1 << shift) - 1) != 0 {
+                    return None;
+                }
+                (((low >> shift) as u32) << 10, 0x003f_fc00)
+            }
+            Self::MovW { group, checked } => {
+                let shift = 16 * group as u32;
+                if checked && group < 3 && target >> (shift + 16) != 0 {
+                    return None;
+                }
+                ((((target >> shift) & 0xffff) as u32) << 5, 0x001f_ffe0)
+            }
+        };
+        Some((insn & !mask) | (value & mask))
+    }
+}
+
+/// `value`'s low `bits` bits, where it fits a signed field of that width.
+const fn signed(value: i64, bits: u32) -> Option<u32> {
+    let bound = 1i64 << (bits - 1);
+    match -bound <= value && value < bound {
+        true => Some(value as u32 & ((1 << bits) - 1)),
+        false => None,
+    }
+}
+
+/// A word-aligned branch distance in words, where it fits a signed field of `bits`.
+const fn scaled(delta: i64, bits: u32) -> Option<u32> {
+    match delta & 3 {
+        0 => signed(delta >> 2, bits),
+        _ => None,
+    }
+}
+
+/// `adr`'s and `adrp`'s split immediate: immlo at bit 29, immhi at bit 5.
+const fn adr(imm: u32) -> u32 {
+    ((imm & 3) << 29) | (((imm >> 2) & 0x7ffff) << 5)
 }
 
 impl LoaderWrite {
